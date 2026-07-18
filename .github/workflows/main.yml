@@ -1,0 +1,88 @@
+name: Main CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            expected_os: Linux
+            expected_arch: X64
+          - name: Windows x64
+            runner: windows-2022
+            expected_os: Windows
+            expected_arch: X64
+          - name: macOS arm64
+            runner: macos-15
+            expected_os: macOS
+            expected_arch: Arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up MSVC for Ninja
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Verify runner identity
+        shell: pwsh
+        env:
+          EXPECTED_OS: ${{ matrix.expected_os }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          $actualOs = if ($IsLinux) {
+            "Linux"
+          } elseif ($IsWindows) {
+            "Windows"
+          } elseif ($IsMacOS) {
+            "macOS"
+          } else {
+            "Unknown"
+          }
+          $actualArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "Observed OS: $actualOs"
+          Write-Host "Observed architecture: $actualArch"
+          if ($actualOs -ne $env:EXPECTED_OS) {
+            throw "Expected OS $env:EXPECTED_OS, observed $actualOs"
+          }
+          if ($actualArch -ne $env:EXPECTED_ARCH) {
+            throw "Expected architecture $env:EXPECTED_ARCH, observed $actualArch"
+          }
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Report build identities
+        shell: pwsh
+        run: |
+          Write-Host "CMake-generated build identity:"
+          Get-Content build/bennu-build-info.txt
+          Write-Host "CMake CLI:"
+          cmake --version
+          if ($LASTEXITCODE -ne 0) { throw "cmake --version failed" }
+          Write-Host "Ninja CLI:"
+          ninja --version
+          if ($LASTEXITCODE -ne 0) { throw "ninja --version failed" }
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
