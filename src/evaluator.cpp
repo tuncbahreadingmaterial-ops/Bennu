@@ -49,6 +49,18 @@ SourceLocation source_end_location(std::string_view source) {
   return location;
 }
 
+bool source_locations_match(const SourceLocation &left,
+                            const SourceLocation &right) {
+  return left.offset == right.offset && left.line == right.line &&
+         left.column == right.column;
+}
+
+bool tokens_match(const Token &left, const Token &right) {
+  return left.kind == right.kind &&
+         source_locations_match(left.location, right.location) &&
+         left.length == right.length && left.separated == right.separated;
+}
+
 } // namespace
 
 TokenizeResult tokenize(std::string_view source) {
@@ -214,6 +226,48 @@ ParseResult parse_program(std::string_view source,
                 "token stream contains input after an end token"},
       };
     }
+  }
+
+  const TokenizeResult canonical = tokenize(source);
+  if (!canonical.ok) {
+    return ParseResult{
+        false,
+        {},
+        Error{ErrorKind::invalid_program, canonical.error.location,
+              "token stream cannot correspond to source: " +
+                  canonical.error.message},
+    };
+  }
+  std::size_t correspondence_index = 0;
+  while (correspondence_index < tokens.size() &&
+         correspondence_index < canonical.tokens.size()) {
+    if (!tokens_match(tokens[correspondence_index],
+                      canonical.tokens[correspondence_index])) {
+      const SourceLocation location =
+          tokens[correspondence_index].kind == TokenKind::end
+              ? canonical.tokens[correspondence_index].location
+              : tokens[correspondence_index].location;
+      return ParseResult{
+          false,
+          {},
+          Error{ErrorKind::invalid_program, location,
+                "token stream does not match source text"},
+      };
+    }
+    ++correspondence_index;
+  }
+  if (correspondence_index != tokens.size() ||
+      correspondence_index != canonical.tokens.size()) {
+    const SourceLocation location = correspondence_index < tokens.size()
+                                        ? tokens[correspondence_index].location
+                                        : canonical.tokens[correspondence_index]
+                                              .location;
+    return ParseResult{
+        false,
+        {},
+        Error{ErrorKind::invalid_program, location,
+              "token stream does not match source text"},
+    };
   }
 
   std::size_t cursor = 0;

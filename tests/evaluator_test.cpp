@@ -303,6 +303,62 @@ void test_parser_rejects_unknown_public_token_kind() {
         "unknown token kind error preserves the token location");
 }
 
+void test_parser_rejects_omitted_nonwhitespace_source() {
+  const std::string_view source = "5 extra";
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {0, 1, 1}, 1, true},
+      {bennu::TokenKind::end, {source.size(), 1, 8}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects omitted non-whitespace source");
+}
+
+void test_parser_rejects_overlapping_public_token_spans() {
+  const std::string_view source = "555";
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {0, 1, 1}, 2, true},
+      {bennu::TokenKind::integer, {1, 1, 2}, 2, false},
+      {bennu::TokenKind::end, {source.size(), 1, 4}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects overlapping public token spans");
+}
+
+void test_parser_rejects_out_of_order_public_token_spans() {
+  const std::string_view source = "5\n6";
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {2, 2, 1}, 1, true},
+      {bennu::TokenKind::newline, {1, 1, 2}, 1, false},
+      {bennu::TokenKind::integer, {0, 1, 1}, 1, true},
+      {bennu::TokenKind::end, {source.size(), 2, 2}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects out-of-order public token spans");
+}
+
+void test_parser_rejects_public_token_kind_lexeme_mismatch() {
+  const std::string_view source = "xxxxx 5";
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::inc, {0, 1, 1}, 5, true},
+      {bennu::TokenKind::integer, {6, 1, 7}, 1, true},
+      {bennu::TokenKind::end, {source.size(), 1, 8}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects a public token kind that does not match its lexeme");
+}
+
 void test_flat_program_evaluator_handles_nested_prefix_calls() {
   const std::string_view source = "ioata inc 5";
   const bennu::TokenizeResult tokenized = bennu::tokenize(source);
@@ -496,6 +552,10 @@ int main() {
   test_parser_rejects_public_end_token_before_source_end();
   test_parser_rejects_tokens_after_public_end_token();
   test_parser_rejects_unknown_public_token_kind();
+  test_parser_rejects_omitted_nonwhitespace_source();
+  test_parser_rejects_overlapping_public_token_spans();
+  test_parser_rejects_out_of_order_public_token_spans();
+  test_parser_rejects_public_token_kind_lexeme_mismatch();
   test_flat_program_evaluator_handles_nested_prefix_calls();
   test_program_evaluator_rejects_unknown_public_expression_kind();
   test_inc_rejects_overflow_and_array_arguments_at_the_call_site();
