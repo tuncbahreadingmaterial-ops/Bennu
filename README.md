@@ -1,6 +1,6 @@
 # Bennu
 
-Bennu is a data-oriented programming language. This repository currently provides the portable build, test, and command-line foundation; language execution is not implemented yet.
+Bennu is a data-oriented programming language. The repository provides a portable build and command-line foundation plus a reusable Level 1 expression-evaluation core. The core is not wired to the reserved command-line flows yet.
 
 ## Prerequisites
 
@@ -25,3 +25,7 @@ Show the reserved command-line surface on Linux or macOS:
 ```
 
 On Windows, run `./build/bennu.exe --help` from PowerShell. The `repl`, `run`, `emit-c`, and `build` subcommands are reserved for later issues and currently report that they are not implemented with a nonzero exit status.
+
+## Level 1 evaluation core
+
+`include/bennu/evaluator.hpp` exposes plain data structures and free functions for tokenizing, parsing, evaluating, and formatting signed 64-bit integer expressions using `inc` and `ioata`. `bennu_core` is a standard-library-only CMake library target. It has no command-line, prompt, or filesystem behavior.

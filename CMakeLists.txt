@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Bennu LANGUAGES CXX)
 
+add_library(bennu_core src/evaluator.cpp)
+target_include_directories(bennu_core PUBLIC include)
+set_target_properties(bennu_core PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
 add_executable(bennu src/main.cpp)
 set_target_properties(bennu PROPERTIES
   CXX_STANDARD 20
@@ -22,6 +30,15 @@ file(GENERATE
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(bennu_evaluator_tests tests/evaluator_test.cpp)
+  target_link_libraries(bennu_evaluator_tests PRIVATE bennu_core)
+  set_target_properties(bennu_evaluator_tests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(NAME evaluator.unit COMMAND bennu_evaluator_tests)
+
   function(add_cli_contract_test name case_name)
     add_test(
       NAME "cli.${name}"
