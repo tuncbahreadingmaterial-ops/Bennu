@@ -22,6 +22,33 @@ bool is_name_character(char character) {
          character == '_';
 }
 
+bool is_known_token_kind(TokenKind kind) {
+  return kind == TokenKind::integer || kind == TokenKind::inc ||
+         kind == TokenKind::ioata || kind == TokenKind::name ||
+         kind == TokenKind::newline || kind == TokenKind::end;
+}
+
+SourceLocation source_end_location(std::string_view source) {
+  SourceLocation location{0, 1, 1};
+  while (location.offset < source.size()) {
+    if (source[location.offset] == '\r' &&
+        location.offset + 1 < source.size() &&
+        source[location.offset + 1] == '\n') {
+      location.offset += 2;
+      ++location.line;
+      location.column = 1;
+    } else if (source[location.offset] == '\n') {
+      ++location.offset;
+      ++location.line;
+      location.column = 1;
+    } else {
+      ++location.offset;
+      ++location.column;
+    }
+  }
+  return location;
+}
+
 } // namespace
 
 TokenizeResult tokenize(std::string_view source) {
@@ -142,6 +169,49 @@ ParseResult parse_program(std::string_view source,
           {},
           Error{ErrorKind::invalid_program, token.location,
                 "token span is outside the source buffer"},
+      };
+    }
+    if (!is_known_token_kind(token.kind)) {
+      return ParseResult{
+          false,
+          {},
+          Error{ErrorKind::invalid_program, token.location,
+                "token has an unknown kind"},
+      };
+    }
+    if (token.kind == TokenKind::end && token.length != 0) {
+      return ParseResult{
+          false,
+          {},
+          Error{ErrorKind::invalid_program, token.location,
+                "end token must have zero length"},
+      };
+    }
+  }
+  if (tokens.empty() || tokens.back().kind != TokenKind::end) {
+    return ParseResult{
+        false,
+        {},
+        Error{ErrorKind::invalid_program, source_end_location(source),
+              "token stream must end with an end token"},
+    };
+  }
+  const Token &end_token = tokens.back();
+  if (end_token.location.offset != source.size()) {
+    return ParseResult{
+        false,
+        {},
+        Error{ErrorKind::invalid_program, end_token.location,
+              "end token must be at the end of source"},
+    };
+  }
+  for (std::size_t index = 0; index + 1 < tokens.size(); ++index) {
+    if (tokens[index].kind == TokenKind::end) {
+      return ParseResult{
+          false,
+          {},
+          Error{ErrorKind::invalid_program, tokens[index + 1].location,
+                "token stream contains input after an end token"},
       };
     }
   }

@@ -181,6 +181,128 @@ void test_parser_rejects_overflowing_public_token_span() {
         "invalid token span error preserves the supplied location");
 }
 
+void test_parser_rejects_public_token_stream_without_end_token() {
+  const std::string_view source = "5";
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {0, 1, 1}, 1, true},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects a public token stream without an end token");
+  check(parsed.error.location.offset == source.size() &&
+            parsed.error.location.line == 1 &&
+            parsed.error.location.column == 2,
+        "missing end token error identifies the end of source");
+}
+
+void test_parser_rejects_empty_public_token_stream_at_source_end() {
+  const std::string_view source;
+  const std::vector<bennu::Token> tokens;
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects an empty public token stream");
+  check(parsed.error.location.offset == 0 && parsed.error.location.line == 1 &&
+            parsed.error.location.column == 1,
+        "empty token-stream error identifies the empty source end");
+}
+
+void test_parser_locates_missing_end_token_at_multiline_source_end() {
+  const std::string_view source = "5\r\ninc 6";
+  bennu::TokenizeResult tokenized = bennu::tokenize(source);
+  check(tokenized.ok, "multiline source tokenizes before removing its end token");
+  if (!tokenized.ok) {
+    return;
+  }
+  tokenized.tokens.pop_back();
+
+  const bennu::ParseResult parsed =
+      bennu::parse_program(source, tokenized.tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects a multiline token stream without an end token");
+  check(parsed.error.location.offset == source.size() &&
+            parsed.error.location.line == 2 &&
+            parsed.error.location.column == 6,
+        "missing end-token error identifies the exact multiline source end");
+}
+
+void test_parser_rejects_nonzero_length_public_end_token() {
+  const std::string_view source = "5";
+  const bennu::SourceLocation invalid_location{0, 1, 1};
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::end, invalid_location, 1, true},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects a nonzero-length public end token");
+  check(parsed.error.location.offset == invalid_location.offset &&
+            parsed.error.location.line == invalid_location.line &&
+            parsed.error.location.column == invalid_location.column,
+        "invalid end-token length error preserves the supplied location");
+}
+
+void test_parser_rejects_public_end_token_before_source_end() {
+  const std::string_view source = "5 6";
+  const bennu::SourceLocation invalid_location{1, 1, 2};
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {0, 1, 1}, 1, true},
+      {bennu::TokenKind::end, invalid_location, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects an end token before the source ends");
+  check(parsed.error.location.offset == invalid_location.offset &&
+            parsed.error.location.line == invalid_location.line &&
+            parsed.error.location.column == invalid_location.column,
+        "early end-token error preserves the supplied location");
+}
+
+void test_parser_rejects_tokens_after_public_end_token() {
+  const std::string_view source = "5 6";
+  const bennu::SourceLocation trailing_location{2, 1, 3};
+  const std::vector<bennu::Token> tokens{
+      {bennu::TokenKind::integer, {0, 1, 1}, 1, true},
+      {bennu::TokenKind::end, {1, 1, 2}, 0, false},
+      {bennu::TokenKind::integer, trailing_location, 1, true},
+      {bennu::TokenKind::end, {source.size(), 1, 4}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects tokens after a public end token");
+  check(parsed.error.location.offset == trailing_location.offset &&
+            parsed.error.location.line == trailing_location.line &&
+            parsed.error.location.column == trailing_location.column,
+        "token after end error identifies the first ignored token");
+}
+
+void test_parser_rejects_unknown_public_token_kind() {
+  const std::string_view source = "5";
+  const bennu::SourceLocation invalid_location{0, 1, 1};
+  const std::vector<bennu::Token> tokens{
+      {static_cast<bennu::TokenKind>(99), invalid_location, 1, true},
+      {bennu::TokenKind::end, {source.size(), 1, 2}, 0, false},
+  };
+
+  const bennu::ParseResult parsed = bennu::parse_program(source, tokens);
+
+  check(!parsed.ok && parsed.error.kind == bennu::ErrorKind::invalid_program,
+        "parser rejects an unknown public token kind");
+  check(parsed.error.location.offset == invalid_location.offset &&
+            parsed.error.location.line == invalid_location.line &&
+            parsed.error.location.column == invalid_location.column,
+        "unknown token kind error preserves the token location");
+}
+
 void test_flat_program_evaluator_handles_nested_prefix_calls() {
   const std::string_view source = "ioata inc 5";
   const bennu::TokenizeResult tokenized = bennu::tokenize(source);
@@ -367,6 +489,13 @@ int main() {
   test_tokenizer_preserves_kinds_and_source_locations();
   test_parser_builds_flat_postorder_nodes_for_nested_calls();
   test_parser_rejects_overflowing_public_token_span();
+  test_parser_rejects_public_token_stream_without_end_token();
+  test_parser_rejects_empty_public_token_stream_at_source_end();
+  test_parser_locates_missing_end_token_at_multiline_source_end();
+  test_parser_rejects_nonzero_length_public_end_token();
+  test_parser_rejects_public_end_token_before_source_end();
+  test_parser_rejects_tokens_after_public_end_token();
+  test_parser_rejects_unknown_public_token_kind();
   test_flat_program_evaluator_handles_nested_prefix_calls();
   test_program_evaluator_rejects_unknown_public_expression_kind();
   test_inc_rejects_overflow_and_array_arguments_at_the_call_site();
