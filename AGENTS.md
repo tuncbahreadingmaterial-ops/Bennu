@@ -28,21 +28,35 @@ These rules apply to every human and agent contributor working in this repositor
 - Record material design and implementation decisions as they are made in [`doc/decision-diary.md`](doc/decision-diary.md). Each entry must include the date, related GitHub issue, context, decision, alternatives considered, rationale, consequences or follow-up, and validation or evidence.
 - Keep the decision diary append-only. Correct an earlier entry with a new entry rather than silently rewriting history.
 
-### Issue branches and local-main integration
+### Issue branches, local-main integration, and two-stage verification
 
-Coder must use this sequence for every GitHub issue:
+For Issue #6 and later implementation work, create an explicit two-card Hermes Kanban graph before dispatch:
 
-1. Before starting, confirm the working tree is clean and local `main` is current with `origin/main`.
+```text
+Implement #<number> (coder) -> Verify #<number> (chef)
+```
+
+The verification card must name the implementation card as a parent, so it remains dependency-gated until implementation is done. Do not create a second runnable implementation card for the same stage.
+
+The Coder implementation card must use this sequence:
+
+1. Start only after the issue's product dependencies and the shared-main serialization gate are satisfied. Confirm the working tree is clean and local `main` is current with `origin/main`.
 2. Create one dedicated branch named `issue/<number>-<short-slug>` from `main`.
 3. Keep every change for the issue on that branch. Make one or more scoped commits that reference the issue number.
 4. On the issue branch, run the issue's required build, tests, runtime checks, and diff-hygiene checks.
-5. After the worker's validation passes, merge the issue branch into local `main`.
-6. Push the resulting `main` to `origin`.
-7. Do not open a GitHub pull request and do not request or perform GitHub code review. Bennu does not use GitHub pull requests or GitHub code reviews.
-8. Leave the GitHub issue open for Chef. Comment on it with the branch name, issue commit SHA or SHAs, resulting merged `main` SHA, exact changed files, push result, and exact validation evidence. Then block the matching Hermes Kanban card as `review-required` for Chef's independent inspection and product verification.
+5. After Coder's validation passes, merge the issue branch into local `main` and push the resulting `main` to `origin`.
+6. Wait for all required CI on the integrated `main` SHA. Do not open a GitHub pull request and do not request or perform GitHub code review; Bennu uses neither.
+7. Leave the GitHub issue open. Comment on it with the branch name, issue commit SHA or SHAs, resulting merged `main` SHA, exact changed files, push result, exact validation evidence, and required CI URLs and results.
+8. Complete only the implementation card after the merge, push, CI, and durable GitHub handoff all exist. Implementation completion means ready for independent verification, not accepted.
 
-If integration is unsafe because the worktree is dirty, the remote has unexpectedly diverged, the merge conflicts, validation fails, or unrelated changes are present, stop and block the card with evidence instead of forcing the merge. Because issue branches integrate through one shared `main`, normal implementation is serialized to one active Coder issue at a time unless Chef explicitly establishes that independent integration is safe.
+If integration is unsafe because the worktree is dirty, the remote has unexpectedly diverged, the merge conflicts, validation or CI fails, or unrelated changes are present, stop and block the implementation card with evidence instead of forcing integration or marking the stage done.
 
-Local merge is integration, not acceptance. Chef's post-merge verification remains required. If acceptance fails, Chef keeps or reopens the same GitHub issue and returns the same Kanban card with the unmet criteria.
+After its parent completes, the Chef verification card automatically becomes ready. Chef must independently inspect the merged range and acceptance criteria, rerun relevant validation, exercise the required user or runtime behavior, probe adjacent and error cases, and confirm required CI before deciding acceptance. On success, Chef comments on the GitHub issue with exact evidence, closes the issue, and completes the verification card.
+
+On verification failure, Chef keeps or reopens the GitHub issue and records the exact unmet criteria and evidence. The failed stage must not be completed or otherwise represented as accepted. Create a focused Coder correction card and a Chef re-verification card that names the correction card as its parent; the correction and re-verification stages follow the same integration and independent-evidence contracts.
+
+Because Coder integrations share local `main`, allow only one active Coder integration at a time. Chef verification must not overlap an active Coder integration in the same checkout. Concurrent verification is allowed only from an isolated clean checkout that cannot modify or disturb the shared repository state.
+
+Telegram terminal-event subscriptions and the existing three-hour stewardship cron remain notification and reconciliation safeguards. They do not replace the Kanban parent edge and are not the primary implementation-to-verification trigger.
 
 Material decisions include syntax and semantics, data layout, ownership, dependencies, error representation, parsing or execution strategy, testing and benchmark policy, and the selection or rejection of alternative approaches. Routine keystrokes and mechanically implied edits do not need entries.
