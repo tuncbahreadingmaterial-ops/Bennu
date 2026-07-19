@@ -6,6 +6,8 @@
 
 **Implements:** [BENNU-SPEC-0001](bennu-spec-0001-scalar-lifting.md)
 
+**Syntax decision:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
+
 **Purpose:** Decompose the scalar-lifting rewrite into dependency-ordered,
 issue-sized changes that keep integrated `main` buildable and independently
 verifiable.
@@ -231,6 +233,7 @@ primitive set.
 Create focused documentation issues for:
 
 1. **Application and literal syntax**
+   ([BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md))
    - primitive application delimiters and whitespace;
    - Bool, Int, and Double literal grammar;
    - vector literal grammar, including typed empty vectors;

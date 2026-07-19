@@ -6,6 +6,8 @@
 
 **Implementation plan:** [BENNU-SPEC-0001 Implementation Plan](bennu-spec-0001-implementation-plan.md)
 
+**Source syntax:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -44,7 +46,7 @@ This specification does not define:
 - reductions, scans, filters, indexing, axes, or array views;
 - user-defined functions, closures, or partial application;
 - evaluation order for effectful expressions;
-- complete source grammar or final vector-literal syntax;
+- source constructs beyond those defined by BENNU-SPEC-0002;
 - every scalar primitive's domain semantics, including integer division,
   integer overflow, floating-point equality, and NaN comparison;
 - optimizer, allocator, or generated-C implementation strategy; or
@@ -238,23 +240,25 @@ A valid table has:
 An invalid built-in descriptor is an implementation/configuration failure, not
 an ordinary Bennu program error.
 
-## 6. Application notation
+## 6. Application syntax
 
-Examples use the abstract notation:
+BENNU-SPEC-0002 defines the normative source grammar. General primitive calls
+use bracketed application:
 
 ```text
 p[e1 e2 ... ek]
 ```
 
-Unary application may also be shown as:
+Unary calls may also use right-associative prefix application:
 
 ```text
-p[e]
+p e
 ```
 
-This notation specifies semantics after parsing. It does not require a
-particular token adjacency rule or final source grammar. Parenthesized values in
-examples denote vectors, not grouping.
+Thus `inc 5` and `inc[5]` denote the same one-argument call, while a
+multi-argument call such as `add[1 2]` requires brackets. Parenthesized source
+values denote vectors, not grouping. `Bool()`, `Int()`, and `Double()` are the
+source spellings of typed empty vectors.
 
 Right-hand sides such as `Vector<Int>()` expose the semantic element type for
 clarity and are not canonical output text. Section 14 defines ordinary
@@ -365,7 +369,7 @@ Selection uses element types rather than elements, so typed empty vectors work
 without invoking the scalar kernel:
 
 ```text
-add[Vector<Int>() 0.5]
+add[Int() 0.5]
 => Vector<Double>()
 ```
 
@@ -405,10 +409,10 @@ add[10 (1 2 3)]
 add[(10) (1 2 3)]
 => ShapeMismatch: add argument 2 expected shape [1], got [3]
 
-add[Vector<Int>() 10]
+add[Int() 10]
 => Vector<Int>()
 
-add[Vector<Int>() (1)]
+add[Int() (1)]
 => ShapeMismatch: add argument 2 expected shape [0], got [1]
 ```
 
@@ -470,13 +474,13 @@ the selected scalar signature's result type. The scalar kernel is invoked zero
 times.
 
 ```text
-add[Vector<Int>() 10]
+add[Int() 10]
 => Vector<Int>()
 
-add[Vector<Int>() 0.5]
+add[Int() 0.5]
 => Vector<Double>()
 
-equals[Vector<Int>() 10]
+equals[Int() 10]
 => Vector<Bool>()
 ```
 
@@ -485,7 +489,7 @@ result still succeeds because there is no result position at which to invoke
 the kernel. Assuming division by zero is a scalar domain error:
 
 ```text
-divide[Vector<Int>() 0]
+divide[Int() 0]
 => Vector<Int>()
 ```
 
@@ -855,6 +859,12 @@ iota[-3]
 inc[iota[3]]
 => (2 3 4)
 
+inc 5
+=> 6
+
+inc inc 5
+=> 7
+
 add[1 2]
 => 3
 
@@ -891,13 +901,13 @@ add[(1 2) (10 20 30)]
 add[(1 2) (true false)]
 => TypeError
 
-add[Vector<Int>() 0.5]
+add[Int() 0.5]
 => Vector<Double>()
 
-equals[Vector<Int>() 10]
+equals[Int() 10]
 => Vector<Bool>()
 
-divide[Vector<Int>() 0]
+divide[Int() 0]
 => Vector<Int>()
 
 divide[(8 9 10) (2 0 5)]
@@ -1167,13 +1177,14 @@ is specified and implemented.
 
 ## 20. Decisions intentionally delegated to other specifications
 
-The following decisions do not change scalar lifting itself but must be defined
-before their associated primitives or syntax become conforming product surface:
+BENNU-SPEC-0002 resolves the rewrite's application, scalar-literal,
+vector-literal, typed-empty-vector, whitespace, delimiter, line-ending, and
+source-span syntax. The following remaining decisions do not change scalar
+lifting itself but must be defined before their associated primitives or
+product surfaces become conforming:
 
 - which execution profiles Bennu ships and their optional memory or work limits;
 - signed integer overflow behavior per scalar primitive;
 - integer division semantics;
-- scalar floating-point equality and NaN behavior;
-- accepted Double literal spellings and parsing rules;
-- final vector-literal and primitive-application syntax; and
+- scalar floating-point equality and NaN behavior; and
 - multidimensional arrays and general rank polymorphism.
