@@ -15,7 +15,8 @@ set_target_properties(bennu_core PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-add_executable(bennu src/main.cpp)
+add_executable(bennu src/cli_output.cpp src/main.cpp)
+target_include_directories(bennu PRIVATE src)
 target_link_libraries(bennu PRIVATE bennu_core)
 set_target_properties(bennu PROPERTIES
   CXX_STANDARD 20
@@ -65,6 +66,15 @@ if(BUILD_TESTING)
     CXX_EXTENSIONS NO
   )
   add_test(NAME native_builder.unit COMMAND bennu_native_builder_tests)
+
+  add_executable(bennu_stdout_tests tests/stdout_test.cpp src/cli_output.cpp)
+  target_include_directories(bennu_stdout_tests PRIVATE src)
+  set_target_properties(bennu_stdout_tests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(NAME stdout.unit COMMAND bennu_stdout_tests)
 
   add_executable(bennu_fake_c_compiler tests/fake_c_compiler.cpp)
   set_target_properties(bennu_fake_c_compiler PROPERTIES
@@ -168,6 +178,16 @@ if(BUILD_TESTING)
       "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/source_output_alias_contract.cmake"
   )
+  if(EXISTS "/dev/full")
+    add_test(
+      NAME cli.stdout_failure
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+        "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/stdout_failure_contract.cmake"
+    )
+  endif()
   add_test(
     NAME documentation.level1_journeys
     COMMAND
