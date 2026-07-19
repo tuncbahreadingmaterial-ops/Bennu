@@ -169,6 +169,17 @@ if(BUILD_TESTING)
       "-DBENNU_FALLBACK_COMPILER_NAME=${bennu_fallback_compiler_name}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_build_fake_process.cmake"
   )
+  if(WIN32)
+    add_test(
+      NAME cli.windows_unicode_paths
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+        "-DBENNU_FAKE_COMPILER=$<TARGET_FILE:bennu_fake_c_compiler>"
+        "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_unicode_paths.cmake"
+    )
+  endif()
   add_test(
     NAME cli.source_output_alias
     COMMAND
