@@ -1,0 +1,184 @@
+name: v0.1.0 Release
+
+on:
+  push:
+    tags:
+      - v0.1.0
+  workflow_dispatch:
+    inputs:
+      force_failure:
+        description: Fail after target-native package verification
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            expected_os: Linux
+            expected_arch: X64
+            platform: linux-x64
+            executable: build/bennu
+            archive: bennu-v0.1.0-linux-x64.tar.gz
+          - name: Windows x64
+            runner: windows-2022
+            expected_os: Windows
+            expected_arch: X64
+            platform: windows-x64
+            executable: build/bennu.exe
+            archive: bennu-v0.1.0-windows-x64.zip
+          - name: macOS arm64
+            runner: macos-15
+            expected_os: macOS
+            expected_arch: Arm64
+            platform: macos-arm64
+            executable: build/bennu
+            archive: bennu-v0.1.0-macos-arm64.tar.gz
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up MSVC for Ninja
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Verify runner identity
+        shell: pwsh
+        env:
+          EXPECTED_OS: ${{ matrix.expected_os }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          $actualOs = if ($IsLinux) {
+            "Linux"
+          } elseif ($IsWindows) {
+            "Windows"
+          } elseif ($IsMacOS) {
+            "macOS"
+          } else {
+            "Unknown"
+          }
+          $actualArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          Write-Host "Observed OS: $actualOs"
+          Write-Host "Observed architecture: $actualArch"
+          if ($actualOs -ne $env:EXPECTED_OS) {
+            throw "Expected OS $env:EXPECTED_OS, observed $actualOs"
+          }
+          if ($actualArch -ne $env:EXPECTED_ARCH) {
+            throw "Expected architecture $env:EXPECTED_ARCH, observed $actualArch"
+          }
+
+      - name: Verify source provenance
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          git fetch --force --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ($LASTEXITCODE -ne 0) { throw "failed to fetch live origin/main" }
+          $mainSha = (git rev-parse refs/remotes/origin/main).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "failed to resolve live origin/main" }
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            if ($env:EVENT_SHA -ne $mainSha) {
+              throw "dry run must target live main: event $env:EVENT_SHA, main $mainSha"
+            }
+          } elseif ($env:EVENT_NAME -eq "push" -and $env:EVENT_REF -eq "refs/tags/v0.1.0") {
+            $tagSha = (git rev-parse "refs/tags/v0.1.0^{commit}").Trim()
+            if ($LASTEXITCODE -ne 0 -or $tagSha -ne $env:EVENT_SHA) {
+              throw "v0.1.0 does not resolve to the event commit"
+            }
+            git merge-base --is-ancestor $env:EVENT_SHA refs/remotes/origin/main
+            if ($LASTEXITCODE -ne 0) {
+              throw "v0.1.0 commit is not reachable from live main"
+            }
+          } else {
+            throw "unsupported release event: $env:EVENT_NAME $env:EVENT_REF"
+          }
+          Write-Host "Verified source $env:EVENT_SHA against live main $mainSha"
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke, package, inspect, and execute extracted binary
+        shell: pwsh
+        run: >-
+          ./tools/release/package-and-smoke.ps1
+          -BennuExecutable '${{ matrix.executable }}'
+          -Source 'examples/level1.bennu'
+          -License 'LICENSE'
+          -Platform '${{ matrix.platform }}'
+          -Archive '${{ matrix.archive }}'
+
+      - name: Controlled required-job failure
+        if: github.event_name == 'workflow_dispatch' && inputs.force_failure
+        shell: pwsh
+        run: throw "controlled failure requested after package verification"
+
+      - name: Upload verified temporary archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Verify and publish v0.1.0
+    needs:
+      - package
+    if: success() && github.event_name == 'push' && github.ref == 'refs/tags/v0.1.0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Recheck live main provenance
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          test "$(git rev-parse 'refs/tags/v0.1.0^{commit}')" = "$EVENT_SHA"
+          git merge-base --is-ancestor "$EVENT_SHA" refs/remotes/origin/main
+
+      - name: Download target-verified archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: bennu-v0.1.0-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Stage draft, verify exact assets, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_SHA: ${{ github.sha }}
+        run: tools/release/publish-release.sh release-assets "$EVENT_SHA"

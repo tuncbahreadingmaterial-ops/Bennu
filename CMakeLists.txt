@@ -170,4 +170,11 @@ if(BUILD_TESTING)
       "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/documentation_smoke.cmake"
   )
+  add_test(
+    NAME release.workflow_contract
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_workflow.cmake"
+  )
 endif()
