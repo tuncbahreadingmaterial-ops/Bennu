@@ -8,6 +8,8 @@
 
 **Source syntax:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
 
+**Scalar domains:** [BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -47,8 +49,8 @@ This specification does not define:
 - user-defined functions, closures, or partial application;
 - evaluation order for effectful expressions;
 - source constructs beyond those defined by BENNU-SPEC-0002;
-- every scalar primitive's domain semantics, including integer division,
-  integer overflow, floating-point equality, and NaN comparison;
+- scalar domains outside the initial kernels defined by BENNU-SPEC-0003,
+  including integer division;
 - optimizer, allocator, or generated-C implementation strategy; or
 - compatibility with the bootstrap Level 1 implementation.
 
@@ -287,6 +289,9 @@ materializing a converted vector before applying the scalar kernel.
 
 `Int -> Double` conversion uses IEEE 754 round-to-nearest, ties-to-even. The
 conversion is type-based, unconditional, and may lose precision.
+
+BENNU-SPEC-0003 defines the exact conversion result at every Int64 value and
+provides normative bit-pattern vectors at the precision-loss boundaries.
 
 For example, the integer `9007199254740993` is not exactly representable as
 binary64:
@@ -789,6 +794,9 @@ divide[(8 9 10) (2 0 5)]
 
 No partial vector is returned. Scalar calls omit the result-index field.
 
+BENNU-SPEC-0003 defines `integer_overflow`, the sole domain reason used by the
+initial scalar kernels, and the additional structured scalar context.
+
 ## 14. Canonical value formatting
 
 Canonical formatting is observable across the REPL, runner, emitted C, and
@@ -1179,12 +1187,12 @@ is specified and implemented.
 
 BENNU-SPEC-0002 resolves the rewrite's application, scalar-literal,
 vector-literal, typed-empty-vector, whitespace, delimiter, line-ending, and
-source-span syntax. The following remaining decisions do not change scalar
-lifting itself but must be defined before their associated primitives or
-product surfaces become conforming:
+source-span syntax. BENNU-SPEC-0003 resolves the initial kernels' Int overflow,
+binary64 arithmetic, floating equality, NaN, promotion, and domain-error
+semantics. The following remaining decisions do not change scalar lifting
+itself but must be defined before their associated primitives or product
+surfaces become conforming:
 
 - which execution profiles Bennu ships and their optional memory or work limits;
-- signed integer overflow behavior per scalar primitive;
 - integer division semantics;
-- scalar floating-point equality and NaN behavior; and
 - multidimensional arrays and general rank polymorphism.
