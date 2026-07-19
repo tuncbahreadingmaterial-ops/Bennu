@@ -66,7 +66,7 @@ if(NOT "${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
 endif()
 file(READ "${emitted}" emitted_source)
 if(NOT emitted_source MATCHES "#include <inttypes.h>" OR
-   NOT emitted_source MATCHES "bennu_write_array")
+   NOT emitted_source MATCHES "bennu_print_array")
   message(FATAL_ERROR "Unicode emit-c produced unexpected C")
 endif()
 
