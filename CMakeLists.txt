@@ -160,6 +160,15 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_build_fake_process.cmake"
   )
   add_test(
+    NAME cli.source_output_alias
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_FAKE_COMPILER=$<TARGET_FILE:bennu_fake_c_compiler>"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/source_output_alias_contract.cmake"
+  )
+  add_test(
     NAME documentation.level1_journeys
     COMMAND
       "${CMAKE_COMMAND}"
