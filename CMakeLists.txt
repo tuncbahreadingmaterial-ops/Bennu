@@ -206,7 +206,7 @@ if(BUILD_TESTING)
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_workflow.cmake"
   )
-  if(UNIX)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_program(BENNU_BASH_EXECUTABLE bash REQUIRED)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
