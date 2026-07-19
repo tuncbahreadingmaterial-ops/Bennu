@@ -4,6 +4,8 @@
 
 **Related issue:** [#23](https://github.com/tuncbahreadingmaterial-ops/Bennu/issues/23)
 
+**Implementation plan:** [BENNU-SPEC-0001 Implementation Plan](bennu-spec-0001-implementation-plan.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
