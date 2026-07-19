@@ -8,6 +8,8 @@
 
 **Syntax decision:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
 
+**Scalar-domain decision:** [BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md)
+
 **Purpose:** Decompose the scalar-lifting rewrite into dependency-ordered,
 issue-sized changes that keep integrated `main` buildable and independently
 verifiable.
@@ -240,6 +242,7 @@ Create focused documentation issues for:
    - precedence or the explicit absence of precedence; and
    - exact source locations for call and argument diagnostics.
 2. **Scalar primitive domains**
+   ([BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md))
    - `inc` and `add` signed overflow behavior;
    - binary64 arithmetic requirements;
    - `equals` behavior for signed zero, infinities, and NaN; and
