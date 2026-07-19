@@ -20,9 +20,14 @@ endif()
 set(fake_path_directory "${work}/fallback path")
 set(fallback_fake
     "${fake_path_directory}/${BENNU_FALLBACK_COMPILER_NAME}")
+set(relative_path_directory "${work}/relative path & $(touch sentinel)")
+set(relative_named_fake "${relative_path_directory}/relative-cc")
+set(relative_fallback_fake
+    "${relative_path_directory}/${BENNU_FALLBACK_COMPILER_NAME}")
 set(empty_path "${work}/empty path")
 file(REMOVE_RECURSE "${work}")
-file(MAKE_DIRECTORY "${work}" "${fake_path_directory}" "${empty_path}")
+file(MAKE_DIRECTORY "${work}" "${fake_path_directory}"
+                    "${relative_path_directory}" "${empty_path}")
 if(WIN32)
   file(MAKE_DIRECTORY "${fake_copy_directory}")
 endif()
@@ -30,6 +35,8 @@ file(WRITE "${valid_source}" "ioata 5\ninc 5\n")
 file(WRITE "${invalid_source}" "inc 5\nwat\n")
 configure_file("${BENNU_FAKE_COMPILER}" "${fake_copy}" COPYONLY)
 configure_file("${BENNU_FAKE_COMPILER}" "${fallback_fake}" COPYONLY)
+configure_file("${BENNU_FAKE_COMPILER}" "${relative_named_fake}" COPYONLY)
+configure_file("${BENNU_FAKE_COMPILER}" "${relative_fallback_fake}" COPYONLY)
 
 function(assert_clean context)
   file(GLOB leftovers "${work}/*.bennu-build.tmp*"
@@ -114,6 +121,72 @@ if(NOT "${relative_exit}" STREQUAL "0" OR NOT relative_stdout STREQUAL "" OR
     "stdout: [${relative_stdout}]\nstderr: [${relative_stderr}]")
 endif()
 assert_clean("relative explicit compiler success")
+
+if(UNIX)
+  # Bare compiler names found through a relative PATH entry retain caller-directory
+  # lookup semantics after Bennu enters the isolated build directory.
+  file(RELATIVE_PATH relative_path_entry "${work}" "${relative_path_directory}")
+  foreach(selection explicit environment fallback)
+    set(relative_output
+        "${work}/relative PATH ${selection}${BENNU_EXECUTABLE_SUFFIX}")
+    set(relative_trace "${work}/relative PATH ${selection} trace.txt")
+    file(REMOVE "${relative_output}" "${relative_trace}" "${sentinel}")
+    if(selection STREQUAL "explicit")
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
+                "PATH=${relative_path_entry}"
+                "BENNU_FAKE_CC_MODE=success"
+                "BENNU_FAKE_CC_TRACE=${relative_trace}"
+                "${BENNU_EXECUTABLE}" build "${valid_source}"
+                -o "${relative_output}" --cc relative-cc
+        WORKING_DIRECTORY "${work}"
+        RESULT_VARIABLE relative_path_exit
+        OUTPUT_VARIABLE relative_path_stdout
+        ERROR_VARIABLE relative_path_stderr)
+    elseif(selection STREQUAL "environment")
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "PATH=${relative_path_entry}" "CC=relative-cc"
+                "BENNU_FAKE_CC_MODE=success"
+                "BENNU_FAKE_CC_TRACE=${relative_trace}"
+                "${BENNU_EXECUTABLE}" build "${valid_source}"
+                -o "${relative_output}"
+        WORKING_DIRECTORY "${work}"
+        RESULT_VARIABLE relative_path_exit
+        OUTPUT_VARIABLE relative_path_stdout
+        ERROR_VARIABLE relative_path_stderr)
+    else()
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
+                "PATH=${relative_path_entry}"
+                "BENNU_FAKE_CC_MODE=success"
+                "BENNU_FAKE_CC_TRACE=${relative_trace}"
+                "${BENNU_EXECUTABLE}" build "${valid_source}"
+                -o "${relative_output}"
+        WORKING_DIRECTORY "${work}"
+        RESULT_VARIABLE relative_path_exit
+        OUTPUT_VARIABLE relative_path_stdout
+        ERROR_VARIABLE relative_path_stderr)
+    endif()
+    if(NOT "${relative_path_exit}" STREQUAL "0" OR
+       NOT relative_path_stdout STREQUAL "" OR
+       NOT relative_path_stderr STREQUAL "" OR
+       NOT EXISTS "${relative_output}" OR NOT EXISTS "${relative_trace}" OR
+       EXISTS "${sentinel}")
+      message(FATAL_ERROR
+        "relative PATH ${selection} compiler failed\nexit: ${relative_path_exit}\n"
+        "stdout: [${relative_path_stdout}]\nstderr: [${relative_path_stderr}]")
+    endif()
+    file(READ "${relative_trace}" relative_path_trace)
+    if(NOT relative_path_trace MATCHES "-std=c11" OR
+       NOT relative_path_trace MATCHES
+           "relative PATH ${selection}.*bennu-build.tmp.*program")
+      message(FATAL_ERROR
+        "relative PATH ${selection} argument boundaries mismatch: ${relative_path_trace}")
+    endif()
+    assert_clean("relative PATH ${selection} success")
+  endforeach()
+endif()
 
 # CC is selected when --cc is absent.
 file(REMOVE "${trace}" "${output}")
