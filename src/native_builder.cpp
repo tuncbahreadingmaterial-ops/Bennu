@@ -188,8 +188,11 @@ std::string resolve_path_executable(std::string_view executable) {
     std::string candidate = directory.empty() ? "." : std::string(directory);
     candidate += '/';
     candidate += executable;
-    if (access(candidate.c_str(), X_OK) == 0) {
-      std::error_code error;
+    std::error_code error;
+    const std::filesystem::file_status status =
+        std::filesystem::status(candidate, error);
+    if (!error && std::filesystem::is_regular_file(status) &&
+        access(candidate.c_str(), X_OK) == 0) {
       const std::filesystem::path absolute =
           std::filesystem::absolute(std::filesystem::path(candidate), error);
       if (!error) {

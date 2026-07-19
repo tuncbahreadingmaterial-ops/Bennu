@@ -21,6 +21,7 @@ set(fake_path_directory "${work}/fallback path")
 set(fallback_fake
     "${fake_path_directory}/${BENNU_FALLBACK_COMPILER_NAME}")
 set(relative_path_directory "${work}/relative path & $(touch sentinel)")
+set(relative_path_blocker_directory "${work}/earlier relative PATH entry")
 set(relative_named_fake "${relative_path_directory}/relative-cc")
 set(relative_fallback_fake
     "${relative_path_directory}/${BENNU_FALLBACK_COMPILER_NAME}")
@@ -28,6 +29,11 @@ set(empty_path "${work}/empty path")
 file(REMOVE_RECURSE "${work}")
 file(MAKE_DIRECTORY "${work}" "${fake_path_directory}"
                     "${relative_path_directory}" "${empty_path}")
+if(UNIX)
+  file(MAKE_DIRECTORY
+       "${relative_path_blocker_directory}/relative-cc"
+       "${relative_path_blocker_directory}/${BENNU_FALLBACK_COMPILER_NAME}")
+endif()
 if(WIN32)
   file(MAKE_DIRECTORY "${fake_copy_directory}")
 endif()
@@ -124,8 +130,13 @@ assert_clean("relative explicit compiler success")
 
 if(UNIX)
   # Bare compiler names found through a relative PATH entry retain caller-directory
-  # lookup semantics after Bennu enters the isolated build directory.
+  # lookup semantics after Bennu enters the isolated build directory. An earlier
+  # searchable directory with the same name is skipped like POSIX PATH launch.
+  file(RELATIVE_PATH relative_path_blocker_entry "${work}"
+                     "${relative_path_blocker_directory}")
   file(RELATIVE_PATH relative_path_entry "${work}" "${relative_path_directory}")
+  set(relative_path
+      "${relative_path_blocker_entry}:${relative_path_entry}")
   foreach(selection explicit environment fallback)
     set(relative_output
         "${work}/relative PATH ${selection}${BENNU_EXECUTABLE_SUFFIX}")
@@ -134,7 +145,7 @@ if(UNIX)
     if(selection STREQUAL "explicit")
       execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
-                "PATH=${relative_path_entry}"
+                "PATH=${relative_path}"
                 "BENNU_FAKE_CC_MODE=success"
                 "BENNU_FAKE_CC_TRACE=${relative_trace}"
                 "${BENNU_EXECUTABLE}" build "${valid_source}"
@@ -146,7 +157,7 @@ if(UNIX)
     elseif(selection STREQUAL "environment")
       execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env
-                "PATH=${relative_path_entry}" "CC=relative-cc"
+                "PATH=${relative_path}" "CC=relative-cc"
                 "BENNU_FAKE_CC_MODE=success"
                 "BENNU_FAKE_CC_TRACE=${relative_trace}"
                 "${BENNU_EXECUTABLE}" build "${valid_source}"
@@ -158,7 +169,7 @@ if(UNIX)
     else()
       execute_process(
         COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
-                "PATH=${relative_path_entry}"
+                "PATH=${relative_path}"
                 "BENNU_FAKE_CC_MODE=success"
                 "BENNU_FAKE_CC_TRACE=${relative_trace}"
                 "${BENNU_EXECUTABLE}" build "${valid_source}"
