@@ -10,6 +10,18 @@ if(NOT DEFINED BENNU_SOURCE_DIR)
   message(FATAL_ERROR "BENNU_SOURCE_DIR is required")
 endif()
 
+if(NOT DEFINED BENNU_C_COMPILER)
+  message(FATAL_ERROR "BENNU_C_COMPILER is required")
+endif()
+
+if(NOT DEFINED BENNU_C_COMPILER_ID)
+  message(FATAL_ERROR "BENNU_C_COMPILER_ID is required")
+endif()
+
+if(NOT DEFINED BENNU_EXECUTABLE_SUFFIX)
+  message(FATAL_ERROR "BENNU_EXECUTABLE_SUFFIX is required")
+endif()
+
 function(check_run_error name source line column category message_text)
   set(source_file "${CMAKE_CURRENT_BINARY_DIR}/bennu-${name}.bennu")
   file(WRITE "${source_file}" "${source}")
@@ -178,11 +190,148 @@ elseif(CASE STREQUAL "run_batch_no_partial_output")
   set(expected_stdout "")
   set(expected_stderr
     "${source_file}:2:1: unknown name: unknown name: wat\n")
-elseif(CASE STREQUAL "unimplemented_emit_c")
-  set(arguments emit-c sample.bn)
-  set(expected_exit 1)
-  set(expected_stdout "")
-  set(expected_stderr "error: subcommand 'emit-c' is not implemented\n")
+elseif(CASE STREQUAL "emit_c_example")
+  set(source_file "${BENNU_SOURCE_DIR}/examples/level1.bennu")
+  set(output_file "${CMAKE_CURRENT_BINARY_DIR}/level 1 generated.c")
+  set(output_executable
+    "${CMAKE_CURRENT_BINARY_DIR}/level-1-generated${BENNU_EXECUTABLE_SUFFIX}")
+  file(REMOVE "${output_file}" "${output_executable}")
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_file}" -o "${output_file}"
+    RESULT_VARIABLE emit_exit
+    OUTPUT_VARIABLE emit_stdout
+    ERROR_VARIABLE emit_stderr
+  )
+  if(NOT "${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
+     NOT emit_stderr STREQUAL "" OR NOT EXISTS "${output_file}")
+    message(FATAL_ERROR
+      "emit_c_example: emission failed\n"
+      "exit: ${emit_exit}\nstdout: [${emit_stdout}]\nstderr: [${emit_stderr}]")
+  endif()
+  file(READ "${output_file}" emitted_source)
+  file(READ "${BENNU_SOURCE_DIR}/tests/fixtures/level1-example.c"
+    expected_emitted_source)
+  if(NOT emitted_source STREQUAL expected_emitted_source OR
+     emitted_source MATCHES "${BENNU_SOURCE_DIR}" OR
+     emitted_source MATCHES "${source_file}")
+    message(FATAL_ERROR
+      "emit_c_example: generated C does not match the inspected golden C11")
+  endif()
+  if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+              "${output_file}" "/Fe:${output_executable}"
+      RESULT_VARIABLE compile_exit
+      OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr
+    )
+  else()
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+              "${output_file}" -o "${output_executable}"
+      RESULT_VARIABLE compile_exit
+      OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr
+    )
+  endif()
+  if(NOT "${compile_exit}" STREQUAL "0")
+    message(FATAL_ERROR
+      "emit_c_example: generated C failed to compile\n"
+      "stdout: [${compile_stdout}]\nstderr: [${compile_stderr}]")
+  endif()
+  execute_process(
+    COMMAND "${output_executable}"
+    RESULT_VARIABLE generated_exit
+    OUTPUT_VARIABLE generated_stdout
+    ERROR_VARIABLE generated_stderr
+  )
+  string(REPLACE "\r\n" "\n" generated_stdout "${generated_stdout}")
+  if(NOT "${generated_exit}" STREQUAL "0" OR
+     NOT generated_stdout STREQUAL ">>(1 2 3 4 5)\n>>6\n" OR
+     NOT generated_stderr STREQUAL "")
+    message(FATAL_ERROR
+      "emit_c_example: generated executable contract mismatch\n"
+      "exit: ${generated_exit}\n"
+      "stdout: [${generated_stdout}]\nstderr: [${generated_stderr}]")
+  endif()
+  file(REMOVE "${output_file}" "${output_executable}")
+  return()
+elseif(CASE STREQUAL "emit_c_unwritable_atomic")
+  set(source_file "${BENNU_SOURCE_DIR}/examples/level1.bennu")
+  set(output_directory "${CMAKE_CURRENT_BINARY_DIR}/bennu-unwritable-output")
+  set(output_file "${output_directory}/sentinel.c")
+  file(REMOVE_RECURSE "${output_directory}")
+  file(MAKE_DIRECTORY "${output_directory}")
+  file(WRITE "${output_file}" "sentinel bytes\n")
+  execute_process(COMMAND chmod 500 "${output_directory}")
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_file}" -o "${output_file}"
+    RESULT_VARIABLE emit_exit
+    OUTPUT_VARIABLE emit_stdout
+    ERROR_VARIABLE emit_stderr
+  )
+  execute_process(COMMAND chmod 700 "${output_directory}")
+  file(READ "${output_file}" preserved_output)
+  file(GLOB orphan_outputs "${output_directory}/sentinel.c.tmp*")
+  file(REMOVE_RECURSE "${output_directory}")
+  if("${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
+     NOT emit_stderr MATCHES "file error: unable to write output" OR
+     NOT preserved_output STREQUAL "sentinel bytes\n" OR orphan_outputs)
+    message(FATAL_ERROR
+      "emit_c_unwritable_atomic: output was replaced or a partial was left\n"
+      "exit: ${emit_exit}\nstdout: [${emit_stdout}]\nstderr: [${emit_stderr}]\n"
+      "output: [${preserved_output}]\norphans: [${orphan_outputs}]")
+  endif()
+  return()
+elseif(CASE STREQUAL "emit_c_empty_program")
+  set(source_file "${CMAKE_CURRENT_BINARY_DIR}/empty program.bennu")
+  set(output_file "${CMAKE_CURRENT_BINARY_DIR}/empty program.c")
+  set(output_executable
+    "${CMAKE_CURRENT_BINARY_DIR}/empty-program${BENNU_EXECUTABLE_SUFFIX}")
+  file(WRITE "${source_file}" " \t\n")
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_file}" -o "${output_file}"
+    RESULT_VARIABLE emit_exit
+    OUTPUT_VARIABLE emit_stdout
+    ERROR_VARIABLE emit_stderr
+  )
+  if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+              "${output_file}" "/Fe:${output_executable}"
+      RESULT_VARIABLE compile_exit
+      OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr
+    )
+  else()
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+              "${output_file}" -o "${output_executable}"
+      RESULT_VARIABLE compile_exit
+      OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr
+    )
+  endif()
+  if(NOT "${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
+     NOT emit_stderr STREQUAL "" OR NOT "${compile_exit}" STREQUAL "0")
+    message(FATAL_ERROR
+      "emit_c_empty_program: empty program did not emit warning-clean C11\n"
+      "emit exit: ${emit_exit}\nemit stdout: [${emit_stdout}]\n"
+      "emit stderr: [${emit_stderr}]\ncompile stdout: [${compile_stdout}]\n"
+      "compile stderr: [${compile_stderr}]")
+  endif()
+  execute_process(
+    COMMAND "${output_executable}"
+    RESULT_VARIABLE generated_exit
+    OUTPUT_VARIABLE generated_stdout
+    ERROR_VARIABLE generated_stderr
+  )
+  file(REMOVE "${source_file}" "${output_file}" "${output_executable}")
+  if(NOT "${generated_exit}" STREQUAL "0" OR NOT generated_stdout STREQUAL "" OR
+     NOT generated_stderr STREQUAL "")
+    message(FATAL_ERROR "emit_c_empty_program: empty program emitted output")
+  endif()
+  return()
 elseif(CASE STREQUAL "unimplemented_build")
   set(arguments build sample.bn)
   set(expected_exit 1)

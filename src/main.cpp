@@ -1,11 +1,23 @@
+#include "bennu/c_emitter.hpp"
 #include "bennu/evaluator.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <iostream>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -104,6 +116,102 @@ int run_file(std::string_view path) {
   return 0;
 }
 
+int create_exclusive_file(const char *path) {
+#ifdef _WIN32
+  return _open(path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+               _S_IREAD | _S_IWRITE);
+#else
+  return open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+#endif
+}
+
+std::FILE *open_file_stream(int descriptor) {
+#ifdef _WIN32
+  return _fdopen(descriptor, "wb");
+#else
+  return fdopen(descriptor, "wb");
+#endif
+}
+
+void close_file_descriptor(int descriptor) {
+#ifdef _WIN32
+  _close(descriptor);
+#else
+  close(descriptor);
+#endif
+}
+
+bool replace_file(std::string_view temporary_path, std::string_view output_path) {
+  const std::string temporary(temporary_path);
+  const std::string output(output_path);
+#ifdef _WIN32
+  return MoveFileExA(temporary.c_str(), output.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+  return std::rename(temporary.c_str(), output.c_str()) == 0;
+#endif
+}
+
+bool write_file_atomically(std::string_view path, std::string_view contents) {
+  const std::string path_string(path);
+  std::string temporary_path;
+  int descriptor = -1;
+  for (std::size_t attempt = 0; attempt < 100; ++attempt) {
+    temporary_path = path_string + ".tmp";
+    if (attempt != 0) {
+      temporary_path += '.' + std::to_string(attempt);
+    }
+    descriptor = create_exclusive_file(temporary_path.c_str());
+    if (descriptor >= 0) {
+      break;
+    }
+    if (errno != EEXIST) {
+      return false;
+    }
+  }
+  if (descriptor < 0) {
+    return false;
+  }
+
+  std::FILE *output = open_file_stream(descriptor);
+  if (output == nullptr) {
+    close_file_descriptor(descriptor);
+    std::remove(temporary_path.c_str());
+    return false;
+  }
+  const bool write_failed =
+      std::fwrite(contents.data(), 1, contents.size(), output) != contents.size();
+  const bool close_failed = std::fclose(output) != 0;
+  if (write_failed || close_failed) {
+    std::remove(temporary_path.c_str());
+    return false;
+  }
+  if (!replace_file(temporary_path, path_string)) {
+    std::remove(temporary_path.c_str());
+    return false;
+  }
+  return true;
+}
+
+int emit_c_file(std::string_view source_path, std::string_view output_path) {
+  FileReadResult loaded = read_source_file(source_path);
+  if (!loaded.ok) {
+    std::cerr << source_path << ":1:1: file error: unable to read source\n";
+    return 1;
+  }
+
+  bennu::CEmissionResult emitted = bennu::emit_c_source(loaded.source);
+  if (!emitted.ok) {
+    write_diagnostic(source_path, emitted.error);
+    return 1;
+  }
+  if (!write_file_atomically(output_path, emitted.source)) {
+    std::cerr << output_path << ":1:1: file error: unable to write output\n";
+    return 1;
+  }
+  return 0;
+}
+
 int run_repl() {
   std::string line;
   while (true) {
@@ -174,7 +282,19 @@ int main(int argc, char **argv) {
     return run_repl();
   }
 
-  if (argument == "emit-c" || argument == "build") {
+  if (argument == "emit-c") {
+    if (argc == 2) {
+      std::cerr << "error: expected a source path after 'emit-c'\n";
+      return 1;
+    }
+    if (argc != 5 || std::string_view(argv[3]) != "-o") {
+      std::cerr << "error: expected 'emit-c <source> -o <output>'\n";
+      return 1;
+    }
+    return emit_c_file(argv[2], argv[4]);
+  }
+
+  if (argument == "build") {
     std::cerr << "error: subcommand '" << argument << "' is not implemented\n";
     return 1;
   }

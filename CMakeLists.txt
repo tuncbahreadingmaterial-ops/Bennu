@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Bennu LANGUAGES CXX)
 
-add_library(bennu_core src/evaluator.cpp)
+include(CTest)
+if(BUILD_TESTING)
+  enable_language(C)
+endif()
+
+add_library(bennu_core src/c_emitter.cpp src/evaluator.cpp)
 target_include_directories(bennu_core PUBLIC include)
 set_target_properties(bennu_core PROPERTIES
   CXX_STANDARD 20
@@ -24,12 +29,15 @@ string(CONCAT bennu_build_info
   "compiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\n"
   "cmake=${CMAKE_VERSION}\n"
 )
+if(BUILD_TESTING)
+  string(APPEND bennu_build_info
+    "c_compiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}\n")
+endif()
 file(GENERATE
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bennu-build-info.txt"
   CONTENT "${bennu_build_info}"
 )
 
-include(CTest)
 if(BUILD_TESTING)
   add_executable(bennu_evaluator_tests tests/evaluator_test.cpp)
   target_link_libraries(bennu_evaluator_tests PRIVATE bennu_core)
@@ -40,6 +48,15 @@ if(BUILD_TESTING)
   )
   add_test(NAME evaluator.unit COMMAND bennu_evaluator_tests)
 
+  add_executable(bennu_c_emitter_tests tests/c_emitter_test.cpp)
+  target_link_libraries(bennu_c_emitter_tests PRIVATE bennu_core)
+  set_target_properties(bennu_c_emitter_tests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(NAME c_emitter.unit COMMAND bennu_c_emitter_tests)
+
   function(add_cli_contract_test name case_name)
     add_test(
       NAME "cli.${name}"
@@ -47,6 +64,9 @@ if(BUILD_TESTING)
         "${CMAKE_COMMAND}"
         "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
         "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+        "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
         "-DCASE=${case_name}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_contract.cmake"
     )
@@ -73,6 +93,28 @@ if(BUILD_TESTING)
   endif()
   add_cli_contract_test(run_evaluator_errors run_evaluator_errors)
   add_cli_contract_test(run_batch_no_partial_output run_batch_no_partial_output)
-  add_cli_contract_test(unimplemented_emit_c unimplemented_emit_c)
+  add_cli_contract_test(emit_c_example emit_c_example)
+  add_cli_contract_test(emit_c_empty_program emit_c_empty_program)
+  add_test(
+    NAME cli.emit_c_differential
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_emission_contract.cmake"
+  )
+  add_test(
+    NAME cli.emit_c_negative_atomic
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_emission_negative.cmake"
+  )
+  if(UNIX)
+    add_cli_contract_test(emit_c_unwritable_atomic emit_c_unwritable_atomic)
+  endif()
   add_cli_contract_test(unimplemented_build unimplemented_build)
 endif()
