@@ -10,6 +10,8 @@
 
 **Scalar domains:** [BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md)
 
+**Execution profiles:** [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -662,7 +664,7 @@ An execution profile may define limits such as:
 ```text
 max_vector_bytes
 max_live_evaluation_bytes
-max_work
+max_work_units
 ```
 
 Concrete values are product or deployment configuration, not scalar-lifting
@@ -673,6 +675,12 @@ must enforce the same observable profile contract.
 A local trusted CLI profile may omit an arbitrary logical work cap while still
 performing all mandatory representability and allocation checks. An untrusted
 service profile may impose strict memory and work limits.
+
+[BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md) resolves this
+delegated decision: it defines the initial named profiles `trusted-local-v1`
+and `bounded-v1`, their limit units and charging events, resource-context
+reset boundaries, `ResourceError` presentation, the cross-backend agreement
+contract, and deterministic conformance testing.
 
 ### 12.4 Optional logical work accounting
 
@@ -1189,10 +1197,11 @@ BENNU-SPEC-0002 resolves the rewrite's application, scalar-literal,
 vector-literal, typed-empty-vector, whitespace, delimiter, line-ending, and
 source-span syntax. BENNU-SPEC-0003 resolves the initial kernels' Int overflow,
 binary64 arithmetic, floating equality, NaN, promotion, and domain-error
-semantics. The following remaining decisions do not change scalar lifting
-itself but must be defined before their associated primitives or product
-surfaces become conforming:
+semantics. [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md) resolves
+which execution profiles Bennu ships and their optional memory and work
+limits. The following remaining decisions do not change scalar lifting itself
+but must be defined before their associated primitives or product surfaces
+become conforming:
 
-- which execution profiles Bennu ships and their optional memory or work limits;
 - integer division semantics;
 - multidimensional arrays and general rank polymorphism.

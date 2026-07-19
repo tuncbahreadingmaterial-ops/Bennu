@@ -10,6 +10,8 @@
 
 **Scalar-domain decision:** [BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md)
 
+**Execution-profile decision:** [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md)
+
 **Purpose:** Decompose the scalar-lifting rewrite into dependency-ordered,
 issue-sized changes that keep integrated `main` buildable and independently
 verifiable.
@@ -248,6 +250,7 @@ Create focused documentation issues for:
    - `equals` behavior for signed zero, infinities, and NaN; and
    - exact `Int -> Double` conversion confirmation.
 3. **Initial execution profile**
+   ([BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md))
    - whether the trusted CLI ships without an arbitrary memory/work cap;
    - any configured profile names;
    - `ResourceError` presentation; and
