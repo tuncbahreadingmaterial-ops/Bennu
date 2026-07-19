@@ -170,14 +170,13 @@ ProcessResult run_process(std::string_view executable,
                        read_process_output(log_path)};
 }
 #else
-bool executable_exists(std::string_view executable) {
-  const std::string name(executable);
+std::string resolve_path_executable(std::string_view executable) {
   if (has_path_separator(executable)) {
-    return access(name.c_str(), X_OK) == 0;
+    return {};
   }
   const char *path_value = std::getenv("PATH");
   if (path_value == nullptr) {
-    return false;
+    return {};
   }
   std::string_view path(path_value);
   std::size_t begin = 0;
@@ -190,14 +189,27 @@ bool executable_exists(std::string_view executable) {
     candidate += '/';
     candidate += executable;
     if (access(candidate.c_str(), X_OK) == 0) {
-      return true;
+      std::error_code error;
+      const std::filesystem::path absolute =
+          std::filesystem::absolute(std::filesystem::path(candidate), error);
+      if (!error) {
+        return path_string(absolute);
+      }
     }
     if (end == std::string_view::npos) {
       break;
     }
     begin = end + 1;
   }
-  return false;
+  return {};
+}
+
+bool executable_exists(std::string_view executable) {
+  const std::string name(executable);
+  if (has_path_separator(executable)) {
+    return access(name.c_str(), X_OK) == 0;
+  }
+  return !resolve_path_executable(executable).empty();
 }
 
 ProcessResult run_process(std::string_view executable,
@@ -467,6 +479,7 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   }
 
   std::error_code error;
+  std::string launch_executable = selection.executable;
   const std::filesystem::path selected_path(selection.executable);
   if (has_path_separator(selection.executable) && selected_path.is_relative()) {
     const std::filesystem::path absolute_selection =
@@ -480,7 +493,16 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                      "') has an invalid executable path"};
     }
     selection.executable = path_string(absolute_selection);
+    launch_executable = selection.executable;
   }
+#ifndef _WIN32
+  if (!has_path_separator(selection.executable)) {
+    const std::string resolved = resolve_path_executable(selection.executable);
+    if (!resolved.empty()) {
+      launch_executable = resolved;
+    }
+  }
+#endif
 
   error.clear();
   std::filesystem::path output =
@@ -523,7 +545,7 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   const std::vector<std::string> arguments = make_c_compiler_arguments(
       native_platform(), selection.executable, path_string(c_source),
       path_string(staging_output));
-  const ProcessResult process = run_process(selection.executable, arguments,
+  const ProcessResult process = run_process(launch_executable, arguments,
                                             temporary_directory, compiler_log);
   if (!process.started || process.terminated || process.exit_code != 0) {
     const std::string failure = process_failure(selection, process);
