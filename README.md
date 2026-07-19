@@ -1,17 +1,39 @@
 # Bennu
 
-Bennu is a data-oriented programming language. The repository provides a portable build, a reusable Level 1 expression-evaluation core, an interactive REPL, a source-file runner, and deterministic portable C emission.
+Bennu is a data-oriented array language. Level 1 is a deliberately small,
+complete toolchain for signed 64-bit integer expressions: evaluate them in a
+REPL, run a source file, emit self-contained C11, or build a standalone native
+executable with an installed C compiler.
 
-## Prerequisites
+Level 1 has two whole-word prefix primitives:
 
-- A C++20 compiler
-- A C11 compiler for generated-program tests and emitted artifacts
-- CMake 3.20 or newer
-- Ninja
+- `ioata n` produces `(1 2 ... n)` for positive `n` and `()` for `n <= 0`.
+- `inc n` adds one to a scalar integer.
 
-## Build and test
+Each nonblank source line contains one expression. Calls can be nested, as in
+`ioata inc 5`. Scalar values are printed as `6`, arrays as `(1 2 3 4 5)`, and
+successful evaluated results have the exact `>>` prefix. Level 1 does not have
+array literals, array-lifted `inc`, variables, or additional primitives.
 
-From a clean checkout:
+See the [Level 1 language and toolchain](doc/level1.md) reference for the exact
+grammar, limits, command behavior, compiler selection, Anka differences, and
+release installation layout.
+
+## Supported platforms and prerequisites
+
+The v0.1.0 release targets are:
+
+- Linux x64
+- Windows x64
+- macOS arm64
+
+Building Bennu from source requires a C++20 compiler, CMake 3.20 or newer, and
+Ninja. The default test configuration and generated programs also require a
+C11 compiler. Bennu does not bundle, download, or install a C compiler.
+
+## Level 1 quick start
+
+From a clean checkout, configure, build, and test a Release build:
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -19,29 +41,39 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Show the command-line surface on Linux or macOS:
+The commands below use the Linux/macOS executable path. In PowerShell on
+Windows, replace `./build/bennu` with `.\build\bennu.exe` and use `.exe` for
+native output names.
 
-```sh
-./build/bennu --help
-```
-
-On Windows, run `./build/bennu.exe --help` from PowerShell.
-
-Start the Level 1 REPL:
+Start the REPL:
 
 ```sh
 ./build/bennu repl
 ```
 
-Run a complete Level 1 source file:
+The canonical interaction is:
 
-```sh
-./build/bennu run path/to/program.bennu
+```text
+> ioata 5
+>>(1 2 3 4 5)
+> inc 5
+>>6
 ```
 
-Successful values use the stable `>>` prefix. REPL prompts and values go to stdout; source diagnostics go to stderr and include the source name, line, column, category, and message. A file is evaluated completely before any values are written.
+Run the committed example:
 
-Emit self-contained standard C11 for a complete Level 1 source file:
+```sh
+./build/bennu run examples/level1.bennu
+```
+
+It prints exactly:
+
+```text
+>>(1 2 3 4 5)
+>>6
+```
+
+Emit self-contained standard C11, then compile and run it with a C compiler:
 
 ```sh
 ./build/bennu emit-c examples/level1.bennu -o level1.c
@@ -49,17 +81,33 @@ cc -std=c11 level1.c -o level1
 ./level1
 ```
 
-Emission validates and evaluates the complete source before atomically replacing the output. Generated C uses only the standard C library, contains no source or host paths, and produces the same batch output without Bennu or the original `.bennu` file at runtime.
-
-Build a standalone native executable through an installed external C compiler:
+Build and run a standalone native executable in one command:
 
 ```sh
 ./build/bennu build examples/level1.bennu -o level1
 ./level1
 ```
 
-Compiler selection is, in order: `--cc <compiler>`, a nonempty `CC` environment variable, then the platform fallback. The fallback searches `cc` on Linux and macOS and `cl.exe` on Windows. A selected `--cc` or `CC` value is final if it cannot start or compile; Bennu does not silently try another compiler. Compiler values are executable names or paths, not shell fragments or flag strings. Bennu invokes the compiler directly, creates C and compiler artifacts in an isolated temporary directory beside the requested output, and replaces the requested output only after successful compilation and cleanup. It does not bundle, download, or install a compiler.
+Use `--cc <compiler>` after the output to select an executable explicitly, or
+set the `CC` environment variable. Otherwise Bennu searches for `cc` on Linux
+and macOS or `cl.exe` on Windows. A selected compiler failure is final; Bennu
+does not silently fall back to another compiler. Compiler values are executable
+names or paths, not shell fragments or compiler-flag strings.
 
-## Level 1 evaluation core
+Successful commands return status 0. CLI, source, output, and compiler failures
+return nonzero and write concise diagnostics to stderr. `run` validates the
+complete file before printing any result. `emit-c` and `build` preserve an
+existing output when validation, emission, compilation, or publication fails.
 
-`include/bennu/evaluator.hpp` exposes plain data structures and free functions for tokenizing, parsing, evaluating, and formatting signed 64-bit integer expressions using `inc` and `ioata`. `include/bennu/c_emitter.hpp` exposes deterministic C11 translation through the same evaluation path. `include/bennu/native_builder.hpp` exposes plain compiler-selection, command-construction, and native-build data transformations. `bennu_core` is a standard-library-only CMake library target. Command-line and prompt behavior stays in the `bennu` executable and reuses this core.
+## v0.1.0 release installation
+
+When v0.1.0 is published, choose the asset matching the target:
+
+- `bennu-v0.1.0-linux-x64.tar.gz`
+- `bennu-v0.1.0-windows-x64.zip`
+- `bennu-v0.1.0-macos-arm64.tar.gz`
+
+Each archive contains only `bennu` (or `bennu.exe`) and `LICENSE` at the archive
+root. Extract both files to a directory of your choice, keep `LICENSE` with the
+executable, and invoke the executable by path. On Linux and macOS the archived
+`bennu` file is executable; on Windows run `bennu.exe` from PowerShell.

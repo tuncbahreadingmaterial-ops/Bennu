@@ -159,4 +159,15 @@ if(BUILD_TESTING)
       "-DBENNU_FALLBACK_COMPILER_NAME=${bennu_fallback_compiler_name}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_build_fake_process.cmake"
   )
+  add_test(
+    NAME documentation.level1_journeys
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/documentation_smoke.cmake"
+  )
 endif()
