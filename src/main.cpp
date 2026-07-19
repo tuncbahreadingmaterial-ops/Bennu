@@ -1,6 +1,7 @@
 #include "bennu/c_emitter.hpp"
 #include "bennu/evaluator.hpp"
 #include "bennu/native_builder.hpp"
+#include "cli_output.hpp"
 
 #include <array>
 #include <cerrno>
@@ -61,6 +62,11 @@ void write_diagnostic(std::string_view source_name, const bennu::Error &error) {
   std::cerr << source_name << ':' << error.location.line << ':'
             << error.location.column << ": " << error_kind_name(error.kind)
             << ": " << error.message << '\n';
+}
+
+int report_stdout_failure() {
+  std::cerr << "error: unable to write stdout\n";
+  return 1;
 }
 
 bool is_blank_line(std::string_view line) {
@@ -170,7 +176,13 @@ int run_file(std::string_view path) {
   }
 
   for (const bennu::Value &value : result.values) {
-    std::cout << ">>" << bennu::format_value(value) << '\n';
+    const std::string output = ">>" + bennu::format_value(value) + '\n';
+    if (!bennu_cli::write_stdout(std::cout, output)) {
+      return report_stdout_failure();
+    }
+  }
+  if (!bennu_cli::flush_stdout(std::cout)) {
+    return report_stdout_failure();
   }
   return 0;
 }
@@ -307,7 +319,10 @@ int build_native_file(std::string_view source_path, std::string_view output_path
 int run_repl() {
   std::string line;
   while (true) {
-    std::cout << "> " << std::flush;
+    if (!bennu_cli::write_stdout(std::cout, "> ") ||
+        !bennu_cli::flush_stdout(std::cout)) {
+      return report_stdout_failure();
+    }
     if (!std::getline(std::cin, line)) {
       return 0;
     }
@@ -323,7 +338,10 @@ int run_repl() {
       write_diagnostic("<repl>", result.error);
       continue;
     }
-    std::cout << ">>" << bennu::format_value(result.value) << '\n';
+    const std::string output = ">>" + bennu::format_value(result.value) + '\n';
+    if (!bennu_cli::write_stdout(std::cout, output)) {
+      return report_stdout_failure();
+    }
   }
 }
 
@@ -338,14 +356,19 @@ int main(int argc, char **argv) {
   const std::string_view argument = argv[1];
 
   if (argc == 2 && argument == "--help") {
-    std::cout << "Usage: bennu <command> [arguments]\n"
-                 "       bennu --help\n"
-                 "\n"
-                 "Commands:\n"
-                 "  repl    Start an interactive Bennu session\n"
-                 "  run     Run a Bennu source file\n"
-                 "  emit-c  Emit C source for a Bennu source file\n"
-                 "  build   Build a Bennu source file\n";
+    constexpr std::string_view help =
+        "Usage: bennu <command> [arguments]\n"
+        "       bennu --help\n"
+        "\n"
+        "Commands:\n"
+        "  repl    Start an interactive Bennu session\n"
+        "  run     Run a Bennu source file\n"
+        "  emit-c  Emit C source for a Bennu source file\n"
+        "  build   Build a Bennu source file\n";
+    if (!bennu_cli::write_stdout(std::cout, help) ||
+        !bennu_cli::flush_stdout(std::cout)) {
+      return report_stdout_failure();
+    }
     return 0;
   }
 
