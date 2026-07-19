@@ -148,9 +148,13 @@ the limit. An omitted limit imposes no constraint.
 
 ### 5.1 max_vector_bytes: canonical vector payload bytes
 
-`max_vector_bytes` bounds the canonical payload size of each individual vector
-result or vector workspace reservation. The canonical payload size of a vector
-of `n` elements is:
+`max_vector_bytes` bounds the canonical payload size of each individual typed
+vector-payload reservation. This includes a vector result and workspace that
+is explicitly reserved as a typed vector payload. It does not apply to an
+untyped `reserve_workspace(context, byte_count)` request merely because an
+implementation might use that workspace to hold vector-like data.
+
+The canonical payload size of a vector of `n` elements is:
 
 ```text
 payload_bytes(Vector<Bool>,   n) = n * 1
@@ -169,14 +173,31 @@ logical length, and scalar results.
 
 ### 5.2 max_live_evaluation_bytes: canonical live reservation bytes
 
-`max_live_evaluation_bytes` bounds the sum of canonical payload bytes of all
-simultaneously live vector reservations within one resource context. A
-reservation is charged when the central resource boundary admits it and
+`max_live_evaluation_bytes` bounds the sum of all simultaneously live bytes
+admitted through the central resource boundary within one resource context.
+Every admitted reservation contributes exactly one live-byte charge:
+
+- a typed vector-payload reservation contributes its canonical payload bytes,
+  using the fixed Bool 1, Int 8, and Double 8 widths from section 5.1; and
+- an untyped `reserve_workspace(context, byte_count)` reservation contributes
+  exactly the requested `byte_count` after that count passes overflow-safe
+  sizing and representability checks.
+
+Typed vector workspace is charged by its canonical vector payload size and is
+not charged a second time as generic workspace. Generic workspace is charged
+by the requested byte count even when its physical allocation is larger or
+smaller. Every vector payload and generic workspace reservation admitted in a
+resource context therefore participates unambiguously in the live-byte limit.
+
+A reservation is charged when the central resource boundary admits it and
 released only when the reserved value or workspace reaches the end of its
 defined logical lifetime (section 6.3).
 
-Uncharged: everything uncharged in section 5.1, plus interpreter and compiler
-bookkeeping, environments, diagnostic buffers, and formatting buffers.
+Uncharged: physical allocation size, allocator overhead, alignment padding,
+spare capacity, vector metadata, interpreter and compiler bookkeeping,
+environments, diagnostic buffers, and formatting buffers. These exclusions do
+not exempt any requested generic workspace `byte_count` from the live-byte
+charge.
 
 ### 5.3 max_work_units: optimizer-independent logical work units
 
@@ -258,17 +279,29 @@ BENNU-SPEC-0001 section 11: arity, then type, then shape, then resource
 preflight, then domain checks and kernel execution. Profiles do not add,
 remove, or reorder validation steps.
 
-Within resource preflight, for each admission request the implementation
-must, in order:
+Within resource preflight, for each admission request the implementation must
+apply this exact order:
 
-1. check representability and compute sizes with overflow-safe arithmetic
+1. check representability and compute every vector payload, generic workspace,
+   live-byte, and work-unit charge with overflow-safe arithmetic
    (`size_overflow` on failure);
-2. check every configured profile limit (`profile_limit` on failure); and
-3. obtain the complete allocation (`allocation_unavailable` on failure).
+2. when relevant and configured, check `max_vector_bytes`;
+3. when relevant and configured, check `max_live_evaluation_bytes`;
+4. when relevant and configured, check `max_work_units`; and
+5. obtain the complete allocation (`allocation_unavailable` on failure).
 
-A refused request charges nothing, allocates nothing, and executes no scalar
-kernel for the refused operation. Work units for an application are charged at
-its admission, before its kernels execute.
+Steps 2 through 4 are the normative precedence for simultaneous profile-limit
+failures. The first configured limit in that order that would be exceeded
+supplies the request's single `profile_limit` reason and structured context;
+later limits are not reported for that refusal. A generic workspace request
+does not make `max_vector_bytes` relevant unless the request explicitly
+declares a typed vector payload as defined in section 5.1.
+
+Admission is transactional across all charges and allocation. A request
+refused by any profile limit charges no vector bytes, live bytes, or work
+units, performs no allocation, and executes no scalar kernel for the refused
+operation. Work units for an admitted application are charged at its
+admission, before its kernels execute.
 
 ## 8. ResourceError reasons and presentation
 
@@ -373,6 +406,27 @@ For each limit kind, conformance coverage must include:
    refused operation; and
 9. no partial results: a refused or failed request leaves no partial language
    value observable.
+
+Conformance coverage must also exercise simultaneous failures and verify the
+normative precedence from section 7. The following cases are minimum required
+fixtures; `8` denotes each incoming charge, `7` denotes each configured limit,
+and usage before each charge is zero:
+
+| Admission and simultaneously exceeded configured limits | Required singular `limit kind` |
+| --- | --- |
+| Typed vector payload: vector, live, and work | `max_vector_bytes` |
+| Typed vector payload: vector and live | `max_vector_bytes` |
+| Typed vector payload: vector and work | `max_vector_bytes` |
+| Typed vector payload: live and work | `max_live_evaluation_bytes` |
+| Generic workspace only: live | `max_live_evaluation_bytes` |
+
+For each fixture, the `ResourceError` must contain the exact configured limit,
+usage-before, and refused-charge fields for only the required winning limit.
+The refused admission must leave every usage counter unchanged and perform no
+allocation. The generic-workspace fixture must reserve an untyped
+`byte_count = 8`, must not consult or report `max_vector_bytes`, and must fail
+against `max_live_evaluation_bytes = 7` even if the implementation's physical
+workspace allocation would have a different size.
 
 Cross-backend tests must additionally replay the same profile identity and
 program on the evaluator, emitted-C, and native paths and compare canonical
