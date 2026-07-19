@@ -7,7 +7,12 @@ if(BUILD_TESTING)
   enable_language(C)
 endif()
 
-add_library(bennu_core src/c_emitter.cpp src/evaluator.cpp src/native_builder.cpp)
+add_library(bennu_core
+  src/c_emitter.cpp
+  src/evaluator.cpp
+  src/native_builder.cpp
+  src/path_encoding.cpp
+)
 target_include_directories(bennu_core PUBLIC include)
 set_target_properties(bennu_core PROPERTIES
   CXX_STANDARD 20
@@ -77,6 +82,7 @@ if(BUILD_TESTING)
   add_test(NAME stdout.unit COMMAND bennu_stdout_tests)
 
   add_executable(bennu_fake_c_compiler tests/fake_c_compiler.cpp)
+  target_link_libraries(bennu_fake_c_compiler PRIVATE bennu_core)
   set_target_properties(bennu_fake_c_compiler PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES

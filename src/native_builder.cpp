@@ -1,4 +1,5 @@
 #include "bennu/native_builder.hpp"
+#include "bennu/path_encoding.hpp"
 
 #include <array>
 #include <cerrno>
@@ -32,17 +33,12 @@ struct ProcessResult {
   std::string output;
 };
 
-std::string path_string(const std::filesystem::path &path) {
-#ifdef _WIN32
-  return path.string();
-#else
-  return path.native();
-#endif
-}
-
 bool write_bytes(const std::filesystem::path &path, std::string_view bytes) {
-  const std::string name = path_string(path);
-  std::FILE *file = std::fopen(name.c_str(), "wb");
+#ifdef _WIN32
+  std::FILE *file = _wfopen(path.c_str(), L"wb");
+#else
+  std::FILE *file = std::fopen(path.c_str(), "wb");
+#endif
   if (file == nullptr) {
     return false;
   }
@@ -53,8 +49,11 @@ bool write_bytes(const std::filesystem::path &path, std::string_view bytes) {
 }
 
 std::string read_process_output(const std::filesystem::path &path) {
-  const std::string name = path_string(path);
-  std::FILE *file = std::fopen(name.c_str(), "rb");
+#ifdef _WIN32
+  std::FILE *file = _wfopen(path.c_str(), L"rb");
+#else
+  std::FILE *file = std::fopen(path.c_str(), "rb");
+#endif
   if (file == nullptr) {
     return {};
   }
@@ -71,36 +70,40 @@ bool has_path_separator(std::string_view executable) {
 
 #ifdef _WIN32
 bool executable_exists(std::string_view executable) {
-  const std::string name(executable);
+  const WideStringResult name = utf8_to_wide(executable);
+  if (!name.ok) {
+    return false;
+  }
   if (has_path_separator(executable) || executable.find(':') != std::string_view::npos) {
-    const DWORD attributes = GetFileAttributesA(name.c_str());
+    const DWORD attributes = GetFileAttributesW(name.text.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
   }
-  const DWORD required = SearchPathA(nullptr, name.c_str(), nullptr, 0, nullptr, nullptr);
+  const DWORD required =
+      SearchPathW(nullptr, name.text.c_str(), nullptr, 0, nullptr, nullptr);
   return required != 0;
 }
 
-std::string quote_windows_argument(std::string_view argument) {
-  std::string quoted = "\"";
+std::wstring quote_windows_argument(std::wstring_view argument) {
+  std::wstring quoted = L"\"";
   std::size_t backslashes = 0;
-  for (const char character : argument) {
-    if (character == '\\') {
+  for (const wchar_t character : argument) {
+    if (character == L'\\') {
       ++backslashes;
       continue;
     }
-    if (character == '"') {
-      quoted.append(backslashes * 2 + 1, '\\');
-      quoted += '"';
+    if (character == L'"') {
+      quoted.append(backslashes * 2 + 1, L'\\');
+      quoted += L'"';
       backslashes = 0;
       continue;
     }
-    quoted.append(backslashes, '\\');
+    quoted.append(backslashes, L'\\');
     backslashes = 0;
     quoted += character;
   }
-  quoted.append(backslashes * 2, '\\');
-  quoted += '"';
+  quoted.append(backslashes * 2, L'\\');
+  quoted += L'"';
   return quoted;
 }
 
@@ -108,8 +111,7 @@ ProcessResult run_process(std::string_view executable,
                           const std::vector<std::string> &arguments,
                           const std::filesystem::path &working_directory,
                           const std::filesystem::path &log_path) {
-  const std::string log_name = path_string(log_path);
-  HANDLE log = CreateFileA(log_name.c_str(), GENERIC_WRITE,
+  HANDLE log = CreateFileW(log_path.c_str(), GENERIC_WRITE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (log == INVALID_HANDLE_VALUE) {
@@ -121,25 +123,36 @@ ProcessResult run_process(std::string_view executable,
     return ProcessResult{false, false, 0, static_cast<int>(error), {}};
   }
 
-  std::string command_line = quote_windows_argument(executable);
-  for (const std::string &argument : arguments) {
-    command_line += ' ';
-    command_line += quote_windows_argument(argument);
+  const WideStringResult wide_executable = utf8_to_wide(executable);
+  if (!wide_executable.ok) {
+    CloseHandle(log);
+    return ProcessResult{false, false, 0,
+                         static_cast<int>(ERROR_NO_UNICODE_TRANSLATION), {}};
   }
-  std::vector<char> mutable_command(command_line.begin(), command_line.end());
-  mutable_command.push_back('\0');
+  std::wstring command_line = quote_windows_argument(wide_executable.text);
+  for (const std::string &argument : arguments) {
+    const WideStringResult wide_argument = utf8_to_wide(argument);
+    if (!wide_argument.ok) {
+      CloseHandle(log);
+      return ProcessResult{false, false, 0,
+                           static_cast<int>(ERROR_NO_UNICODE_TRANSLATION), {}};
+    }
+    command_line += L' ';
+    command_line += quote_windows_argument(wide_argument.text);
+  }
+  std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+  mutable_command.push_back(L'\0');
 
-  STARTUPINFOA startup{};
+  STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESTDHANDLES;
   startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   startup.hStdOutput = log;
   startup.hStdError = log;
   PROCESS_INFORMATION process{};
-  const std::string directory = path_string(working_directory);
-  const BOOL created = CreateProcessA(
+  const BOOL created = CreateProcessW(
       nullptr, mutable_command.data(), nullptr, nullptr, TRUE, 0, nullptr,
-      directory.c_str(), &startup, &process);
+      working_directory.c_str(), &startup, &process);
   const DWORD start_error = created != 0 ? ERROR_SUCCESS : GetLastError();
   CloseHandle(log);
   if (created == 0) {
@@ -196,7 +209,7 @@ std::string resolve_path_executable(std::string_view executable) {
       const std::filesystem::path absolute =
           std::filesystem::absolute(std::filesystem::path(candidate), error);
       if (!error) {
-        return path_string(absolute);
+        return absolute.native();
       }
     }
     if (end == std::string_view::npos) {
@@ -219,8 +232,8 @@ ProcessResult run_process(std::string_view executable,
                           const std::vector<std::string> &arguments,
                           const std::filesystem::path &working_directory,
                           const std::filesystem::path &log_path) {
-  const std::string log_name = path_string(log_path);
-  const int log = open(log_name.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  const int log =
+      open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (log < 0) {
     return ProcessResult{false, false, 0, errno, {}};
   }
@@ -250,8 +263,7 @@ ProcessResult run_process(std::string_view executable,
   }
   if (child == 0) {
     close(start_pipe[0]);
-    const std::string directory = path_string(working_directory);
-    if (chdir(directory.c_str()) != 0 || dup2(log, STDOUT_FILENO) < 0 ||
+    if (chdir(working_directory.c_str()) != 0 || dup2(log, STDOUT_FILENO) < 0 ||
         dup2(log, STDERR_FILENO) < 0) {
       const int error = errno;
       const ssize_t ignored = write(start_pipe[1], &error, sizeof(error));
@@ -310,7 +322,9 @@ ProcessResult run_process(std::string_view executable,
 #endif
 
 std::string lower_filename(std::string_view compiler) {
-  std::string name = std::filesystem::path(std::string(compiler)).filename().string();
+  const std::size_t separator = compiler.find_last_of("/\\");
+  std::string name(compiler.substr(
+      separator == std::string_view::npos ? 0 : separator + 1));
   for (char &character : name) {
     if (character >= 'A' && character <= 'Z') {
       character = static_cast<char>(character - 'A' + 'a');
@@ -332,36 +346,36 @@ NativePlatform compiler_platform(NativePlatform host,
 
 bool replace_output(const std::filesystem::path &temporary,
                     const std::filesystem::path &output) {
-  const std::string temporary_name = path_string(temporary);
-  const std::string output_name = path_string(output);
 #ifdef _WIN32
-  return MoveFileExA(temporary_name.c_str(), output_name.c_str(),
+  return MoveFileExW(temporary.c_str(), output.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
-  return std::rename(temporary_name.c_str(), output_name.c_str()) == 0;
+  return std::rename(temporary.c_str(), output.c_str()) == 0;
 #endif
 }
 
 bool reserve_replacement_path(const std::filesystem::path &path) {
-  const std::string name = path_string(path);
 #ifdef _WIN32
-  const int descriptor = _open(name.c_str(),
-                               _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
-                               _S_IREAD | _S_IWRITE);
+  const int descriptor = _wopen(path.c_str(),
+                                _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                                _S_IREAD | _S_IWRITE);
   if (descriptor < 0) {
     return false;
   }
   if (_close(descriptor) != 0) {
-    std::remove(name.c_str());
+    std::error_code cleanup_error;
+    std::filesystem::remove(path, cleanup_error);
     return false;
   }
 #else
-  const int descriptor = open(name.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+  const int descriptor =
+      open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (descriptor < 0) {
     return false;
   }
   if (close(descriptor) != 0) {
-    std::remove(name.c_str());
+    std::error_code cleanup_error;
+    std::filesystem::remove(path, cleanup_error);
     return false;
   }
 #endif
@@ -388,8 +402,7 @@ bool is_usable_native_output(const std::filesystem::path &path,
 #ifdef _WIN32
   return true;
 #else
-  const std::string name = path_string(path);
-  return access(name.c_str(), X_OK) == 0;
+  return access(path.c_str(), X_OK) == 0;
 #endif
 }
 
@@ -483,7 +496,17 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
 
   std::error_code error;
   std::string launch_executable = selection.executable;
-  const std::filesystem::path selected_path(selection.executable);
+  const PathFromUtf8Result selected_result =
+      path_from_utf8(selection.executable);
+  if (!selected_result.ok) {
+    return NativeBuildResult{
+        false, "compiler selected from " +
+                   std::string(compiler_configuration_name(
+                       selection.configuration)) +
+                   " ('" + selection.executable +
+                   "') has an invalid executable path"};
+  }
+  const std::filesystem::path &selected_path = selected_result.path;
   if (has_path_separator(selection.executable) && selected_path.is_relative()) {
     const std::filesystem::path absolute_selection =
         std::filesystem::absolute(selected_path, error);
@@ -495,7 +518,16 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                      " ('" + selection.executable +
                      "') has an invalid executable path"};
     }
-    selection.executable = path_string(absolute_selection);
+    PathToUtf8Result absolute_text = path_to_utf8(absolute_selection);
+    if (!absolute_text.ok) {
+      return NativeBuildResult{
+          false, "compiler selected from " +
+                     std::string(compiler_configuration_name(
+                         selection.configuration)) +
+                     " ('" + selection.executable +
+                     "') has an invalid executable path"};
+    }
+    selection.executable = std::move(absolute_text.text);
     launch_executable = selection.executable;
   }
 #ifndef _WIN32
@@ -508,9 +540,12 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
 #endif
 
   error.clear();
+  const PathFromUtf8Result output_result = path_from_utf8(request.output_path);
+  if (!output_result.ok) {
+    return NativeBuildResult{false, "unable to prepare native output path"};
+  }
   std::filesystem::path output =
-      std::filesystem::absolute(std::filesystem::path(std::string(request.output_path)),
-                                error);
+      std::filesystem::absolute(output_result.path, error);
   if (error || output.filename().empty()) {
     return NativeBuildResult{false, "unable to prepare native output path"};
   }
@@ -521,7 +556,9 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
     if (attempt != 0) {
       suffix += '.' + std::to_string(attempt);
     }
-    temporary_directory = parent / (output.filename().string() + suffix);
+    std::filesystem::path temporary_name = output.filename();
+    temporary_name += suffix;
+    temporary_directory = parent / temporary_name;
     error.clear();
     if (std::filesystem::create_directory(temporary_directory, error)) {
       break;
@@ -545,9 +582,15 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                                 "unable to write temporary C source");
   }
 
+  PathToUtf8Result c_source_text = path_to_utf8(c_source);
+  PathToUtf8Result staging_output_text = path_to_utf8(staging_output);
+  if (!c_source_text.ok || !staging_output_text.ok) {
+    return failure_with_cleanup(temporary_directory,
+                                "unable to encode compiler paths as UTF-8");
+  }
   const std::vector<std::string> arguments = make_c_compiler_arguments(
-      native_platform(), selection.executable, path_string(c_source),
-      path_string(staging_output));
+      native_platform(), selection.executable, c_source_text.text,
+      staging_output_text.text);
   const ProcessResult process = run_process(launch_executable, arguments,
                                             temporary_directory, compiler_log);
   if (!process.started || process.terminated || process.exit_code != 0) {
@@ -570,7 +613,9 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
     if (attempt != 0) {
       suffix += '.' + std::to_string(attempt);
     }
-    const std::filesystem::path candidate = parent / (output.filename().string() + suffix);
+    std::filesystem::path candidate_name = output.filename();
+    candidate_name += suffix;
+    const std::filesystem::path candidate = parent / candidate_name;
     if (reserve_replacement_path(candidate)) {
       if (replace_output(staging_output, candidate)) {
         replacement = candidate;

@@ -1,6 +1,7 @@
 #include "bennu/c_emitter.hpp"
 #include "bennu/evaluator.hpp"
 #include "bennu/native_builder.hpp"
+#include "bennu/path_encoding.hpp"
 #include "cli_output.hpp"
 
 #include <array>
@@ -13,6 +14,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -84,8 +86,15 @@ struct FileReadResult {
 };
 
 FileReadResult read_source_file(std::string_view path) {
-  const std::string path_string(path);
-  std::FILE *input = std::fopen(path_string.c_str(), "rb");
+  const bennu::PathFromUtf8Result converted = bennu::path_from_utf8(path);
+  if (!converted.ok) {
+    return FileReadResult{false, {}};
+  }
+#ifdef _WIN32
+  std::FILE *input = _wfopen(converted.path.c_str(), L"rb");
+#else
+  std::FILE *input = std::fopen(converted.path.c_str(), "rb");
+#endif
   if (input == nullptr) {
     return FileReadResult{false, {}};
   }
@@ -115,8 +124,15 @@ struct SourceOutputIdentity {
 SourceOutputIdentity
 check_source_output_identity(std::string_view source_path,
                              std::string_view output_path) {
-  const std::filesystem::path source{std::string(source_path)};
-  const std::filesystem::path output{std::string(output_path)};
+  const bennu::PathFromUtf8Result source_result =
+      bennu::path_from_utf8(source_path);
+  const bennu::PathFromUtf8Result output_result =
+      bennu::path_from_utf8(output_path);
+  if (!source_result.ok || !output_result.ok) {
+    return SourceOutputIdentity{false, false};
+  }
+  const std::filesystem::path &source = source_result.path;
+  const std::filesystem::path &output = output_result.path;
   std::error_code error;
   const std::filesystem::path normalized_source =
       std::filesystem::absolute(source, error).lexically_normal();
@@ -187,12 +203,12 @@ int run_file(std::string_view path) {
   return 0;
 }
 
-int create_exclusive_file(const char *path) {
+int create_exclusive_file(const std::filesystem::path &path) {
 #ifdef _WIN32
-  return _open(path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
-               _S_IREAD | _S_IWRITE);
+  return _wopen(path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
+                _S_IREAD | _S_IWRITE);
 #else
-  return open(path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+  return open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
 #endif
 }
 
@@ -212,11 +228,10 @@ void close_file_descriptor(int descriptor) {
 #endif
 }
 
-bool replace_file(std::string_view temporary_path, std::string_view output_path) {
-  const std::string temporary(temporary_path);
-  const std::string output(output_path);
+bool replace_file(const std::filesystem::path &temporary,
+                  const std::filesystem::path &output) {
 #ifdef _WIN32
-  return MoveFileExA(temporary.c_str(), output.c_str(),
+  return MoveFileExW(temporary.c_str(), output.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
   return std::rename(temporary.c_str(), output.c_str()) == 0;
@@ -224,15 +239,20 @@ bool replace_file(std::string_view temporary_path, std::string_view output_path)
 }
 
 bool write_file_atomically(std::string_view path, std::string_view contents) {
-  const std::string path_string(path);
-  std::string temporary_path;
+  const bennu::PathFromUtf8Result converted = bennu::path_from_utf8(path);
+  if (!converted.ok) {
+    return false;
+  }
+  const std::filesystem::path &output_path = converted.path;
+  std::filesystem::path temporary_path;
   int descriptor = -1;
   for (std::size_t attempt = 0; attempt < 100; ++attempt) {
-    temporary_path = path_string + ".tmp";
+    temporary_path = output_path;
+    temporary_path += ".tmp";
     if (attempt != 0) {
       temporary_path += '.' + std::to_string(attempt);
     }
-    descriptor = create_exclusive_file(temporary_path.c_str());
+    descriptor = create_exclusive_file(temporary_path);
     if (descriptor >= 0) {
       break;
     }
@@ -247,18 +267,21 @@ bool write_file_atomically(std::string_view path, std::string_view contents) {
   std::FILE *output = open_file_stream(descriptor);
   if (output == nullptr) {
     close_file_descriptor(descriptor);
-    std::remove(temporary_path.c_str());
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary_path, cleanup_error);
     return false;
   }
   const bool write_failed =
       std::fwrite(contents.data(), 1, contents.size(), output) != contents.size();
   const bool close_failed = std::fclose(output) != 0;
   if (write_failed || close_failed) {
-    std::remove(temporary_path.c_str());
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary_path, cleanup_error);
     return false;
   }
-  if (!replace_file(temporary_path, path_string)) {
-    std::remove(temporary_path.c_str());
+  if (!replace_file(temporary_path, output_path)) {
+    std::error_code cleanup_error;
+    std::filesystem::remove(temporary_path, cleanup_error);
     return false;
   }
   return true;
@@ -286,6 +309,26 @@ int emit_c_file(std::string_view source_path, std::string_view output_path) {
   return 0;
 }
 
+struct EnvironmentCompiler {
+  bool ok;
+  std::string value;
+};
+
+EnvironmentCompiler read_environment_compiler() {
+#ifdef _WIN32
+  const wchar_t *environment = _wgetenv(L"CC");
+  if (environment == nullptr) {
+    return EnvironmentCompiler{true, {}};
+  }
+  bennu::Utf8StringResult converted = bennu::wide_to_utf8(environment);
+  return EnvironmentCompiler{converted.ok, std::move(converted.text)};
+#else
+  const char *environment = std::getenv("CC");
+  return EnvironmentCompiler{
+      true, environment == nullptr ? std::string{} : std::string(environment)};
+#endif
+}
+
 int build_native_file(std::string_view source_path, std::string_view output_path,
                       std::string_view compiler) {
   FileReadResult loaded = read_source_file(source_path);
@@ -303,12 +346,14 @@ int build_native_file(std::string_view source_path, std::string_view output_path
     return 1;
   }
 
-  const char *environment = std::getenv("CC");
-  const std::string_view environment_compiler =
-      environment == nullptr ? std::string_view{} : std::string_view(environment);
+  const EnvironmentCompiler environment_compiler = read_environment_compiler();
+  if (!environment_compiler.ok) {
+    std::cerr << "error: native build: unable to decode CC as Unicode\n";
+    return 1;
+  }
   const bennu::NativeBuildResult built = bennu::build_native(
       bennu::NativeBuildRequest{emitted.source, output_path, compiler,
-                                environment_compiler});
+                                environment_compiler.value});
   if (!built.ok) {
     std::cerr << "error: native build: " << built.error << '\n';
     return 1;
@@ -345,9 +390,8 @@ int run_repl() {
   }
 }
 
-} // namespace
-
-int main(int argc, char **argv) {
+int run_cli(const std::vector<std::string> &argv) {
+  const std::size_t argc = argv.size();
   if (argc == 1) {
     std::cerr << "error: expected a subcommand or --help\n";
     return 1;
@@ -419,7 +463,8 @@ int main(int argc, char **argv) {
       std::cerr << "error: expected 'build <source> -o <output> [--cc <compiler>]'\n";
       return 1;
     }
-    const std::string_view compiler = argc == 7 ? argv[6] : "";
+    const std::string_view compiler =
+        argc == 7 ? std::string_view(argv[6]) : std::string_view{};
     if (argc == 7 && compiler.empty()) {
       std::cerr << "error: --cc requires a nonempty compiler\n";
       return 1;
@@ -430,3 +475,31 @@ int main(int argc, char **argv) {
   std::cerr << "error: unknown subcommand '" << argument << "'\n";
   return 1;
 }
+
+} // namespace
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t **wide_argv) {
+  SetConsoleOutputCP(CP_UTF8);
+  std::vector<std::string> argv;
+  argv.reserve(static_cast<std::size_t>(argc));
+  for (int index = 0; index < argc; ++index) {
+    bennu::Utf8StringResult converted = bennu::wide_to_utf8(wide_argv[index]);
+    if (!converted.ok) {
+      std::cerr << "error: unable to decode Unicode command line\n";
+      return 1;
+    }
+    argv.push_back(std::move(converted.text));
+  }
+  return run_cli(argv);
+}
+#else
+int main(int argc, char **raw_argv) {
+  std::vector<std::string> argv;
+  argv.reserve(static_cast<std::size_t>(argc));
+  for (int index = 0; index < argc; ++index) {
+    argv.emplace_back(raw_argv[index]);
+  }
+  return run_cli(argv);
+}
+#endif
