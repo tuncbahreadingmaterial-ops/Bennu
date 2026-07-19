@@ -81,6 +81,10 @@ foreach(required_text IN ITEMS
     "bennu-v0.1.0-macos-arm64.tar.gz"
     "draft=true"
     "prerelease=false"
+    "published_release_endpoint="
+    "release_api_endpoint=\"repos/\${repository}/releases/\${release_id}\""
+    "(.id | type)"
+    "created draft response metadata does not match"
     "cmp --silent"
     "--method PATCH"
     "release_by_id_endpoint="
@@ -93,9 +97,31 @@ foreach(required_text IN ITEMS
   endif()
 endforeach()
 
+set(publication_test "${BENNU_SOURCE_DIR}/tests/release_publication_test.py")
+if(NOT EXISTS "${publication_test}")
+  message(FATAL_ERROR "release publication state-machine test is missing: ${publication_test}")
+endif()
+file(READ "${publication_test}" publication_test_text)
+foreach(required_test_text IN ITEMS
+    "draft path queried the published-tag endpoint after creation"
+    "malformed creation response"
+    "asset upload failure"
+    "matching published release was not a no-op"
+    "tag not on live main"
+    "public verification failure caused another mutation")
+  string(FIND "${publication_test_text}" "${required_test_text}" found_at)
+  if(found_at EQUAL -1)
+    message(FATAL_ERROR "publication state-machine test is missing: ${required_test_text}")
+  endif()
+endforeach()
+
 set(decision_diary "${BENNU_SOURCE_DIR}/doc/decision-diary.md")
 file(READ "${decision_diary}" diary_text)
 string(FIND "${diary_text}" "Gate v0.1.0 publication behind target-native verified archives" diary_entry_at)
 if(diary_entry_at EQUAL -1)
   message(FATAL_ERROR "decision diary is missing the Issue #10 release topology decision")
+endif()
+string(FIND "${diary_text}" "Address draft Releases by creation ID until publication" draft_diary_entry_at)
+if(draft_diary_entry_at EQUAL -1)
+  message(FATAL_ERROR "decision diary is missing the Issue #20 draft endpoint decision")
 endif()

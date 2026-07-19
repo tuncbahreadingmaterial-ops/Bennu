@@ -10,7 +10,7 @@ asset_dir=$1
 expected_commit=$2
 tag=v0.1.0
 repository=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}
-release_endpoint="repos/${repository}/releases/tags/${tag}"
+published_release_endpoint="repos/${repository}/releases/tags/${tag}"
 expected_names=(
   bennu-v0.1.0-linux-x64.tar.gz
   bennu-v0.1.0-macos-arm64.tar.gz
@@ -52,6 +52,7 @@ fi
 
 work_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/bennu-publish.XXXXXX")
 release_json="$work_dir/release.json"
+creation_fields_file="$work_dir/creation-fields.txt"
 api_error="$work_dir/api-error.txt"
 cleanup() {
   rm -rf "$work_dir"
@@ -59,7 +60,7 @@ cleanup() {
 trap cleanup EXIT
 
 load_existing_release() {
-  if gh api "$release_endpoint" >"$release_json" 2>"$api_error"; then
+  if gh api "$published_release_endpoint" >"$release_json" 2>"$api_error"; then
     return 0
   fi
   if grep -q 'HTTP 404' "$api_error"; then
@@ -72,7 +73,20 @@ load_existing_release() {
 
 remote_field() {
   local expression=$1
-  gh api "$release_endpoint" --jq "$expression"
+  gh api "$release_api_endpoint" --jq "$expression"
+}
+
+verify_remote_metadata() {
+  local expected_draft=$1
+  local observed_id
+
+  observed_id=$(remote_field '.id')
+  [[ "$observed_id" =~ ^[0-9]+$ ]] &&
+    [[ "$observed_id" == "$release_id" ]] &&
+    [[ "$(remote_field '.tag_name')" == "$tag" ]] &&
+    [[ "$(remote_field '.target_commitish')" == "$expected_commit" ]] &&
+    [[ "$(remote_field '.draft')" == "$expected_draft" ]] &&
+    [[ "$(remote_field '.prerelease')" == false ]]
 }
 
 verify_remote_assets() {
@@ -81,7 +95,7 @@ verify_remote_assets() {
   local asset_id
   local downloaded
 
-  mapfile -t remote_names < <(gh api "$release_endpoint" --jq '.assets[].name' | LC_ALL=C sort)
+  mapfile -t remote_names < <(gh api "$release_api_endpoint" --jq '.assets[].name' | LC_ALL=C sort)
   if [[ ${#remote_names[@]} -ne ${#expected_names[@]} ]]; then
     return 1
   fi
@@ -92,7 +106,7 @@ verify_remote_assets() {
   done
 
   for name in "${expected_names[@]}"; do
-    asset_id=$(gh api "$release_endpoint" --jq ".assets[] | select(.name == \"$name\") | .id")
+    asset_id=$(gh api "$release_api_endpoint" --jq ".assets[] | select(.name == \"$name\") | .id")
     if [[ -z "$asset_id" ]]; then
       return 1
     fi
@@ -105,21 +119,20 @@ verify_remote_assets() {
   done
 }
 
-release_existed=false
 release_id=
+release_api_endpoint=$published_release_endpoint
 if load_existing_release; then
-  release_existed=true
-  if [[ "$(remote_field '.tag_name')" != "$tag" ]] || \
-     [[ "$(remote_field '.target_commitish')" != "$expected_commit" ]] || \
-     [[ "$(remote_field '.prerelease')" != false ]]; then
+  release_id=$(remote_field '.id')
+  if [[ ! "$release_id" =~ ^[0-9]+$ ]] || ! verify_remote_metadata false; then
     printf 'existing release metadata does not match the eligible v0.1.0 release\n' >&2
     exit 1
   fi
-  release_id=$(remote_field '.id')
   if ! verify_remote_assets; then
     printf 'existing release assets do not exactly match the verified archives; refusing overwrite\n' >&2
     exit 1
   fi
+  printf 'matching v0.1.0 release is already published; no changes made\n'
+  exit 0
 else
   gh api --method POST "repos/${repository}/releases" \
     -f tag_name="$tag" \
@@ -127,9 +140,27 @@ else
     -f name='Bennu v0.1.0' \
     -f body='Bennu Level 1: target-native tested packages for Linux x64, Windows x64, and macOS arm64.' \
     -F draft=true \
-    -F prerelease=false >"$release_json"
+    -F prerelease=false \
+    --jq '[.id, (.id | type), .tag_name, .target_commitish, .draft, .prerelease][]' >"$creation_fields_file"
 
-  release_id=$(gh api "$release_endpoint" --jq '.id')
+  mapfile -t creation_fields <"$creation_fields_file"
+  if [[ ${#creation_fields[@]} -ne 6 ]] || \
+     [[ ! "${creation_fields[0]}" =~ ^[0-9]+$ ]] || \
+     [[ "${creation_fields[1]}" != number ]] || \
+     [[ "${creation_fields[2]}" != "$tag" ]] || \
+     [[ "${creation_fields[3]}" != "$expected_commit" ]] || \
+     [[ "${creation_fields[4]}" != true ]] || \
+     [[ "${creation_fields[5]}" != false ]]; then
+    printf 'created draft response metadata does not match the eligible v0.1.0 release\n' >&2
+    exit 1
+  fi
+  release_id=${creation_fields[0]}
+  release_api_endpoint="repos/${repository}/releases/${release_id}"
+  if ! verify_remote_metadata true; then
+    printf 'created draft metadata does not match the eligible v0.1.0 release; draft remains unpublished\n' >&2
+    exit 1
+  fi
+
   for name in "${expected_names[@]}"; do
     case "$name" in
       *.zip) content_type=application/zip ;;
@@ -142,28 +173,16 @@ else
       --input "$asset_dir/$name" >/dev/null
   done
 
-  if ! verify_remote_assets; then
+  if ! verify_remote_metadata true || ! verify_remote_assets; then
     printf 'uploaded draft assets do not exactly match the verified archives; draft remains unpublished\n' >&2
     exit 1
   fi
 fi
 
 release_by_id_endpoint="repos/${repository}/releases/${release_id}"
-
-if [[ "$(remote_field '.draft')" == false ]]; then
-  if [[ "$release_existed" == true ]]; then
-    printf 'matching v0.1.0 release is already published; no changes made\n'
-  else
-    printf 'new release became public before the controlled publish step\n' >&2
-    exit 1
-  fi
-  exit 0
-fi
-
 gh api --method PATCH "$release_by_id_endpoint" -F draft=false -F prerelease=false >/dev/null
-if [[ "$(remote_field '.draft')" != false ]] || \
-   [[ "$(remote_field '.prerelease')" != false ]] || \
-   ! verify_remote_assets; then
+release_api_endpoint=$published_release_endpoint
+if ! verify_remote_metadata false || ! verify_remote_assets; then
   printf 'published release verification failed\n' >&2
   exit 1
 fi
