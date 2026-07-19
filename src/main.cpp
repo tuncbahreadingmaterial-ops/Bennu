@@ -1,9 +1,11 @@
 #include "bennu/c_emitter.hpp"
 #include "bennu/evaluator.hpp"
+#include "bennu/native_builder.hpp"
 
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -212,6 +214,33 @@ int emit_c_file(std::string_view source_path, std::string_view output_path) {
   return 0;
 }
 
+int build_native_file(std::string_view source_path, std::string_view output_path,
+                      std::string_view compiler) {
+  FileReadResult loaded = read_source_file(source_path);
+  if (!loaded.ok) {
+    std::cerr << source_path << ":1:1: file error: unable to read source\n";
+    return 1;
+  }
+
+  bennu::CEmissionResult emitted = bennu::emit_c_source(loaded.source);
+  if (!emitted.ok) {
+    write_diagnostic(source_path, emitted.error);
+    return 1;
+  }
+
+  const char *environment = std::getenv("CC");
+  const std::string_view environment_compiler =
+      environment == nullptr ? std::string_view{} : std::string_view(environment);
+  const bennu::NativeBuildResult built = bennu::build_native(
+      bennu::NativeBuildRequest{emitted.source, output_path, compiler,
+                                environment_compiler});
+  if (!built.ok) {
+    std::cerr << "error: native build: " << built.error << '\n';
+    return 1;
+  }
+  return 0;
+}
+
 int run_repl() {
   std::string line;
   while (true) {
@@ -295,8 +324,21 @@ int main(int argc, char **argv) {
   }
 
   if (argument == "build") {
-    std::cerr << "error: subcommand '" << argument << "' is not implemented\n";
-    return 1;
+    if (argc == 2) {
+      std::cerr << "error: expected a source path after 'build'\n";
+      return 1;
+    }
+    if ((argc != 5 && argc != 7) || std::string_view(argv[3]) != "-o" ||
+        (argc == 7 && std::string_view(argv[5]) != "--cc")) {
+      std::cerr << "error: expected 'build <source> -o <output> [--cc <compiler>]'\n";
+      return 1;
+    }
+    const std::string_view compiler = argc == 7 ? argv[6] : "";
+    if (argc == 7 && compiler.empty()) {
+      std::cerr << "error: --cc requires a nonempty compiler\n";
+      return 1;
+    }
+    return build_native_file(argv[2], argv[4], compiler);
   }
 
   std::cerr << "error: unknown subcommand '" << argument << "'\n";

@@ -7,7 +7,7 @@ if(BUILD_TESTING)
   enable_language(C)
 endif()
 
-add_library(bennu_core src/c_emitter.cpp src/evaluator.cpp)
+add_library(bennu_core src/c_emitter.cpp src/evaluator.cpp src/native_builder.cpp)
 target_include_directories(bennu_core PUBLIC include)
 set_target_properties(bennu_core PROPERTIES
   CXX_STANDARD 20
@@ -56,6 +56,22 @@ if(BUILD_TESTING)
     CXX_EXTENSIONS NO
   )
   add_test(NAME c_emitter.unit COMMAND bennu_c_emitter_tests)
+
+  add_executable(bennu_native_builder_tests tests/native_builder_test.cpp)
+  target_link_libraries(bennu_native_builder_tests PRIVATE bennu_core)
+  set_target_properties(bennu_native_builder_tests PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(NAME native_builder.unit COMMAND bennu_native_builder_tests)
+
+  add_executable(bennu_fake_c_compiler tests/fake_c_compiler.cpp)
+  set_target_properties(bennu_fake_c_compiler PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
 
   function(add_cli_contract_test name case_name)
     add_test(
@@ -116,5 +132,31 @@ if(BUILD_TESTING)
   if(UNIX)
     add_cli_contract_test(emit_c_unwritable_atomic emit_c_unwritable_atomic)
   endif()
-  add_cli_contract_test(unimplemented_build unimplemented_build)
+  add_cli_contract_test(build_missing_source build_missing_source)
+  add_cli_contract_test(build_invalid_arguments build_invalid_arguments)
+  add_test(
+    NAME cli.build_native
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_build_contract.cmake"
+  )
+  if(WIN32)
+    set(bennu_fallback_compiler_name "cl.exe")
+  else()
+    set(bennu_fallback_compiler_name "cc")
+  endif()
+  add_test(
+    NAME cli.build_fake_process
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_FAKE_COMPILER=$<TARGET_FILE:bennu_fake_c_compiler>"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      "-DBENNU_FALLBACK_COMPILER_NAME=${bennu_fallback_compiler_name}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_build_fake_process.cmake"
+  )
 endif()
