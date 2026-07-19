@@ -47,7 +47,7 @@ foreach(required_text IN ITEMS
     "ZipFile"
     "tar"
     "GetRelativePath"
-    "/usr/bin/test"
+    "GetUnixFileMode"
     "ExtractToDirectory")
   string(FIND "${package_text}" "${required_text}" found_at)
   if(found_at EQUAL -1)

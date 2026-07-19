@@ -65,6 +65,21 @@ function Assert-ExactEntries {
   }
 }
 
+function Assert-UnixExecutable {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $mode = [System.IO.File]::GetUnixFileMode($Path)
+  $required = [System.IO.UnixFileMode]::UserExecute -bor
+    [System.IO.UnixFileMode]::GroupExecute -bor
+    [System.IO.UnixFileMode]::OtherExecute
+  if (($mode -band $required) -ne $required) {
+    throw "Executable permissions were not preserved for ${Path}: $mode"
+  }
+}
+
 $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
 $licensePath = (Resolve-Path -LiteralPath $License).Path
@@ -147,8 +162,8 @@ try {
 
     $extractedExecutable = Join-Path $extractRoot $executableName
     if ($Platform -ne "windows-x64") {
-      Invoke-Checked -FilePath "/usr/bin/test" -Arguments @("-x", $stagedExecutable) | Out-Null
-      Invoke-Checked -FilePath "/usr/bin/test" -Arguments @("-x", $extractedExecutable) | Out-Null
+      Assert-UnixExecutable -Path $stagedExecutable
+      Assert-UnixExecutable -Path $extractedExecutable
     }
     Assert-Level1Output -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) -Journey "extracted archive"
 
