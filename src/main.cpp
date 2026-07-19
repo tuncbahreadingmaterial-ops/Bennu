@@ -6,9 +6,11 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #ifdef _WIN32
@@ -97,6 +99,61 @@ FileReadResult read_source_file(std::string_view path) {
       return FileReadResult{true, std::move(source)};
     }
   }
+}
+
+struct SourceOutputIdentity {
+  bool ok;
+  bool aliases;
+};
+
+SourceOutputIdentity
+check_source_output_identity(std::string_view source_path,
+                             std::string_view output_path) {
+  const std::filesystem::path source{std::string(source_path)};
+  const std::filesystem::path output{std::string(output_path)};
+  std::error_code error;
+  const std::filesystem::path normalized_source =
+      std::filesystem::absolute(source, error).lexically_normal();
+  if (error) {
+    return SourceOutputIdentity{false, false};
+  }
+  const std::filesystem::path normalized_output =
+      std::filesystem::absolute(output, error).lexically_normal();
+  if (error) {
+    return SourceOutputIdentity{false, false};
+  }
+  if (normalized_source == normalized_output) {
+    return SourceOutputIdentity{true, true};
+  }
+
+  error.clear();
+  const bool aliases = std::filesystem::equivalent(source, output, error);
+  if (!error) {
+    return SourceOutputIdentity{true, aliases};
+  }
+
+  error.clear();
+  const bool output_exists = std::filesystem::exists(output, error);
+  if (error || output_exists) {
+    return SourceOutputIdentity{false, false};
+  }
+  return SourceOutputIdentity{true, false};
+}
+
+bool reject_source_output_alias(std::string_view source_path,
+                                std::string_view output_path) {
+  const SourceOutputIdentity identity =
+      check_source_output_identity(source_path, output_path);
+  if (!identity.ok) {
+    std::cerr << "error: unable to determine source/output path identity\n";
+    return true;
+  }
+  if (identity.aliases) {
+    std::cerr
+        << "error: source/output alias: output path refers to input source\n";
+    return true;
+  }
+  return false;
 }
 
 int run_file(std::string_view path) {
@@ -201,6 +258,9 @@ int emit_c_file(std::string_view source_path, std::string_view output_path) {
     std::cerr << source_path << ":1:1: file error: unable to read source\n";
     return 1;
   }
+  if (reject_source_output_alias(source_path, output_path)) {
+    return 1;
+  }
 
   bennu::CEmissionResult emitted = bennu::emit_c_source(loaded.source);
   if (!emitted.ok) {
@@ -219,6 +279,9 @@ int build_native_file(std::string_view source_path, std::string_view output_path
   FileReadResult loaded = read_source_file(source_path);
   if (!loaded.ok) {
     std::cerr << source_path << ":1:1: file error: unable to read source\n";
+    return 1;
+  }
+  if (reject_source_output_alias(source_path, output_path)) {
     return 1;
   }
 
