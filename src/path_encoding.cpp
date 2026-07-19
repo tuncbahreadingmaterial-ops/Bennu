@@ -14,7 +14,8 @@ WideStringResult utf8_to_wide(std::string_view text) {
   if (text.empty()) {
     return WideStringResult{true, {}};
   }
-  if (text.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+  if (text.size() >
+      static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
     return WideStringResult{false, {}};
   }
   const int input_size = static_cast<int>(text.size());
@@ -35,7 +36,8 @@ Utf8StringResult wide_to_utf8(std::wstring_view text) {
   if (text.empty()) {
     return Utf8StringResult{true, {}};
   }
-  if (text.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+  if (text.size() >
+      static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
     return Utf8StringResult{false, {}};
   }
   const int input_size = static_cast<int>(text.size());
