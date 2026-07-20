@@ -107,8 +107,9 @@ remain empty.
 
 ## Evidence schemas
 
-Each `raw.csv` row records revision and dirty state; build type; host, OS, and
-CPU; configured C and C++ compiler paths, CMake identities/versions, and flags;
+Each `raw.csv` row records revision and dirty state; build type and CMake
+version; host, OS, and CPU; configured C and C++ compiler paths, identities,
+versions, and flags;
 workload identity, size, expected outcome, strategy, and one-based sample
 index; equivalence and failure-atomicity status; emitted C bytes and emission
 nanoseconds; C compile nanoseconds; executable bytes; execution nanoseconds;
@@ -119,7 +120,7 @@ fields empty.
 The exact `raw.csv` column order is:
 
 ```text
-revision,dirty,build_type,host,os,cpu,
+revision,dirty,build_type,cmake_version,host,os,cpu,
 c_compiler,c_compiler_id,c_compiler_version,c_flags,
 cxx_compiler,cxx_compiler_id,cxx_compiler_version,cxx_flags,
 workload_id,workload_size,expected_outcome,strategy,sample_index,
@@ -133,7 +134,7 @@ evaluator validation and canonical formatting, candidate source construction,
 and source transfer to the driver. Compile and execution time each surround
 only their corresponding child process.
 
-`metadata.json` uses the run-level provenance keys from the first 14 raw
+`metadata.json` uses the run-level provenance keys from the first 15 raw
 columns, plus `peak_memory_method`, `aggregation`, `warmup`,
 `hybrid_threshold`, and `samples`. `summary.csv` groups by workload and
 strategy and contains `samples`, equivalence status, and one `median_...`
@@ -149,6 +150,7 @@ serialization, and generic process glue are intentionally outside them and
 remain inspectable in the same file. These counts are implementation-surface
 evidence, not a quality or performance score.
 
-No generated measurement files or final strategy claim should be committed
-until the Release evidence is reviewed and the Issue #33 decision-diary entry
-is written.
+The reviewed clean-Release run and selected flat-lowering decision are retained
+under `doc/evidence/issue-33/` and in `doc/decision-diary.md`. Regeneration
+writes only beneath the build tree; replacing durable evidence requires a new
+reviewed run rather than silently overwriting the committed files.

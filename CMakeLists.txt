@@ -144,6 +144,7 @@ if(BENNU_BUILD_ISSUE33_BENCHMARK)
       --output "${CMAKE_CURRENT_BINARY_DIR}/issue33-evidence"
       --samples 5
       --build-type "$<CONFIG>"
+      --cmake-version "${CMAKE_VERSION}"
       --c-compiler-id "${CMAKE_C_COMPILER_ID}"
       --c-compiler-version "${CMAKE_C_COMPILER_VERSION}"
       --cxx-compiler "${CMAKE_CXX_COMPILER}"

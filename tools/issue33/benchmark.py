@@ -21,6 +21,7 @@ RAW_FIELDS = (
     "revision",
     "dirty",
     "build_type",
+    "cmake_version",
     "host",
     "os",
     "cpu",
@@ -284,15 +285,30 @@ def git_text(source_dir: Path, arguments: list[str]) -> str:
     return completed.stdout.decode("utf-8").strip()
 
 
+def cpu_identity() -> str:
+    if platform.system() == "Linux":
+        try:
+            for line in Path("/proc/cpuinfo").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                key, separator, value = line.partition(":")
+                if separator and key.strip() == "model name" and value.strip():
+                    return value.strip()
+        except OSError:
+            pass
+    return platform.processor() or platform.machine()
+
+
 def base_metadata(args: argparse.Namespace, peak_memory: bool) -> dict[str, str]:
     dirty = bool(git_text(args.source_dir, ["status", "--porcelain", "--untracked-files=all"]))
     return {
         "revision": git_text(args.source_dir, ["rev-parse", "HEAD"]),
         "dirty": str(dirty).lower(),
         "build_type": args.build_type,
+        "cmake_version": args.cmake_version,
         "host": platform.node(),
         "os": platform.platform(),
-        "cpu": platform.processor() or platform.machine(),
+        "cpu": cpu_identity(),
         "c_compiler": str(Path(args.cc).resolve()),
         "c_compiler_id": args.c_compiler_id,
         "c_compiler_version": args.c_compiler_version,
@@ -443,6 +459,7 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--output", type=Path, required=True)
             sub.add_argument("--samples", type=int, default=5)
             sub.add_argument("--build-type", required=True)
+            sub.add_argument("--cmake-version", required=True)
             sub.add_argument("--c-compiler-id", required=True)
             sub.add_argument("--c-compiler-version", required=True)
             sub.add_argument("--cxx-compiler", required=True)
