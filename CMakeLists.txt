@@ -18,14 +18,11 @@ endif()
 
 set(bennu_implementation_sources
   src/application.cpp
-  src/c_emitter.cpp
   src/error.cpp
-  src/evaluator.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
   src/primitive.cpp
   src/rewrite.cpp
-  src/rewrite_backend.cpp
   src/rewrite_c_runtime.cpp
   src/resources.cpp
   src/value.cpp
@@ -164,6 +161,7 @@ if(BUILD_TESTING)
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
+    tests/public_cutover_conformance.cpp
   )
   target_include_directories(bennu_tests PRIVATE include)
   target_include_directories(bennu_tests SYSTEM PRIVATE third_party/doctest)
@@ -177,6 +175,18 @@ if(BUILD_TESTING)
     CXX_EXTENSIONS NO
   )
   add_test(NAME unit.doctest COMMAND bennu_tests)
+  add_test(
+    NAME spec.traceability
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability.cmake"
+  )
+  add_test(
+    NAME architecture.obsolete_surface
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/obsolete_surface_contract.cmake"
+  )
   add_test(
     NAME architecture.doctest_topology
     COMMAND
@@ -203,39 +213,6 @@ if(BUILD_TESTING)
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
-  )
-
-  add_executable(bennu_rewrite_backend_test_driver
-    ${bennu_implementation_sources}
-    tests/rewrite_backend_test_driver.cpp
-  )
-  target_include_directories(bennu_rewrite_backend_test_driver PRIVATE
-    include
-    src
-  )
-  target_include_directories(bennu_rewrite_backend_test_driver SYSTEM PRIVATE
-    third_party/doctest
-  )
-  target_compile_definitions(bennu_rewrite_backend_test_driver PRIVATE
-    BENNU_REWRITE_BACKEND_TEST_DRIVER
-    DOCTEST_CONFIG_DISABLE
-    DOCTEST_CONFIG_NO_EXCEPTIONS
-    DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
-  )
-  set_target_properties(bennu_rewrite_backend_test_driver PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO
-  )
-  add_test(
-    NAME rewrite_backend.differential
-    COMMAND
-      "${CMAKE_COMMAND}"
-      "-DBENNU_REWRITE_BACKEND_DRIVER=$<TARGET_FILE:bennu_rewrite_backend_test_driver>"
-      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
-      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
-      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/rewrite_backend_contract.cmake"
   )
 
   function(add_cli_contract_test name case_name)
@@ -299,6 +276,13 @@ if(BUILD_TESTING)
   endif()
   add_cli_contract_test(build_missing_source build_missing_source)
   add_cli_contract_test(build_invalid_arguments build_invalid_arguments)
+  add_test(
+    NAME docs.smoke
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/documentation_smoke.cmake"
+  )
   add_test(
     NAME cli.build_native
     COMMAND

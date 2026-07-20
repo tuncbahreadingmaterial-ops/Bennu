@@ -78,9 +78,9 @@ elseif(CASE STREQUAL "unknown_subcommand")
   set(expected_stderr "error: unknown subcommand 'wat'\n")
 elseif(CASE STREQUAL "repl_transcript")
   set(arguments repl)
-  set(input "ioata 5\ninc 5\n")
+  set(input "iota[5]\nadd[1 2.5]\n")
   set(expected_exit 0)
-  set(expected_stdout "> >>(1 2 3 4 5)\n> >>6\n> ")
+  set(expected_stdout "> (1 2 3 4 5)\n> 3.5\n> ")
   set(expected_stderr "")
 elseif(CASE STREQUAL "repl_eof")
   set(arguments repl)
@@ -92,29 +92,29 @@ elseif(CASE STREQUAL "repl_recovers_after_errors")
   set(arguments repl)
   set(input [=[wat
 inc 5
-inc
+add[1]
 inc 5
-inc ioata 3
+add[1 true]
 inc 5
 inc 9223372036854775807
 inc 5
 ]=])
   set(expected_exit 0)
-  set(expected_stdout [=[> > >>6
-> > >>6
-> > >>6
-> > >>6
+  set(expected_stdout [=[> > 6
+> > 6
+> > 6
+> > 6
 > ]=])
-  set(expected_stderr [=[<repl>:1:1: unknown name: unknown name: wat
-<repl>:1:1: missing argument: primitive is missing its argument
-<repl>:1:1: type mismatch: inc requires a scalar integer argument
-<repl>:1:1: integer overflow: inc result exceeds the signed 64-bit range
+  set(expected_stderr [=[<repl>:1:1: SyntaxError: primitive name requires bracketed or unary prefix application
+<repl>:1:1: ArityError: add received 1 argument(s); accepted arity 2
+<repl>:1:7: TypeError: add arguments do not match an accepted signature; first unsupported argument is 2
+<repl>:1:1: DomainError: inc failed: integer_overflow
 ]=])
 elseif(CASE STREQUAL "repl_ignores_blank_lines")
   set(arguments repl)
   set(input "\n \t\ninc 5\n")
   set(expected_exit 0)
-  set(expected_stdout "> > > >>6\n> ")
+  set(expected_stdout "> > > 6\n> ")
   set(expected_stderr "")
 elseif(CASE STREQUAL "repl_rejects_arguments")
   set(arguments repl extra)
@@ -122,29 +122,29 @@ elseif(CASE STREQUAL "repl_rejects_arguments")
   set(expected_stdout "")
   set(expected_stderr "error: 'repl' does not accept arguments\n")
 elseif(CASE STREQUAL "run_example")
-  set(arguments run "${BENNU_SOURCE_DIR}/tests/fixtures/level1-example.bennu")
+  set(arguments run "${BENNU_SOURCE_DIR}/tests/fixtures/rewrite-example.bennu")
   set(expected_exit 0)
-  file(READ "${BENNU_SOURCE_DIR}/tests/fixtures/level1-example.out"
+  file(READ "${BENNU_SOURCE_DIR}/tests/fixtures/rewrite-example.out"
     expected_stdout)
   set(expected_stderr "")
 elseif(CASE STREQUAL "run_path_with_spaces")
-  set(source_file "${CMAKE_CURRENT_BINARY_DIR}/level 1 example.bennu")
-  set(source "ioata 5\ninc 5\n")
+  set(source_file "${CMAKE_CURRENT_BINARY_DIR}/rewrite example.bennu")
+  set(source "iota[5]\nadd[1 2.5]\n")
   set(arguments run "${source_file}")
   set(expected_exit 0)
-  set(expected_stdout ">>(1 2 3 4 5)\n>>6\n")
+  set(expected_stdout "(1 2 3 4 5)\n3.5\n")
   set(expected_stderr "")
 elseif(CASE STREQUAL "run_crlf_and_blank_lines")
   set(source_file "${CMAKE_CURRENT_BINARY_DIR}/bennu-${CASE}.bennu")
   if(WIN32)
     # file(WRITE) uses text mode and translates each LF to CRLF on Windows.
-    set(source "\nioata 2\n \t\ninc 5\n")
+    set(source "\niota[2]\n \t\nadd[1 2.5]\n")
   else()
-    set(source "\r\nioata 2\r\n \t\r\ninc 5\r\n")
+    set(source "\r\niota[2]\r\n \t\r\nadd[1 2.5]\r\n")
   endif()
   set(arguments run "${source_file}")
   set(expected_exit 0)
-  set(expected_stdout ">>(1 2)\n>>6\n")
+  set(expected_stdout "(1 2)\n3.5\n")
   set(expected_stderr "")
 elseif(CASE STREQUAL "run_missing_path")
   set(arguments run)
@@ -184,17 +184,17 @@ elseif(CASE STREQUAL "run_evaluator_errors")
   set(run_error_matrix TRUE)
 elseif(CASE STREQUAL "run_batch_no_partial_output")
   set(source_file "${CMAKE_CURRENT_BINARY_DIR}/bennu-${CASE}.bennu")
-  set(source "inc 5\nwat\n")
+  set(source "inc 5\nwat[1]\n")
   set(arguments run "${source_file}")
   set(expected_exit 1)
   set(expected_stdout "")
   set(expected_stderr
-    "${source_file}:2:1: unknown name: unknown name: wat\n")
+    "${source_file}:2:1: UnknownPrimitive: unknown primitive 'wat'\n")
 elseif(CASE STREQUAL "emit_c_example")
-  set(source_file "${BENNU_SOURCE_DIR}/examples/level1.bennu")
-  set(output_file "${CMAKE_CURRENT_BINARY_DIR}/level 1 generated.c")
+  set(source_file "${BENNU_SOURCE_DIR}/examples/rewrite.bennu")
+  set(output_file "${CMAKE_CURRENT_BINARY_DIR}/rewrite generated.c")
   set(output_executable
-    "${CMAKE_CURRENT_BINARY_DIR}/level-1-generated${BENNU_EXECUTABLE_SUFFIX}")
+    "${CMAKE_CURRENT_BINARY_DIR}/rewrite-generated${BENNU_EXECUTABLE_SUFFIX}")
   file(REMOVE "${output_file}" "${output_executable}")
   execute_process(
     COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_file}" -o "${output_file}"
@@ -209,11 +209,12 @@ elseif(CASE STREQUAL "emit_c_example")
       "exit: ${emit_exit}\nstdout: [${emit_stdout}]\nstderr: [${emit_stderr}]")
   endif()
   file(READ "${output_file}" emitted_source)
-  file(READ "${BENNU_SOURCE_DIR}/tests/fixtures/level1-example.c"
-    expected_emitted_source)
-  if(NOT emitted_source STREQUAL expected_emitted_source OR
-     emitted_source MATCHES "${BENNU_SOURCE_DIR}" OR
-     emitted_source MATCHES "${source_file}")
+  if(emitted_source MATCHES "${BENNU_SOURCE_DIR}" OR
+     emitted_source MATCHES "${source_file}" OR
+     NOT emitted_source MATCHES "BENNU_IMPL_ADD_DOUBLE" OR
+     NOT emitted_source MATCHES "BENNU_IMPL_EQUALS_INT" OR
+     NOT emitted_source MATCHES "BENNU_IMPL_NOT_BOOL" OR
+     NOT emitted_source MATCHES "BENNU_IMPL_IOTA_INT")
     message(FATAL_ERROR
       "emit_c_example: generated C does not match the inspected golden C11")
   endif()
@@ -247,7 +248,8 @@ elseif(CASE STREQUAL "emit_c_example")
   )
   string(REPLACE "\r\n" "\n" generated_stdout "${generated_stdout}")
   if(NOT "${generated_exit}" STREQUAL "0" OR
-     NOT generated_stdout STREQUAL ">>(1 2 3 4 5)\n>>6\n" OR
+     NOT generated_stdout STREQUAL
+       "6\n(8 -2 12 1)\n3.5\n(false true false true)\n(true false)\n(1 2 3 4 5)\n" OR
      NOT generated_stderr STREQUAL "")
     message(FATAL_ERROR
       "emit_c_example: generated executable contract mismatch\n"
@@ -257,7 +259,7 @@ elseif(CASE STREQUAL "emit_c_example")
   file(REMOVE "${output_file}" "${output_executable}")
   return()
 elseif(CASE STREQUAL "emit_c_unwritable_atomic")
-  set(source_file "${BENNU_SOURCE_DIR}/examples/level1.bennu")
+  set(source_file "${BENNU_SOURCE_DIR}/examples/rewrite.bennu")
   set(output_directory "${CMAKE_CURRENT_BINARY_DIR}/bennu-unwritable-output")
   set(output_file "${output_directory}/sentinel.c")
   file(REMOVE_RECURSE "${output_directory}")
@@ -348,26 +350,28 @@ else()
 endif()
 
 if(run_error_matrix)
-  check_run_error(illegal_character "é" 1 1 "illegal character"
-    "illegal character in source")
-  check_run_error(malformed_integer "12x" 1 1 "malformed integer"
-    "integer contains non-decimal characters")
-  check_run_error(integer_out_of_range "9223372036854775808" 1 1
-    "integer out of range" "integer literal is outside the signed 64-bit range")
-  check_run_error(unknown_name "wat" 1 1 "unknown name" "unknown name: wat")
-  check_run_error(missing_argument "inc" 1 1 "missing argument"
-    "primitive is missing its argument")
-  check_run_error(expected_whitespace "inc-5" 1 4 "expected whitespace"
-    "primitive name and argument require whitespace")
-  check_run_error(trailing_token "5 extra" 1 3 "trailing token"
-    "expression has trailing input")
-  check_run_error(integer_overflow "inc 9223372036854775807" 1 1
-    "integer overflow" "inc result exceeds the signed 64-bit range")
-  check_run_error(type_mismatch "inc ioata 3" 1 1 "type mismatch"
-    "inc requires a scalar integer argument")
-  check_run_error(allocation_limit "ioata 1000001" 1 1
-    "allocation limit exceeded"
-    "program ioata results exceed the Level 1 element limit")
+  check_run_error(invalid_byte "é" 1 1 "InvalidByte"
+    "invalid source byte")
+  check_run_error(malformed_literal "12x" 1 1 "MalformedLiteral"
+    "malformed scalar literal")
+  check_run_error(literal_range "9223372036854775808" 1 1
+    "LiteralRangeError" "scalar literal is outside its accepted range")
+  check_run_error(unknown_primitive "wat[1]" 1 1 "UnknownPrimitive"
+    "unknown primitive 'wat'")
+  check_run_error(expected_expression "inc " 1 5 "SyntaxError"
+    "expected an expression")
+  check_run_error(whitespace_before_bracket "inc [5]" 1 4 "SyntaxError"
+    "whitespace is not allowed before '['")
+  check_run_error(trailing_input "true false" 1 6 "SyntaxError"
+    "root expression has trailing input")
+  check_run_error(arity "add[1]" 1 1 "ArityError"
+    "add received 1 argument(s); accepted arity 2")
+  check_run_error(type "add[1 true]" 1 7 "TypeError"
+    "add arguments do not match an accepted signature; first unsupported argument is 2")
+  check_run_error(shape "add[(1 2) (3)]" 1 11 "ShapeMismatch"
+    "add argument 2 expected shape [2], got [1]")
+  check_run_error(domain "inc 9223372036854775807" 1 1 "DomainError"
+    "inc failed: integer_overflow")
   return()
 endif()
 

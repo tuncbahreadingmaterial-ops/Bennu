@@ -112,9 +112,7 @@ foreach(internal_name IN ITEMS
     "evaluate_program"
     "tokenize("
     "apply_inc"
-    "apply_ioata"
-    "invalid_program"
-    "ioata_element_limit")
+    "invalid_program")
   string(FIND "${evaluator_header_text}" "${internal_name}" exposed_at)
   if(NOT exposed_at EQUAL -1)
     message(FATAL_ERROR
@@ -122,7 +120,7 @@ foreach(internal_name IN ITEMS
   endif()
 endforeach()
 
-foreach(implementation IN ITEMS evaluator c_emitter native_builder)
+foreach(implementation IN ITEMS application native_builder rewrite)
   set(source "${BENNU_SOURCE_DIR}/src/${implementation}.cpp")
   file(READ "${source}" source_text)
   require_text("${source_text}" "doctest/doctest.h"

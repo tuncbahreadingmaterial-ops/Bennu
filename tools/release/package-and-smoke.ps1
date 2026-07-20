@@ -32,7 +32,7 @@ function Invoke-Checked {
   return $output
 }
 
-function Assert-Level1Output {
+function Assert-RewriteOutput {
   param(
     [Parameter(Mandatory = $true)]
     [object[]]$Actual,
@@ -41,7 +41,7 @@ function Assert-Level1Output {
   )
 
   $normalized = (($Actual | ForEach-Object { "$_" }) -join "`n").Replace("`r", "").TrimEnd("`n")
-  $expected = ">>(1 2 3 4 5)`n>>6"
+  $expected = "6`n(8 -2 12 1)`n3.5`n(false true false true)`n(true false)`n(1 2 3 4 5)"
   if ($normalized -cne $expected) {
     throw "$Journey output mismatch. Expected '$expected', observed '$normalized'"
   }
@@ -150,9 +150,9 @@ New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
 try {
   Push-Location $workRoot
   try {
-    Assert-Level1Output -Actual @(Invoke-Checked -FilePath $bennuPath -Arguments @("run", $sourcePath)) -Journey "file runner"
+    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $bennuPath -Arguments @("run", $sourcePath)) -Journey "file runner"
 
-    $generatedC = Join-Path $workRoot "level1.c"
+    $generatedC = Join-Path $workRoot "rewrite.c"
     $generatedExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "emitted.exe" } else { "emitted" })
     Invoke-Checked -FilePath $bennuPath -Arguments @("emit-c", $sourcePath, "-o", $generatedC) | Out-Null
     if ($Platform -eq "windows-x64") {
@@ -160,7 +160,7 @@ try {
     } else {
       Invoke-Checked -FilePath "cc" -Arguments @("-std=c11", $generatedC, "-o", $generatedExecutable) | Out-Null
     }
-    Assert-Level1Output -Actual @(Invoke-Checked -FilePath $generatedExecutable -Arguments @()) -Journey "emitted C executable"
+    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $generatedExecutable -Arguments @()) -Journey "emitted C executable"
 
     $nativeExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "native.exe" } else { "native" })
     $hadCC = Test-Path Env:CC
@@ -175,7 +175,7 @@ try {
         Remove-Item Env:CC -ErrorAction SilentlyContinue
       }
     }
-    Assert-Level1Output -Actual @(Invoke-Checked -FilePath $nativeExecutable -Arguments @()) -Journey "fallback native build"
+    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $nativeExecutable -Arguments @()) -Journey "fallback native build"
 
     $stagedExecutable = Join-Path $stageRoot $executableName
     Copy-Item -LiteralPath $bennuPath -Destination $stagedExecutable
@@ -213,7 +213,7 @@ try {
       Assert-UnixExecutable -Path $stagedExecutable
       Assert-UnixExecutable -Path $extractedExecutable
     }
-    Assert-Level1Output -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) -Journey "extracted archive"
+    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) -Journey "extracted archive"
     if ($Platform -eq "windows-x64") {
       & (Join-Path $PSScriptRoot "verify-clean-windows-package.ps1") `
         -BennuExecutable $extractedExecutable

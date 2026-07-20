@@ -73,12 +73,12 @@ if ($env:OS -cne "Windows_NT" -or -not [Environment]::Is64BitOperatingSystem) {
 
 $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) "bennu-clean-$([guid]::NewGuid().ToString('N'))"
-$sourcePath = Join-Path $workRoot "level1.bennu"
-$emittedPath = Join-Path $workRoot "level1.c"
-$nativePath = Join-Path $workRoot "level1.exe"
+$sourcePath = Join-Path $workRoot "rewrite.bennu"
+$emittedPath = Join-Path $workRoot "rewrite.c"
+$nativePath = Join-Path $workRoot "rewrite.exe"
 $runtimeRegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
 $minimumRuntimeVersion = [Version]"14.51.36231.0"
-$expectedOutput = ">>(1 2 3 4 5)`n>>6`n"
+$expectedOutput = "(1 2 3 4 5)`n3.5`n"
 $expectedHelp = @"
 Usage: bennu <command> [arguments]
        bennu --help
@@ -94,7 +94,7 @@ $hadCC = Test-Path Env:CC
 $savedCC = if ($hadCC) { $env:CC } else { $null }
 
 New-Item -ItemType Directory -Path $workRoot | Out-Null
-[System.IO.File]::WriteAllText($sourcePath, "ioata 5`ninc 5`n",
+[System.IO.File]::WriteAllText($sourcePath, "iota[5]`nadd[1 2.5]`n",
   [System.Text.UTF8Encoding]::new($false))
 
 try {
@@ -128,9 +128,9 @@ try {
   Assert-Success -Result $help -ExpectedStdout $expectedHelp -Journey "--help"
 
   $repl = Invoke-Captured -FilePath $bennuPath -Arguments @("repl") `
-    -WorkingDirectory $workRoot -StandardInput "ioata 5`ninc 5`n"
+    -WorkingDirectory $workRoot -StandardInput "iota[5]`nadd[1 2.5]`n"
   Assert-Success -Result $repl `
-    -ExpectedStdout "> >>(1 2 3 4 5)`n> >>6`n> " -Journey "repl"
+    -ExpectedStdout "> (1 2 3 4 5)`n> 3.5`n> " -Journey "repl"
 
   $run = Invoke-Captured -FilePath $bennuPath -Arguments @("run", $sourcePath) `
     -WorkingDirectory $workRoot

@@ -24,16 +24,16 @@ set(work_directory "${CMAKE_CURRENT_BINARY_DIR}/c emission negative")
 set(valid_source "${work_directory}/valid source.bennu")
 set(invalid_source "${work_directory}/invalid source.bennu")
 set(overflow_source "${work_directory}/overflow source.bennu")
-set(cumulative_source "${work_directory}/cumulative source.bennu")
+set(shape_source "${work_directory}/shape source.bennu")
 set(output_file "${work_directory}/existing output.c")
 set(missing_input "${work_directory}/missing source.bennu")
 set(missing_parent_output "${work_directory}/missing parent/output.c")
 file(REMOVE_RECURSE "${work_directory}")
 file(MAKE_DIRECTORY "${work_directory}")
-file(WRITE "${valid_source}" "inc 5\n")
-file(WRITE "${invalid_source}" "inc 5\nwat\n")
+file(WRITE "${valid_source}" "add[1 2.5]\n")
+file(WRITE "${invalid_source}" "inc 5\nwat[1]\n")
 file(WRITE "${overflow_source}" "inc 9223372036854775807\n")
-file(WRITE "${cumulative_source}" "ioata 600000\nioata 600000\n")
+file(WRITE "${shape_source}" "inc 5\nadd[(1 2) (3)]\n")
 
 expect_failure(missing_source
   "error: expected a source path after 'emit-c'\n"
@@ -59,14 +59,14 @@ expect_failure(directory_input
 
 file(REMOVE "${output_file}")
 expect_failure(invalid_source_new_output
-  "${invalid_source}:2:1: unknown name: unknown name: wat\n"
+  "${invalid_source}:2:1: UnknownPrimitive: unknown primitive 'wat'\n"
   emit-c "${invalid_source}" -o "${output_file}")
 if(EXISTS "${output_file}")
   message(FATAL_ERROR "invalid source left a new output file")
 endif()
 
 foreach(source_with_error "${invalid_source}" "${overflow_source}"
-                          "${cumulative_source}")
+                          "${shape_source}")
   file(WRITE "${output_file}" "sentinel bytes\n")
   execute_process(
     COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_with_error}" -o "${output_file}"

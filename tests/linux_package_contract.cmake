@@ -31,7 +31,7 @@ execute_process(
     "${BENNU_BASH_EXECUTABLE}"
     "${BENNU_SOURCE_DIR}/tools/release/verify-linux-package.sh"
     "${archive}"
-    "${BENNU_SOURCE_DIR}/examples/level1.bennu"
+    "${BENNU_SOURCE_DIR}/examples/rewrite.bennu"
     "${BENNU_SOURCE_DIR}/LICENSE"
   RESULT_VARIABLE verify_status
   OUTPUT_VARIABLE verify_stdout

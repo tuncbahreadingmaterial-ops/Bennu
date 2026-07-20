@@ -8,7 +8,7 @@ set(work "${CMAKE_CURRENT_BINARY_DIR}/source output alias contract")
 set(source "${work}/Source Alias.bennu")
 set(nested "${work}/nested")
 set(trace "${work}/compiler trace.txt")
-set(source_bytes "ioata 5\ninc 5\n")
+set(source_bytes "iota[5]\nadd[1 2.5]\n")
 file(REMOVE_RECURSE "${work}")
 file(MAKE_DIRECTORY "${work}" "${nested}")
 

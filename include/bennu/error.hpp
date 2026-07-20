@@ -19,16 +19,12 @@ struct SourceLocation {
 
 enum class ErrorKind {
   none,
-  illegal_character,
-  malformed_integer,
-  integer_out_of_range,
+  invalid_byte,
+  malformed_literal,
+  literal_range_error,
+  syntax_error,
   unknown_name,
-  missing_argument,
-  expected_whitespace,
-  trailing_token,
-  integer_overflow,
   type_mismatch,
-  allocation_limit_exceeded,
   empty_expression,
   arity_error,
   shape_mismatch,
@@ -36,6 +32,7 @@ enum class ErrorKind {
   resource_error,
   domain_error,
   invalid_primitive_table,
+  formatting_error,
 };
 
 enum class ResourceErrorReason {

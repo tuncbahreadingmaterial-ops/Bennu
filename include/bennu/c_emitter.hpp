@@ -15,6 +15,8 @@ struct CEmissionResult {
 };
 
 CEmissionResult emit_c_source(std::string_view source);
+CEmissionResult emit_c_source(std::string_view source,
+                              const EvaluationConfiguration &configuration);
 
 } // namespace bennu
 

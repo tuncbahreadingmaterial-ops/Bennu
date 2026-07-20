@@ -1,8 +1,9 @@
 #include "bennu/application.hpp"
+#include "bennu/c_emitter.hpp"
+#include "bennu/evaluator.hpp"
 #include "bennu/primitive.hpp"
 #include "bennu/resources.hpp"
 #include "bennu/value.hpp"
-#include "rewrite_backend.hpp"
 #include "rewrite_c_runtime.hpp"
 
 #include "doctest/doctest.h"
@@ -1363,6 +1364,13 @@ struct RewriteEvaluationCreationData {
   AllocationFailureInjection allocation_failure;
 };
 
+struct CBackendConfiguration {
+  ExecutionProfile profile;
+  ResourceLimits limits;
+  AllocationFailureInjection validation_allocation_failure;
+  AllocationFailureInjection runtime_allocation_failure;
+};
+
 struct RewriteEvaluationDiagnostic {
   RewriteEvaluationStage stage;
   RewriteDiagnostic rewrite;
@@ -1633,8 +1641,208 @@ void release_rewrite_evaluation_result(RewriteEvaluationResult &result) {
   result.formatted.clear();
 }
 
-RewriteEvaluationResult evaluate_rewrite_source(
-    std::string_view source, const RewriteEvaluationCreationData &creation) {
+std::string_view resource_reason_name(ResourceErrorReason reason) {
+  switch (reason) {
+  case ResourceErrorReason::size_overflow:
+    return "size_overflow";
+  case ResourceErrorReason::profile_limit:
+    return "profile_limit";
+  case ResourceErrorReason::allocation_unavailable:
+    return "allocation_unavailable";
+  }
+  return "unknown_resource_failure";
+}
+
+std::string_view domain_reason_name(DomainErrorReason reason) {
+  switch (reason) {
+  case DomainErrorReason::integer_overflow:
+    return "integer_overflow";
+  }
+  return "unknown_domain_failure";
+}
+
+std::string source_at_span(std::string_view source, RewriteSpan span) {
+  if (span.begin.offset == 0U || span.end.offset < span.begin.offset ||
+      span.end.offset - 1U > source.size()) {
+    return {};
+  }
+  const std::size_t begin = span.begin.offset - 1U;
+  return std::string(source.substr(begin, span.end.offset - span.begin.offset));
+}
+
+std::string parse_error_message(RewriteParseError error) {
+  switch (error) {
+  case RewriteParseError::none:
+    return {};
+  case RewriteParseError::invalid_byte:
+    return "invalid source byte";
+  case RewriteParseError::malformed_literal:
+    return "malformed scalar literal";
+  case RewriteParseError::literal_range:
+    return "scalar literal is outside its accepted range";
+  case RewriteParseError::expected_expression:
+    return "expected an expression";
+  case RewriteParseError::primitive_requires_application:
+    return "primitive name requires bracketed or unary prefix application";
+  case RewriteParseError::whitespace_before_bracket:
+    return "whitespace is not allowed before '['";
+  case RewriteParseError::missing_separator:
+    return "sibling expressions require separating whitespace";
+  case RewriteParseError::mismatched_delimiter:
+    return "mismatched closing delimiter";
+  case RewriteParseError::missing_delimiter:
+    return "missing closing delimiter";
+  case RewriteParseError::bare_empty_vector:
+    return "empty vector requires Bool(), Int(), or Double()";
+  case RewriteParseError::heterogeneous_vector:
+    return "vector elements must have one scalar type";
+  case RewriteParseError::invalid_vector_element:
+    return "vector elements must be scalar literals";
+  case RewriteParseError::trailing_input:
+    return "root expression has trailing input";
+  case RewriteParseError::unknown_primitive:
+    return "unknown primitive";
+  }
+  return "invalid source";
+}
+
+ErrorKind parse_error_kind(RewriteParseError error) {
+  if (error == RewriteParseError::invalid_byte) {
+    return ErrorKind::invalid_byte;
+  }
+  if (error == RewriteParseError::malformed_literal) {
+    return ErrorKind::malformed_literal;
+  }
+  if (error == RewriteParseError::literal_range) {
+    return ErrorKind::literal_range_error;
+  }
+  if (error == RewriteParseError::unknown_primitive) {
+    return ErrorKind::unknown_name;
+  }
+  return ErrorKind::syntax_error;
+}
+
+std::string semantic_error_message(const Error &error) {
+  const std::string primitive =
+      error.primitive.has_value() ? error.primitive->name : "evaluation";
+  if (error.kind == ErrorKind::arity_error && error.arity.has_value()) {
+    std::string message = primitive + " received " +
+                          std::to_string(error.arity->supplied) +
+                          " argument(s); accepted arity";
+    if (error.arity->accepted.size() != 1U) {
+      message += " values";
+    }
+    for (const std::size_t accepted : error.arity->accepted) {
+      message += " " + std::to_string(accepted);
+    }
+    return message;
+  }
+  if (error.kind == ErrorKind::type_mismatch) {
+    std::string message = primitive + " arguments do not match an accepted signature";
+    if (error.argument_position.has_value()) {
+      message += "; first unsupported argument is " +
+                 std::to_string(*error.argument_position);
+    }
+    return message;
+  }
+  if (error.kind == ErrorKind::shape_mismatch && error.shape.has_value()) {
+    const std::size_t expected = error.shape->expected.empty()
+                                     ? 0U
+                                     : error.shape->expected.front();
+    const std::size_t actual =
+        error.shape->actual.empty() ? 0U : error.shape->actual.front();
+    return primitive + " argument " +
+           std::to_string(error.argument_position.value_or(0U)) +
+           " expected shape [" + std::to_string(expected) + "], got [" +
+           std::to_string(actual) + "]";
+  }
+  if (error.kind == ErrorKind::resource_error && error.resource.has_value()) {
+    return primitive + " resource request failed: " +
+           std::string(resource_reason_name(error.resource->reason));
+  }
+  if (error.kind == ErrorKind::domain_error && error.domain.has_value()) {
+    std::string message = primitive + " failed: " +
+                          std::string(domain_reason_name(error.domain->reason));
+    if (error.element_index.has_value()) {
+      message += " at result index " + std::to_string(*error.element_index);
+    }
+    return message;
+  }
+  if (error.kind == ErrorKind::invalid_primitive_table) {
+    return "built-in primitive table is invalid";
+  }
+  if (error.kind == ErrorKind::formatting_error) {
+    return "evaluated value cannot be formatted canonically";
+  }
+  return "evaluation failed";
+}
+
+Error public_error_from_diagnostic(
+    std::string_view source, const RewriteEvaluationDiagnostic &diagnostic) {
+  if (diagnostic.error.kind != ErrorKind::none) {
+    Error error = diagnostic.error;
+    if (error.kind == ErrorKind::unknown_name &&
+        !error.primitive.has_value()) {
+      const std::string name = source_at_span(source, diagnostic.primary);
+      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.message = "unknown primitive '" + name + "'";
+    }
+    if (error.message.empty()) {
+      error.message = semantic_error_message(error);
+    }
+    return error;
+  }
+
+  if (diagnostic.stage == RewriteEvaluationStage::parse ||
+      diagnostic.stage == RewriteEvaluationStage::resolution) {
+    const RewriteParseError parse_error = diagnostic.rewrite.error;
+    Error error = make_error(
+        parse_error_kind(parse_error),
+        rewrite_source_location(diagnostic.primary.begin),
+        parse_error_message(parse_error));
+    if (parse_error == RewriteParseError::unknown_primitive) {
+      const std::string name = source_at_span(source, diagnostic.primary);
+      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.message += " '" + name + "'";
+    }
+    return error;
+  }
+
+  if (diagnostic.stage == RewriteEvaluationStage::formatting) {
+    return make_error(ErrorKind::formatting_error,
+                      rewrite_source_location(diagnostic.primary.begin),
+                      "evaluated value cannot be formatted canonically");
+  }
+  return make_error(ErrorKind::invalid_primitive_table,
+                    rewrite_source_location(diagnostic.primary.begin),
+                    "rewrite evaluation failed internally");
+}
+
+CBackendConfiguration trusted_local_c_configuration() {
+  return CBackendConfiguration{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+}
+
+EvaluationConfiguration trusted_local_evaluation_configuration() {
+  return EvaluationConfiguration{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt}};
+}
+
+CBackendConfiguration c_backend_configuration(
+    const EvaluationConfiguration &configuration) {
+  return CBackendConfiguration{
+      configuration.profile, configuration.limits,
+      AllocationFailureInjection{std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+}
+
+RewriteEvaluationResult evaluate_rewrite_source_impl(
+    std::string_view source, const RewriteEvaluationCreationData &creation,
+    bool require_single_root) {
   EvaluationResources resources = make_rewrite_resources(creation);
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
@@ -1645,6 +1853,29 @@ RewriteEvaluationResult evaluate_rewrite_source(
     diagnostic.primary = parsed.diagnostic.primary;
     diagnostic.context = parsed.diagnostic.context;
     diagnostic.related = parsed.diagnostic.related;
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  if (require_single_root && parsed.program.roots.size() != 1U) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::parse;
+    if (parsed.program.roots.empty()) {
+      diagnostic.primary = parsed.diagnostic.primary;
+      diagnostic.context = parsed.diagnostic.context;
+      diagnostic.error = make_error(
+          ErrorKind::empty_expression,
+          rewrite_source_location(parsed.diagnostic.primary.begin),
+          "expected one expression");
+    } else {
+      diagnostic.primary =
+          parsed.program.nodes[parsed.program.roots[1U]].span;
+      diagnostic.context = diagnostic.primary;
+      diagnostic.error = make_error(
+          ErrorKind::syntax_error,
+          rewrite_source_location(diagnostic.primary.begin),
+          "evaluate_expression accepts exactly one root expression");
+    }
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
@@ -1853,6 +2084,11 @@ RewriteEvaluationResult evaluate_rewrite_source(
                                  scalar_kernel_invocations};
 }
 
+RewriteEvaluationResult evaluate_rewrite_source(
+    std::string_view source, const RewriteEvaluationCreationData &creation) {
+  return evaluate_rewrite_source_impl(source, creation, false);
+}
+
 void append_c_unsigned(std::string &source, std::size_t value) {
   std::array<char, 32> digits{};
   const std::to_chars_result converted =
@@ -1974,7 +2210,7 @@ void append_literal_arrays(std::string &source,
 }
 
 void append_resource_initialization(
-    std::string &source, const RewriteBackendConfiguration &configuration) {
+    std::string &source, const CBackendConfiguration &configuration) {
   const auto append_presence = [&source](const std::optional<std::size_t> &limit) {
     source += limit.has_value() ? "1, " : "0, ";
   };
@@ -2057,20 +2293,26 @@ void append_call_node(std::string &source, std::size_t node_index,
   }
 }
 
-RewriteCBackendResult emit_rewrite_c_source_impl(
+CEmissionResult emit_rewrite_c_source_impl(
     std::string_view source,
-    const RewriteBackendConfiguration &configuration) {
+    const CBackendConfiguration &configuration) {
   const RewriteEvaluationCreationData creation{
       configuration.profile, configuration.limits,
       configuration.validation_allocation_failure};
   RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
   if (!evaluated.ok) {
-    return RewriteCBackendResult{false, {}, "rewrite validation failed"};
+    Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
+    release_rewrite_evaluation_result(evaluated);
+    return CEmissionResult{false, {}, std::move(error)};
   }
   if (evaluated.lowering.nodes.size() == 0U &&
       !evaluated.lowering.roots.empty()) {
     release_rewrite_evaluation_result(evaluated);
-    return RewriteCBackendResult{false, {}, "rewrite lowering failed"};
+    return CEmissionResult{
+        false, {},
+        make_error(ErrorKind::invalid_primitive_table,
+                   SourceLocation{1U, 1U, 1U},
+                   "typed rewrite lowering is internally inconsistent")};
   }
 
   std::string generated;
@@ -2146,7 +2388,9 @@ RewriteCBackendResult emit_rewrite_c_source_impl(
   }
   generated += "}\n";
   release_rewrite_evaluation_result(evaluated);
-  return RewriteCBackendResult{true, std::move(generated), {}};
+  return CEmissionResult{
+      true, std::move(generated),
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
 }
 
 #ifndef DOCTEST_CONFIG_DISABLE
@@ -3052,17 +3296,6 @@ TEST_CASE("rewrite parser preserves explicit arity before metadata validation") 
   CHECK_FALSE(parsed.program.calls[1].primitive.has_value());
 }
 
-TEST_CASE("rewrite resolution rejects the legacy primitive name at its span") {
-  RewriteParseResult parsed = parse_rewrite("ioata[3]");
-  REQUIRE(parsed.ok);
-  REQUIRE(parsed.program.calls.size() == 1U);
-  const RewriteResolutionResult resolution =
-      resolve_rewrite_primitives(parsed.program);
-  CHECK_FALSE(resolution.ok);
-  CHECK(resolution.diagnostic.error == RewriteParseError::unknown_primitive);
-  CHECK(span_is(resolution.diagnostic.primary, 1U, 1U, 1U, 6U, 1U, 6U));
-}
-
 TEST_CASE("rewrite flat program satisfies all arena and postorder invariants") {
   const RewriteParseResult parsed = parse_rewrite(
       "true\nadd[iota[3] inc 4 future[5 6 7]]\n(false true)\nInt()");
@@ -3943,32 +4176,74 @@ TEST_CASE("rewrite evaluator clears formatted roots after a formatting failure")
 
 } // namespace
 
-RewriteCBackendResult emit_rewrite_c_source_internal(
-    std::string_view source,
-    const RewriteBackendConfiguration &configuration) {
-  return emit_rewrite_c_source_impl(source, configuration);
+ValueResult evaluate_expression(std::string_view source) {
+  return evaluate_expression(source,
+                             trusted_local_evaluation_configuration());
 }
 
-#ifdef BENNU_REWRITE_BACKEND_TEST_DRIVER
-RewriteEvaluationTextResult evaluate_rewrite_text_internal(
+ValueResult evaluate_expression(
     std::string_view source,
-    const RewriteBackendConfiguration &configuration) {
+    const EvaluationConfiguration &configuration) {
   const RewriteEvaluationCreationData creation{
       configuration.profile, configuration.limits,
-      configuration.validation_allocation_failure};
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated =
+      evaluate_rewrite_source_impl(source, creation, true);
+  if (!evaluated.ok) {
+    Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
+    release_rewrite_evaluation_result(evaluated);
+    return ValueResult{false, make_int_value(0), std::move(error)};
+  }
+  if (evaluated.values.size() != 1U) {
+    release_rewrite_evaluation_result(evaluated);
+    return ValueResult{
+        false, make_int_value(0),
+        make_error(ErrorKind::invalid_primitive_table,
+                   SourceLocation{1U, 1U, 1U},
+                   "single-expression evaluation produced an invalid root count")};
+  }
+  Value value = std::move(evaluated.values.front());
+  evaluated.values.clear();
+  evaluated.formatted.clear();
+  return ValueResult{
+      true, std::move(value),
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
+}
+
+ProgramResult evaluate_source(std::string_view source) {
+  return evaluate_source(source, trusted_local_evaluation_configuration());
+}
+
+ProgramResult evaluate_source(
+    std::string_view source,
+    const EvaluationConfiguration &configuration) {
+  const RewriteEvaluationCreationData creation{
+      configuration.profile, configuration.limits,
+      AllocationFailureInjection{std::nullopt}};
   RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
   if (!evaluated.ok) {
-    return RewriteEvaluationTextResult{false, {},
-                                       "rewrite validation failed"};
+    Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
+    release_rewrite_evaluation_result(evaluated);
+    return ProgramResult{false, {}, std::move(error)};
   }
-  std::string output;
-  for (const std::string &root : evaluated.formatted) {
-    output += root;
-    output.push_back('\n');
-  }
-  release_rewrite_evaluation_result(evaluated);
-  return RewriteEvaluationTextResult{true, std::move(output), {}};
+  std::vector<Value> values = std::move(evaluated.values);
+  evaluated.values.clear();
+  evaluated.formatted.clear();
+  return ProgramResult{
+      true, std::move(values),
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
 }
-#endif
+
+CEmissionResult emit_c_source(std::string_view source) {
+  return emit_rewrite_c_source_impl(source,
+                                    trusted_local_c_configuration());
+}
+
+CEmissionResult emit_c_source(
+    std::string_view source,
+    const EvaluationConfiguration &configuration) {
+  return emit_rewrite_c_source_impl(
+      source, c_backend_configuration(configuration));
+}
 
 } // namespace bennu

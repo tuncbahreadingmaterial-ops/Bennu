@@ -23,7 +23,7 @@ function(check_failure case_name)
   elseif(case_name STREQUAL "run")
     execute_process(
       COMMAND "${BENNU_EXECUTABLE}" run
-              "${BENNU_SOURCE_DIR}/examples/level1.bennu"
+              "${BENNU_SOURCE_DIR}/examples/rewrite.bennu"
       RESULT_VARIABLE actual_exit
       OUTPUT_FILE "/dev/full"
       ERROR_VARIABLE actual_stderr

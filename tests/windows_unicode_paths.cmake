@@ -18,7 +18,7 @@ set(cc_output "${work}/CC output 文 🐍${BENNU_EXECUTABLE_SUFFIX}")
 
 file(REMOVE_RECURSE "${work}")
 file(MAKE_DIRECTORY "${work}" "${output_directory}" "${compiler_directory}")
-file(WRITE "${source}" "ioata 5\ninc 5\n")
+file(WRITE "${source}" "iota[5]\nadd[1 2.5]\n")
 file(WRITE "${invalid_source}" "inc 5\nwat\n")
 configure_file("${BENNU_FAKE_COMPILER}" "${fake_compiler}" COPYONLY)
 
@@ -36,7 +36,7 @@ execute_process(
   RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout ERROR_VARIABLE run_stderr)
 string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
 if(NOT "${run_exit}" STREQUAL "0" OR
-   NOT run_stdout STREQUAL ">>(1 2 3 4 5)\n>>6\n" OR
+   NOT run_stdout STREQUAL "(1 2 3 4 5)\n3.5\n" OR
    NOT run_stderr STREQUAL "")
   message(FATAL_ERROR
     "Unicode run failed\nexit: ${run_exit}\nstdout: [${run_stdout}]\nstderr: [${run_stderr}]")

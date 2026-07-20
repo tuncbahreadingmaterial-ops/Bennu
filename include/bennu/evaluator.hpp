@@ -1,7 +1,7 @@
 #ifndef BENNU_EVALUATOR_HPP
 #define BENNU_EVALUATOR_HPP
 
-#include "bennu/error.hpp"
+#include "bennu/resources.hpp"
 
 #include <string_view>
 #include <vector>
@@ -20,8 +20,17 @@ struct ProgramResult {
   Error error;
 };
 
+struct EvaluationConfiguration {
+  ExecutionProfile profile;
+  ResourceLimits limits;
+};
+
 ValueResult evaluate_expression(std::string_view source);
+ValueResult evaluate_expression(std::string_view source,
+                                const EvaluationConfiguration &configuration);
 ProgramResult evaluate_source(std::string_view source);
+ProgramResult evaluate_source(std::string_view source,
+                              const EvaluationConfiguration &configuration);
 
 } // namespace bennu
 

@@ -37,8 +37,8 @@ endif()
 if(WIN32)
   file(MAKE_DIRECTORY "${fake_copy_directory}")
 endif()
-file(WRITE "${valid_source}" "ioata 5\ninc 5\n")
-file(WRITE "${invalid_source}" "inc 5\nwat\n")
+file(WRITE "${valid_source}" "iota[5]\nadd[1 2.5]\n")
+file(WRITE "${invalid_source}" "inc 5\nwat[1]\n")
 configure_file("${BENNU_FAKE_COMPILER}" "${fake_copy}" COPYONLY)
 configure_file("${BENNU_FAKE_COMPILER}" "${fallback_fake}" COPYONLY)
 configure_file("${BENNU_FAKE_COMPILER}" "${relative_named_fake}" COPYONLY)
@@ -335,7 +335,7 @@ execute_process(
   RESULT_VARIABLE invalid_exit OUTPUT_VARIABLE invalid_stdout
   ERROR_VARIABLE invalid_stderr)
 assert_failure_preserved("invalid source" "${invalid_exit}" "${invalid_stdout}"
-  "${invalid_stderr}" "invalid source.bennu:2:1: unknown name"
+  "${invalid_stderr}" "invalid source.bennu:2:1: UnknownPrimitive"
   "sentinel bytes\n")
 if(EXISTS "${trace}")
   message(FATAL_ERROR "invalid source invoked the compiler")

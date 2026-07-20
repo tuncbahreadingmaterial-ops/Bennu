@@ -32,40 +32,34 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
   switch (kind) {
   case bennu::ErrorKind::none:
     return "none";
-  case bennu::ErrorKind::illegal_character:
-    return "illegal character";
-  case bennu::ErrorKind::malformed_integer:
-    return "malformed integer";
-  case bennu::ErrorKind::integer_out_of_range:
-    return "integer out of range";
+  case bennu::ErrorKind::invalid_byte:
+    return "InvalidByte";
+  case bennu::ErrorKind::malformed_literal:
+    return "MalformedLiteral";
+  case bennu::ErrorKind::literal_range_error:
+    return "LiteralRangeError";
+  case bennu::ErrorKind::syntax_error:
+    return "SyntaxError";
   case bennu::ErrorKind::unknown_name:
-    return "unknown name";
-  case bennu::ErrorKind::missing_argument:
-    return "missing argument";
-  case bennu::ErrorKind::expected_whitespace:
-    return "expected whitespace";
-  case bennu::ErrorKind::trailing_token:
-    return "trailing token";
-  case bennu::ErrorKind::integer_overflow:
-    return "integer overflow";
+    return "UnknownPrimitive";
   case bennu::ErrorKind::type_mismatch:
-    return "type mismatch";
-  case bennu::ErrorKind::allocation_limit_exceeded:
-    return "allocation limit exceeded";
+    return "TypeError";
   case bennu::ErrorKind::empty_expression:
-    return "empty expression";
+    return "EmptyExpression";
   case bennu::ErrorKind::arity_error:
-    return "arity error";
+    return "ArityError";
   case bennu::ErrorKind::shape_mismatch:
-    return "shape mismatch";
+    return "ShapeMismatch";
   case bennu::ErrorKind::invalid_execution_profile:
-    return "invalid execution profile";
+    return "InvalidExecutionProfile";
   case bennu::ErrorKind::invalid_primitive_table:
-    return "invalid primitive table";
+    return "InvalidPrimitiveTable";
   case bennu::ErrorKind::resource_error:
-    return "resource error";
+    return "ResourceError";
   case bennu::ErrorKind::domain_error:
-    return "domain error";
+    return "DomainError";
+  case bennu::ErrorKind::formatting_error:
+    return "FormattingError";
   }
   return "unknown error";
 }
@@ -87,8 +81,7 @@ bool format_output_value(const bennu::Value &value, std::string &output) {
     std::cerr << "error: evaluator produced an invalid value\n";
     return false;
   }
-  output = ">>";
-  output += formatted.formatted;
+  output = formatted.formatted;
   output += '\n';
   return true;
 }

@@ -9,11 +9,11 @@ set(work_directory "${CMAKE_CURRENT_BINARY_DIR}/native build contract")
 set(source_file "${work_directory}/detached source.bennu")
 file(REMOVE_RECURSE "${work_directory}")
 file(MAKE_DIRECTORY "${work_directory}")
-configure_file("${BENNU_SOURCE_DIR}/examples/level1.bennu" "${source_file}" COPYONLY)
+configure_file("${BENNU_SOURCE_DIR}/examples/rewrite.bennu" "${source_file}" COPYONLY)
 
 foreach(selection explicit environment fallback)
   set(output_file
-      "${work_directory}/detached level1 ${selection}${BENNU_EXECUTABLE_SUFFIX}")
+      "${work_directory}/detached rewrite ${selection}${BENNU_EXECUTABLE_SUFFIX}")
   if(selection STREQUAL "explicit")
     execute_process(
       COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
@@ -46,7 +46,7 @@ endforeach()
 file(REMOVE "${source_file}")
 foreach(selection explicit environment fallback)
   set(output_file
-      "${work_directory}/detached level1 ${selection}${BENNU_EXECUTABLE_SUFFIX}")
+      "${work_directory}/detached rewrite ${selection}${BENNU_EXECUTABLE_SUFFIX}")
   execute_process(
     COMMAND "${output_file}"
     WORKING_DIRECTORY "${work_directory}"
@@ -56,7 +56,8 @@ foreach(selection explicit environment fallback)
   )
   string(REPLACE "\r\n" "\n" native_stdout "${native_stdout}")
   if(NOT "${native_exit}" STREQUAL "0" OR
-     NOT native_stdout STREQUAL ">>(1 2 3 4 5)\n>>6\n" OR
+     NOT native_stdout STREQUAL
+       "6\n(8 -2 12 1)\n3.5\n(false true false true)\n(true false)\n(1 2 3 4 5)\n" OR
      NOT native_stderr STREQUAL "")
     message(FATAL_ERROR
       "${selection} detached native executable contract mismatch\n"

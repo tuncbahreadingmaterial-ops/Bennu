@@ -1,48 +1,42 @@
 # Bennu
 
-Bennu is a data-oriented array language. Level 1 is a deliberately small,
-complete toolchain for signed 64-bit integer expressions: evaluate them in a
-REPL, run a source file, emit self-contained C11, or build a standalone native
-executable with an installed C compiler.
+Bennu is a data-oriented language with scalar primitive lifting over rank-0
+scalars and homogeneous rank-1 vectors. The public evaluator, REPL, file runner,
+C11 emitter, and native builder all use the same rewrite grammar and typed
+semantics.
 
-Level 1 has two whole-word prefix primitives:
+The initial public primitives are exactly:
 
-- `ioata n` produces `(1 2 ... n)` for positive `n` and `()` for `n <= 0`.
-- `inc n` adds one to a scalar integer.
+- `inc`: increment an `Int` or `Double` scalar or vector;
+- `add`: add numeric arguments element by element;
+- `equals`: compare `Bool`, `Int`, or `Double` arguments element by element;
+- `not`: negate `Bool` arguments element by element; and
+- `iota`: construct the `Int` vector `1` through `n`, or an empty `Int` vector
+  when `n <= 0`.
 
-Each nonblank source line contains one expression. Calls can be nested, as in
-`ioata inc 5`. Scalar values are printed as `6`, arrays as `(1 2 3 4 5)`, and
-successful evaluated results have the exact `>>` prefix. Level 1 does not have
-array literals, array-lifted `inc`, variables, or additional primitives.
+General calls use brackets, such as `add[1 2.5]` and `inc[iota[3]]`. Unary
+calls also support right-associative prefix syntax: `inc 5` and `inc inc 5`.
+Scalars are `Bool`, signed 64-bit `Int`, or IEEE 754 binary64 `Double` values.
+Vector literals are homogeneous, for example `(1 2 3)`, `(1.0 2.5)`, and
+`(false true)`. Typed empty vectors are `Bool()`, `Int()`, and `Double()`.
 
-## Supported platforms and prerequisites
+Elementwise calls broadcast scalars over vectors and require all vector
+arguments to have equal lengths. A singleton vector remains a vector and does
+not broadcast. Exact overloads win; the only implicit conversion is
+`Int -> Double`. Integer overflow is a structured domain error. Output is
+canonical, including `true`/`false`, visible `.0` for integral-valued Doubles,
+`-0.0`, `inf`, `-inf`, `nan`, and parenthesized vectors. Every complete program
+is evaluated before runner output is published.
 
-The v0.1.0 release targets are:
+The CLI defaults to the `trusted-local-v1` execution profile with
+`max_vector_bytes`, `max_live_evaluation_bytes`, and `max_work_units` omitted.
+Mandatory representability, overflow-safe sizing, complete-allocation, and
+all-or-nothing result checks still apply.
 
-- Ubuntu 24.04 LTS x64
-- Windows 11 x64 or newer
-- macOS arm64
+## Build and quick start
 
-Building Bennu from source requires a C++20 compiler, CMake 3.20 or newer, and
-Ninja. The default test configuration and generated programs also require a
-C11 compiler. Bennu does not bundle, download, or install a C compiler.
-
-The portable Linux archive's support floor is Ubuntu 24.04 LTS on x86-64 with
-glibc 2.39 or newer and a supported Linux 6.8 GA kernel or supported Ubuntu HWE
-kernel. Its enforced ELF symbol ceilings are `GLIBC_2.34` and
-`GLIBCXX_3.4.32`. The executable dynamically resolves `libstdc++.so.6`,
-`libgcc_s.so.1`, `libc.so.6`, and `libm.so.6` from the userland. Other
-distribution/library combinations may work when they provide those interfaces,
-but the release contract is tested on Ubuntu rather than on mixed userlands.
-
-Before `bennu.exe` can launch, Windows users must install the
-[Microsoft Visual C++ 2017-2026 Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version),
-On every release target, only `bennu build` requires an external C11 compiler;
-`--help`, `repl`, `run`, and `emit-c` do not require one.
-
-## Level 1 quick start
-
-From a clean checkout, configure, build, and test a Release build:
+Building requires a C++20 compiler, CMake 3.20 or newer, and Ninja. Tests and
+generated-program journeys also require a C11 compiler.
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -50,9 +44,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The commands below use the Linux/macOS executable path. In PowerShell on
-Windows, replace `./build/bennu` with `.\build\bennu.exe` and use `.exe` for
-native output names.
+On Windows, use `build\bennu.exe`; native output names normally use `.exe`.
 
 Start the REPL:
 
@@ -60,63 +52,73 @@ Start the REPL:
 ./build/bennu repl
 ```
 
-The canonical interaction is:
+```text
+> add[1 2.5]
+3.5
+> inc iota 3
+(2 3 4)
+```
+
+Run the canonical example:
+
+```sh
+./build/bennu run examples/rewrite.bennu
+```
+
+It prints:
 
 ```text
-> ioata 5
->>(1 2 3 4 5)
-> inc 5
->>6
+6
+(8 -2 12 1)
+3.5
+(false true false true)
+(true false)
+(1 2 3 4 5)
 ```
 
-Run the committed example:
+Emit deterministic, self-contained standard C11 and run it:
 
 ```sh
-./build/bennu run examples/level1.bennu
+./build/bennu emit-c examples/rewrite.bennu -o rewrite.c
+cc -std=c11 rewrite.c -o rewrite
+./rewrite
 ```
 
-It prints exactly:
-
-```text
->>(1 2 3 4 5)
->>6
-```
-
-Emit self-contained standard C11, then compile and run it with a C compiler:
+Or build the native executable directly:
 
 ```sh
-./build/bennu emit-c examples/level1.bennu -o level1.c
-cc -std=c11 level1.c -o level1
-./level1
+./build/bennu build examples/rewrite.bennu -o rewrite
+./rewrite
 ```
 
-Build and run a standalone native executable in one command:
+Use `--cc <compiler>` after the output path, or set `CC`, to select a C
+compiler. Otherwise Bennu searches for `cc` on Linux/macOS or `cl.exe` on
+Windows. Compiler values are executable names or paths, not shell fragments or
+flag strings. A selected compiler failure is final. Source validation,
+generated-source publication, compilation, cleanup, and native replacement are
+publish-last and preserve an existing destination on failure.
 
-```sh
-./build/bennu build examples/level1.bennu -o level1
-./level1
-```
+## Deliberate differences from Anka
 
-Use `--cc <compiler>` after the output to select an executable explicitly, or
-set the `CC` environment variable. Otherwise Bennu searches for `cc` on Linux
-and macOS or `cl.exe` on Windows. A selected compiler failure is final; Bennu
-does not silently fall back to another compiler. Compiler values are executable
-names or paths, not shell fragments or compiler-flag strings.
+Anka is language-design inspiration, not a compatibility target. Bennu keeps
+readable bracket calls, parenthesized vector literals, and concise unary prefix
+calls. Bennu deliberately uses `iota` as its only sequence-constructor spelling,
+requires brackets for multi-argument calls, reserves parentheses for homogeneous
+rank-1 literals, and requires an explicit type for empty vectors. The initial
+language has no variables, user functions, trains, effects, reductions,
+multidimensional arrays, `length`, or `divide`.
 
-Successful commands return status 0. CLI, source, output, and compiler failures
-return nonzero and write concise diagnostics to stderr. `run` validates the
-complete file before printing any result. `emit-c` and `build` preserve an
-existing output when validation, emission, compilation, or publication fails.
+## Platforms and historical release
 
-## v0.1.0 release installation
+The supported CI targets are Ubuntu 24.04 LTS x64, Windows 11 x64 or newer, and
+macOS arm64. The Linux package compatibility floor is glibc 2.39 or newer on a
+supported Linux 6.8 GA kernel (or supported Ubuntu HWE kernel), with ELF symbol
+ceilings `GLIBC_2.34` and `GLIBCXX_3.4.32`; the executable dynamically resolves
+`libstdc++.so.6`, `libgcc_s.so.1`, `libc.so.6`, and `libm.so.6`. Windows users
+install the Microsoft Visual C++ 2017-2026 Redistributable (x64). On every
+platform, only `bennu build` requires an external C11 compiler.
 
-For the published v0.1.0 release, choose the asset matching the target:
-
-- `bennu-v0.1.0-linux-x64.tar.gz`
-- `bennu-v0.1.0-windows-x64.zip`
-- `bennu-v0.1.0-macos-arm64.tar.gz`
-
-Each archive contains only `bennu` (or `bennu.exe`) and `LICENSE` at the archive
-root. Extract both files to a directory of your choice, keep `LICENSE` with the
-executable, and invoke the executable by path. On Linux and macOS the archived
-`bennu` file is executable; on Windows run `bennu.exe` from PowerShell.
+The published `v0.1.0` archives and their release workflow are immutable
+historical artifacts. They predate this incompatible rewrite and remain
+available under their original asset names; this document describes the current
+source tree rather than retroactively changing that release.

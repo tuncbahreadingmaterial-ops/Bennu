@@ -51,7 +51,7 @@ bennu="$extracted/bennu"
 python3 "$script_root/verify-linux-elf.py" "$bennu"
 
 expected="$work_root/expected.out"
-printf '>>(1 2 3 4 5)\n>>6\n' >"$expected"
+printf '6\n(8 -2 12 1)\n3.5\n(false true false true)\n(true false)\n(1 2 3 4 5)\n' >"$expected"
 stdout="$work_root/stdout"
 stderr="$work_root/stderr"
 
@@ -73,7 +73,7 @@ if [[ -s "$stderr" ]] || ! cmp --silent "$expected" "$stdout"; then
   exit 1
 fi
 
-generated_c="$work_root/level1.c"
+generated_c="$work_root/rewrite.c"
 generated="$work_root/emitted"
 if ! "$bennu" emit-c "$source_file" -o "$generated_c" >"$stdout" 2>"$stderr"; then
   echo "error: extracted Bennu emit-c failed" >&2
@@ -112,12 +112,12 @@ if [[ -s "$stderr" ]] || ! cmp --silent "$expected" "$stdout"; then
 fi
 
 invalid="$work_root/invalid.bennu"
-printf 'ioata 5\ninc ioata 3\n' >"$invalid"
+printf 'iota[5]\nadd[1 true]\n' >"$invalid"
 if "$bennu" run "$invalid" >"$stdout" 2>"$stderr"; then
   echo "error: invalid source unexpectedly ran successfully" >&2
   exit 1
 fi
-if [[ -s "$stdout" ]] || ! grep -Fq 'type mismatch' "$stderr"; then
+if [[ -s "$stdout" ]] || ! grep -Fq 'TypeError' "$stderr"; then
   echo "error: invalid run did not preserve atomic result output" >&2
   exit 1
 fi

@@ -1,0 +1,37 @@
+# normative requirement|source containing the automated test identifier|test identifier
+BENNU-SPEC-0001 sections 4 and 14|src/value.cpp|canonical scalar and vector formatting is byte exact
+BENNU-SPEC-0001 sections 5 and 7|src/primitive.cpp|overload selection is Cartesian deterministic and exact-first
+BENNU-SPEC-0001 sections 8 through 11|tests/application_section16_conformance.cpp|S16-16 type validation precedes shape validation for every dyadic primitive
+BENNU-SPEC-0001 sections 12 and 13|src/resources.cpp|profile refusal precedence is vector then live then work
+BENNU-SPEC-0001 section 15|src/rewrite.cpp|rewrite evaluator matches the tracked Section 15 and 16 corpus
+BENNU-SPEC-0001 section 16|tests/application_section16_conformance.cpp|S16-00 matrix enumerates every initial elementwise primitive
+BENNU-SPEC-0001 section 16 cross-backend|CMakeLists.txt|cli.emit_c_differential
+BENNU-SPEC-0001 section 17|tests/application_section16_conformance.cpp|S16-22 every primitive is pointwise-consistent across deterministic small shapes and boundaries
+BENNU-SPEC-0001 section 18|src/rewrite.cpp|rewrite parser builds postorder generic calls and contiguous arenas
+BENNU-SPEC-0002 sections 3 and 11|src/rewrite.cpp|rewrite tokenizer uses generic categories and one-based byte spans
+BENNU-SPEC-0002 sections 4 and 5|src/rewrite.cpp|rewrite parser applies logical-record and line-ending rules
+BENNU-SPEC-0002 sections 6 and 7|src/rewrite.cpp|rewrite parser builds postorder generic calls and contiguous arenas
+BENNU-SPEC-0002 section 8|src/rewrite.cpp|rewrite tokenizer enforces canonical and complete numeric literals
+BENNU-SPEC-0002 section 9|src/rewrite.cpp|rewrite parser retains typed homogeneous vector payloads and spans
+BENNU-SPEC-0002 sections 10 through 12|src/rewrite.cpp|rewrite parser rejects normative invalid syntax at exact spans
+BENNU-SPEC-0002 sections 13 and 14|tests/public_cutover_conformance.cpp|CUTOVER-02 public evaluator exposes exactly the rewrite primitives
+BENNU-SPEC-0003 sections 4 and 5|src/primitive.cpp|integer scalar kernels cover every boundary and structured overflow
+BENNU-SPEC-0003 sections 6 through 9|src/primitive.cpp|Double inc and add kernels match every normative binary64 vector
+BENNU-SPEC-0003 section 10|src/primitive.cpp|scalar projection conversion covers every type pair and Int64 bits
+BENNU-SPEC-0003 section 11|src/primitive.cpp|equals and not kernels cover Bool Int and Double domains
+BENNU-SPEC-0003 sections 12 and 13|tests/public_cutover_conformance.cpp|CUTOVER-03 public APIs preserve structured located rewrite errors
+BENNU-SPEC-0003 sections 14 and 15|CMakeLists.txt|cli.emit_c_differential
+BENNU-SPEC-0004 sections 3 and 4|src/resources.cpp|trusted profile omits policy limits but retains mandatory safety
+BENNU-SPEC-0004 sections 5 through 7|src/resources.cpp|each profile limit honors zero one exact and one-past semantics
+BENNU-SPEC-0004 section 8|src/error.cpp|errors retain semantic context independently of presentation text
+BENNU-SPEC-0004 section 9|CMakeLists.txt|cli.emit_c_differential
+BENNU-SPEC-0004 section 9 bounded identity|tests/public_cutover_conformance.cpp|CUTOVER-07 explicit bounded profile agrees across public evaluator and emitter
+BENNU-SPEC-0004 section 10|src/resources.cpp|allocation failure injection is ordinal and transactional
+WP10 public evaluator and errors|tests/public_cutover_conformance.cpp|CUTOVER-01 public evaluator accepts rewrite syntax and rejects the removed constructor spelling
+WP10 transactional runner|CMakeLists.txt|add_cli_contract_test(run_batch_no_partial_output run_batch_no_partial_output)
+WP10 REPL|CMakeLists.txt|add_cli_contract_test(repl_transcript repl_transcript)
+WP10 typed C backend|tests/public_cutover_conformance.cpp|CUTOVER-05 public emitter lowers arbitrary typed vector contents
+WP10 native backend|CMakeLists.txt|cli.build_native
+WP10 trusted CLI profile|tests/public_cutover_conformance.cpp|CUTOVER-06 trusted local public evaluation omits arbitrary policy caps
+WP10 documentation|CMakeLists.txt|docs.smoke
+WP10 obsolete-surface deletion|CMakeLists.txt|architecture.obsolete_surface
