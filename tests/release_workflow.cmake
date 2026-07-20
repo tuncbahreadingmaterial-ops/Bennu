@@ -36,6 +36,18 @@ require_workflow_text("tools/release/package-and-smoke.ps1" "target-native packa
 require_workflow_text("actions/upload-artifact@" "temporary artifact upload")
 require_workflow_text("retention-days: 1" "short temporary artifact retention")
 
+set(cmake_configuration "${BENNU_SOURCE_DIR}/CMakeLists.txt")
+file(READ "${cmake_configuration}" cmake_text)
+foreach(required_cmake_text IN ITEMS
+    "CMAKE_MSVC_RUNTIME_LIBRARY"
+    "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  string(FIND "${cmake_text}" "${required_cmake_text}" found_at)
+  if(found_at EQUAL -1)
+    message(FATAL_ERROR
+      "CMake configuration is missing the dynamic MSVC runtime policy: ${required_cmake_text}")
+  endif()
+endforeach()
+
 set(package_script "${BENNU_SOURCE_DIR}/tools/release/package-and-smoke.ps1")
 if(NOT EXISTS "${package_script}")
   message(FATAL_ERROR "package-and-smoke script is missing: ${package_script}")
@@ -48,11 +60,60 @@ foreach(required_text IN ITEMS
     "tar"
     "GetRelativePath"
     "GetUnixFileMode"
-    "ExtractToDirectory")
+    "ExtractToDirectory"
+    "dumpbin.exe"
+    "/DEPENDENTS"
+    "Assert-WindowsRuntimeDependencies"
+    "MSVCP140.dll"
+    "VCRUNTIME140.dll"
+    "VCRUNTIME140_1.dll"
+    "verify-clean-windows-package.ps1")
   string(FIND "${package_text}" "${required_text}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR "package-and-smoke script is missing: ${required_text}")
   endif()
+endforeach()
+
+set(clean_windows_script
+    "${BENNU_SOURCE_DIR}/tools/release/verify-clean-windows-package.ps1")
+if(NOT EXISTS "${clean_windows_script}")
+  message(FATAL_ERROR
+    "clean Windows package smoke script is missing: ${clean_windows_script}")
+endif()
+file(READ "${clean_windows_script}" clean_windows_text)
+foreach(required_clean_windows_text IN ITEMS
+    "--help"
+    "repl"
+    "run"
+    "emit-c"
+    "build"
+    "Remove-Item Env:CC"
+    "no C compiler found by platform fallback"
+    "System32"
+    "HKLM:\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
+    "14.51.36231.0")
+  string(FIND "${clean_windows_text}" "${required_clean_windows_text}" found_at)
+  if(found_at EQUAL -1)
+    message(FATAL_ERROR
+      "clean Windows package smoke script is missing: ${required_clean_windows_text}")
+  endif()
+endforeach()
+
+foreach(document IN ITEMS "${BENNU_SOURCE_DIR}/README.md"
+                          "${BENNU_SOURCE_DIR}/doc/level1.md")
+  file(READ "${document}" document_text)
+  foreach(required_document_text IN ITEMS
+      "Windows 11 x64 or newer"
+      "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+      "14.51.36231.0 or newer"
+      "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+      "only `bennu build` requires an external C11 compiler")
+    string(FIND "${document_text}" "${required_document_text}" found_at)
+    if(found_at EQUAL -1)
+      message(FATAL_ERROR
+        "Windows deployment documentation is missing from ${document}: ${required_document_text}")
+    endif()
+  endforeach()
 endforeach()
 
 require_workflow_text("publish:\n    name: Verify and publish v0.1.0" "the publication job")
@@ -124,4 +185,8 @@ endif()
 string(FIND "${diary_text}" "Address draft Releases by creation ID until publication" draft_diary_entry_at)
 if(draft_diary_entry_at EQUAL -1)
   message(FATAL_ERROR "decision diary is missing the Issue #20 draft endpoint decision")
+endif()
+string(FIND "${diary_text}" "Dynamically link the Windows release runtime" runtime_diary_entry_at)
+if(runtime_diary_entry_at EQUAL -1)
+  message(FATAL_ERROR "decision diary is missing the Issue #16 Windows runtime policy")
 endif()

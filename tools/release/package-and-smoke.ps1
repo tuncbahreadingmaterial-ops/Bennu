@@ -80,6 +80,52 @@ function Assert-UnixExecutable {
   }
 }
 
+function Assert-WindowsRuntimeDependencies {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $dumpbin = (Get-Command "dumpbin.exe" -CommandType Application -ErrorAction Stop).Source
+  $output = @(& $dumpbin "/DEPENDENTS" $Path 2>&1)
+  if ($LASTEXITCODE -ne 0) {
+    throw "dumpbin /DEPENDENTS failed for ${Path}:`n$($output -join "`n")"
+  }
+
+  $dependencies = @($output | ForEach-Object {
+    $line = "$_"
+    if ($line -match '^\s+([A-Za-z0-9._-]+\.dll)\s*$') {
+      $Matches[1]
+    }
+  } | Sort-Object -Unique)
+  if ($dependencies.Count -eq 0) {
+    throw "dumpbin reported no PE dependencies for $Path"
+  }
+
+  $expectedRuntime = @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll")
+  $missingRuntime = @($expectedRuntime | Where-Object {
+    $dependencies -notcontains $_
+  })
+  $unexpectedRuntime = @($dependencies | Where-Object {
+    $_ -match '^(?i:MSVCP|VCRUNTIME).*\.dll$' -and
+      $expectedRuntime -notcontains $_
+  })
+  if ($missingRuntime.Count -ne 0 -or $unexpectedRuntime.Count -ne 0) {
+    throw "Packaged PE runtime dependency policy mismatch. Missing: $($missingRuntime -join ', '); unexpected: $($unexpectedRuntime -join ', ')"
+  }
+
+  $undocumented = @($dependencies | Where-Object {
+    $isApiSet = $_ -match '^(?i:api-ms-win-|ext-ms-win-)'
+    $systemDll = Join-Path ([Environment]::SystemDirectory) $_
+    -not $isApiSet -and -not (Test-Path -LiteralPath $systemDll -PathType Leaf)
+  })
+  if ($undocumented.Count -ne 0) {
+    throw "Packaged PE has non-system dependencies absent from the archive: $($undocumented -join ', ')"
+  }
+
+  Write-Host "Verified packaged PE dependencies: $($dependencies -join ', ')"
+}
+
 $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
 $licensePath = (Resolve-Path -LiteralPath $License).Path
@@ -134,7 +180,9 @@ try {
     $stagedExecutable = Join-Path $stageRoot $executableName
     Copy-Item -LiteralPath $bennuPath -Destination $stagedExecutable
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $stageRoot "LICENSE")
-    if ($Platform -ne "windows-x64") {
+    if ($Platform -eq "windows-x64") {
+      Assert-WindowsRuntimeDependencies -Path $stagedExecutable
+    } else {
       Invoke-Checked -FilePath "chmod" -Arguments @("755", $stagedExecutable) | Out-Null
     }
 
@@ -166,6 +214,10 @@ try {
       Assert-UnixExecutable -Path $extractedExecutable
     }
     Assert-Level1Output -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) -Journey "extracted archive"
+    if ($Platform -eq "windows-x64") {
+      & (Join-Path $PSScriptRoot "verify-clean-windows-package.ps1") `
+        -BennuExecutable $extractedExecutable
+    }
 
     $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
     Write-Host "Verified archive: $archivePath"
