@@ -767,7 +767,8 @@ TEST_CASE("production primitive descriptors are static explicit and valid") {
   for (std::size_t index = 0; index < descriptors.size(); ++index) {
     CAPTURE(index);
     CHECK(descriptors[index].id == expected_ids[index]);
-    CHECK(descriptors[index].name == expected_names[index]);
+    CHECK(std::string(descriptors[index].name) ==
+          std::string(expected_names[index]));
     CHECK(descriptors[index].lifting == expected_lifting[index]);
     CHECK(descriptors[index].signature_count ==
           expected_signature_counts[index]);
