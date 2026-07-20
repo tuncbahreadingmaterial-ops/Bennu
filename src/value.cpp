@@ -1,4 +1,5 @@
 #include "bennu/value.hpp"
+#include "bennu/resources.hpp"
 
 #include "doctest/doctest.h"
 
@@ -7,8 +8,10 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <ostream>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -50,7 +53,13 @@ ScalarValue empty_scalar() {
 }
 
 VectorValue empty_vector() {
-  return VectorValue{ScalarType::boolean, {}, {}, {}};
+  return VectorValue{ScalarType::boolean,
+                     {nullptr, &std::free},
+                     0,
+                     {nullptr, &std::free},
+                     0,
+                     {nullptr, &std::free},
+                     0};
 }
 
 Value invalid_construction_value() {
@@ -89,18 +98,14 @@ bool is_empty_scalar(const ScalarValue &scalar) {
          scalar.integer == 0 && is_positive_zero(scalar.double_precision);
 }
 
-ValueConstructionResult construction_failure(ValueInvariant invariant) {
-  return ValueConstructionResult{false, invalid_construction_value(), invariant};
-}
-
 std::size_t active_vector_length(const VectorValue &vector) {
   switch (vector.element_type) {
   case ScalarType::boolean:
-    return vector.booleans.size();
+    return vector.boolean_count;
   case ScalarType::integer:
-    return vector.integers.size();
+    return vector.integer_count;
   case ScalarType::double_precision:
-    return vector.doubles.size();
+    return vector.double_count;
   }
   return 0;
 }
@@ -212,50 +217,16 @@ Value make_double_value(double value) {
                empty_vector()};
 }
 
-ValueConstructionResult make_bool_vector(std::vector<std::uint8_t> values) {
-  for (const std::uint8_t value : values) {
-    if (value > 1U) {
-      return construction_failure(ValueInvariant::invalid_boolean_element);
-    }
-  }
-  return ValueConstructionResult{
-      true,
-      Value{ContainerKind::vector,
-            empty_scalar(),
-            VectorValue{ScalarType::boolean, std::move(values), {}, {}}},
-      ValueInvariant::none,
-  };
-}
-
-ValueConstructionResult make_int_vector(std::vector<std::int64_t> values) {
-  return ValueConstructionResult{
-      true,
-      Value{ContainerKind::vector,
-            empty_scalar(),
-            VectorValue{ScalarType::integer, {}, std::move(values), {}}},
-      ValueInvariant::none,
-  };
-}
-
-ValueConstructionResult make_double_vector(std::vector<double> values) {
-  for (double &value : values) {
-    value = normalize_double(value);
-  }
-  return ValueConstructionResult{
-      true,
-      Value{ContainerKind::vector,
-            empty_scalar(),
-            VectorValue{ScalarType::double_precision, {}, {}, std::move(values)}},
-      ValueInvariant::none,
-  };
-}
-
 ValueValidationResult validate_value(const Value &value) {
   switch (value.container) {
   case ContainerKind::scalar:
     if (value.vector.element_type != ScalarType::boolean ||
-        !value.vector.booleans.empty() || !value.vector.integers.empty() ||
-        !value.vector.doubles.empty()) {
+        value.vector.booleans.get() != nullptr ||
+        value.vector.boolean_count != 0 ||
+        value.vector.integers.get() != nullptr ||
+        value.vector.integer_count != 0 ||
+        value.vector.doubles.get() != nullptr ||
+        value.vector.double_count != 0) {
       return ValueValidationResult{false,
                                    ValueInvariant::inactive_vector_payload};
     }
@@ -267,11 +238,17 @@ ValueValidationResult validate_value(const Value &value) {
     }
     switch (value.vector.element_type) {
     case ScalarType::boolean:
-      if (!value.vector.integers.empty() || !value.vector.doubles.empty()) {
+      if (value.vector.integers.get() != nullptr ||
+          value.vector.integer_count != 0 ||
+          value.vector.doubles.get() != nullptr ||
+          value.vector.double_count != 0 ||
+          (value.vector.boolean_count != 0 &&
+           value.vector.booleans.get() == nullptr)) {
         return ValueValidationResult{
             false, ValueInvariant::inactive_vector_payload};
       }
-      for (const std::uint8_t element : value.vector.booleans) {
+      for (std::size_t index = 0; index < value.vector.boolean_count; ++index) {
+        const std::uint8_t element = value.vector.booleans.get()[index];
         if (element > 1U) {
           return ValueValidationResult{
               false, ValueInvariant::invalid_boolean_element};
@@ -279,17 +256,28 @@ ValueValidationResult validate_value(const Value &value) {
       }
       return ValueValidationResult{true, ValueInvariant::none};
     case ScalarType::integer:
-      if (!value.vector.booleans.empty() || !value.vector.doubles.empty()) {
+      if (value.vector.booleans.get() != nullptr ||
+          value.vector.boolean_count != 0 ||
+          value.vector.doubles.get() != nullptr ||
+          value.vector.double_count != 0 ||
+          (value.vector.integer_count != 0 &&
+           value.vector.integers.get() == nullptr)) {
         return ValueValidationResult{
             false, ValueInvariant::inactive_vector_payload};
       }
       return ValueValidationResult{true, ValueInvariant::none};
     case ScalarType::double_precision:
-      if (!value.vector.booleans.empty() || !value.vector.integers.empty()) {
+      if (value.vector.booleans.get() != nullptr ||
+          value.vector.boolean_count != 0 ||
+          value.vector.integers.get() != nullptr ||
+          value.vector.integer_count != 0 ||
+          (value.vector.double_count != 0 &&
+           value.vector.doubles.get() == nullptr)) {
         return ValueValidationResult{
             false, ValueInvariant::inactive_vector_payload};
       }
-      for (const double element : value.vector.doubles) {
+      for (std::size_t index = 0; index < value.vector.double_count; ++index) {
+        const double element = value.vector.doubles.get()[index];
         if (!is_canonical_double(element)) {
           return ValueValidationResult{false,
                                        ValueInvariant::noncanonical_nan};
@@ -347,34 +335,36 @@ ScalarProjectionResult project_scalar(const Value &value, std::size_t index) {
   }
   switch (value.vector.element_type) {
   case ScalarType::boolean:
-    if (index >= value.vector.booleans.size()) {
+    if (index >= value.vector.boolean_count) {
       return ScalarProjectionResult{false, empty_scalar(),
                                     ValueAccessError::index_out_of_bounds};
     }
     return ScalarProjectionResult{
         true,
-        ScalarValue{ScalarType::boolean, value.vector.booleans[index] != 0, 0,
+        ScalarValue{ScalarType::boolean,
+                    value.vector.booleans.get()[index] != 0, 0,
                     0.0},
         ValueAccessError::none};
   case ScalarType::integer:
-    if (index >= value.vector.integers.size()) {
+    if (index >= value.vector.integer_count) {
       return ScalarProjectionResult{false, empty_scalar(),
                                     ValueAccessError::index_out_of_bounds};
     }
     return ScalarProjectionResult{
         true,
-        ScalarValue{ScalarType::integer, false, value.vector.integers[index],
+        ScalarValue{ScalarType::integer, false,
+                    value.vector.integers.get()[index],
                     0.0},
         ValueAccessError::none};
   case ScalarType::double_precision:
-    if (index >= value.vector.doubles.size()) {
+    if (index >= value.vector.double_count) {
       return ScalarProjectionResult{false, empty_scalar(),
                                     ValueAccessError::index_out_of_bounds};
     }
     return ScalarProjectionResult{
         true,
         ScalarValue{ScalarType::double_precision, false, 0,
-                    value.vector.doubles[index]},
+                    value.vector.doubles.get()[index]},
         ValueAccessError::none};
   }
   return ScalarProjectionResult{false, empty_scalar(),
@@ -415,16 +405,17 @@ ValueFormattingResult format_value(const Value &value) {
     }
     switch (value.vector.element_type) {
     case ScalarType::boolean:
-      formatted += value.vector.booleans[index] != 0 ? "true" : "false";
+      formatted +=
+          value.vector.booleans.get()[index] != 0 ? "true" : "false";
       break;
     case ScalarType::integer:
-      if (!append_integer(formatted, value.vector.integers[index])) {
+      if (!append_integer(formatted, value.vector.integers.get()[index])) {
         return ValueFormattingResult{false, {}, ValueInvariant::none,
                                      ValueFormatError::conversion_failure};
       }
       break;
     case ScalarType::double_precision:
-      if (!append_double(formatted, value.vector.doubles[index])) {
+      if (!append_double(formatted, value.vector.doubles.get()[index])) {
         return ValueFormattingResult{false, {}, ValueInvariant::none,
                                      ValueFormatError::conversion_failure};
       }
@@ -437,6 +428,31 @@ ValueFormattingResult format_value(const Value &value) {
 }
 
 namespace {
+
+using ValueConstructionResult = VectorAllocationResult;
+
+ValueConstructionResult
+make_bool_vector(std::initializer_list<std::uint8_t> values) {
+  EvaluationResources resources = make_trusted_local_resources({std::nullopt});
+  return copy_bool_vector(
+      resources, std::span<const std::uint8_t>(values.begin(), values.size()),
+      SourceLocation{0, 1, 1}, "value-construction");
+}
+
+ValueConstructionResult
+make_int_vector(std::initializer_list<std::int64_t> values) {
+  EvaluationResources resources = make_trusted_local_resources({std::nullopt});
+  return copy_int_vector(
+      resources, std::span<const std::int64_t>(values.begin(), values.size()),
+      SourceLocation{0, 1, 1}, "value-construction");
+}
+
+ValueConstructionResult make_double_vector(std::initializer_list<double> values) {
+  EvaluationResources resources = make_trusted_local_resources({std::nullopt});
+  return copy_double_vector(
+      resources, std::span<const double>(values.begin(), values.size()),
+      SourceLocation{0, 1, 1}, "value-construction");
+}
 
 [[maybe_unused]] std::string format_valid_test_value(const Value &value) {
   ValueFormattingResult result = format_value(value);
@@ -487,12 +503,12 @@ TEST_CASE("typed scalar construction produces valid direct tagged values") {
 }
 
 TEST_CASE("vectors keep one untagged typed payload and preserve empty types") {
-  static_assert(std::is_same_v<decltype(VectorValue::booleans)::value_type,
+  static_assert(std::is_same_v<decltype(VectorValue::booleans)::element_type,
                                std::uint8_t>);
-  static_assert(std::is_same_v<decltype(VectorValue::integers)::value_type,
+  static_assert(std::is_same_v<decltype(VectorValue::integers)::element_type,
                                std::int64_t>);
   static_assert(
-      std::is_same_v<decltype(VectorValue::doubles)::value_type, double>);
+      std::is_same_v<decltype(VectorValue::doubles)::element_type, double>);
 
   const ValueConstructionResult booleans = make_bool_vector({});
   const ValueConstructionResult integers = make_int_vector({});
@@ -518,7 +534,9 @@ TEST_CASE("construction and validation reject invalid homogeneous payloads") {
   CHECK(invalid_boolean.invariant == ValueInvariant::invalid_boolean_element);
 
   Value inactive = make_int_vector({1, 2}).value;
-  inactive.vector.doubles.push_back(2.0);
+  Value unexpected_double = make_double_vector({2.0}).value;
+  inactive.vector.doubles = std::move(unexpected_double.vector.doubles);
+  inactive.vector.double_count = 1;
   const ValueValidationResult inactive_result = validate_value(inactive);
   CHECK_FALSE(inactive_result.ok);
   CHECK(inactive_result.invariant == ValueInvariant::inactive_vector_payload);
@@ -536,7 +554,7 @@ TEST_CASE("construction and validation reject invalid homogeneous payloads") {
         ValueInvariant::inactive_scalar_field);
 
   Value noncanonical = make_double_vector({1.0}).value;
-  noncanonical.vector.doubles[0] =
+  noncanonical.vector.doubles.get()[0] =
       std::bit_cast<double>(UINT64_C(0xfff8123456789abc));
   const ValueValidationResult nan_result = validate_value(noncanonical);
   CHECK_FALSE(nan_result.ok);
@@ -545,7 +563,8 @@ TEST_CASE("construction and validation reject invalid homogeneous payloads") {
   const ValueConstructionResult normalized = make_double_vector(
       {std::bit_cast<double>(UINT64_C(0xfff8123456789abc))});
   REQUIRE(normalized.ok);
-  CHECK(std::bit_cast<std::uint64_t>(normalized.value.vector.doubles[0]) ==
+  CHECK(std::bit_cast<std::uint64_t>(
+            normalized.value.vector.doubles.get()[0]) ==
         canonical_nan_bits);
 }
 
@@ -647,11 +666,14 @@ TEST_CASE("public value consumers reject malformed plain records") {
   Value unknown_scalar = make_bool_value(false);
   unknown_scalar.scalar.type = static_cast<ScalarType>(99);
   Value inactive_payload = make_int_vector({1}).value;
-  inactive_payload.vector.doubles.push_back(2.0);
+  Value unexpected_payload = make_double_vector({2.0}).value;
+  inactive_payload.vector.doubles =
+      std::move(unexpected_payload.vector.doubles);
+  inactive_payload.vector.double_count = 1;
   Value invalid_boolean = make_bool_vector({0, 1}).value;
-  invalid_boolean.vector.booleans[1] = 2;
+  invalid_boolean.vector.booleans.get()[1] = 2;
   Value noncanonical_nan = make_double_vector({1.0}).value;
-  noncanonical_nan.vector.doubles[0] =
+  noncanonical_nan.vector.doubles.get()[0] =
       std::bit_cast<double>(UINT64_C(0xfff8123456789abc));
 
   const std::array<const Value *, 5> invalid_values{{
@@ -698,7 +720,7 @@ TEST_CASE("public value consumers reject malformed plain records") {
 
 TEST_CASE("explicit destruction releases owned payload and leaves a valid value") {
   Value value = make_double_vector({1.0, 2.0, 3.0}).value;
-  REQUIRE(value.vector.doubles.size() == 3);
+  REQUIRE(value.vector.double_count == 3);
 
   destroy_value(value);
 
@@ -706,9 +728,12 @@ TEST_CASE("explicit destruction releases owned payload and leaves a valid value"
   CHECK(value.container == ContainerKind::scalar);
   CHECK(value.scalar.type == ScalarType::boolean);
   CHECK_FALSE(value.scalar.boolean);
-  CHECK(value.vector.booleans.empty());
-  CHECK(value.vector.integers.empty());
-  CHECK(value.vector.doubles.empty());
+  CHECK(value.vector.booleans.get() == nullptr);
+  CHECK(value.vector.boolean_count == 0);
+  CHECK(value.vector.integers.get() == nullptr);
+  CHECK(value.vector.integer_count == 0);
+  CHECK(value.vector.doubles.get() == nullptr);
+  CHECK(value.vector.double_count == 0);
 }
 
 } // namespace bennu

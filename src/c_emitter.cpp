@@ -85,7 +85,7 @@ CEmissionResult emit_c_source(std::string_view source) {
     } else {
       output += "  if (bennu_print_array(";
       append_integer_constant(
-          output, static_cast<std::int64_t>(value.vector.integers.size()));
+          output, static_cast<std::int64_t>(value.vector.integer_count));
     }
     output += ") != 0) {\n    return 1;\n  }\n";
   }
