@@ -13,9 +13,11 @@ endif()
 
 set(bennu_implementation_sources
   src/c_emitter.cpp
+  src/error.cpp
   src/evaluator.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
+  src/value.cpp
 )
 
 add_executable(bennu

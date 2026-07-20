@@ -305,59 +305,93 @@ ParseResult parse_program(std::string_view source,
 }
 
 ValueResult apply_inc(const Value &argument, SourceLocation location) {
-  if (argument.kind != ValueKind::integer) {
+  if (argument.container != ContainerKind::scalar ||
+      argument.scalar.type != ScalarType::integer) {
+    Error error = make_error(ErrorKind::type_mismatch, location,
+                             "inc requires a scalar integer argument");
+    error.primitive = PrimitiveErrorContext{"inc"};
+    error.argument_position = 1;
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
-        Error{ErrorKind::type_mismatch, location,
-              "inc requires a scalar integer argument"},
+        make_int_value(0),
+        std::move(error),
     };
   }
-  if (argument.integer == std::numeric_limits<std::int64_t>::max()) {
+  if (argument.scalar.integer == std::numeric_limits<std::int64_t>::max()) {
+    Error error = make_error(
+        ErrorKind::integer_overflow, location,
+        "inc result exceeds the signed 64-bit range");
+    error.primitive = PrimitiveErrorContext{"inc"};
+    error.argument_position = 1;
+    error.domain = DomainErrorContext{
+        DomainErrorReason::integer_overflow,
+        ScalarSignatureContext{{ScalarType::integer}, ScalarType::integer},
+        {argument.scalar},
+    };
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
-        Error{ErrorKind::integer_overflow, location,
-              "inc result exceeds the signed 64-bit range"},
+        make_int_value(0),
+        std::move(error),
     };
   }
   return ValueResult{
       true,
-      Value{ValueKind::integer, argument.integer + 1, {}},
-      Error{ErrorKind::none, SourceLocation{0, 1, 1}, ""},
+      make_int_value(argument.scalar.integer + 1),
+      make_error(ErrorKind::none, SourceLocation{0, 1, 1}, ""),
   };
 }
 
 ValueResult apply_ioata(const Value &argument, SourceLocation location,
                         std::int64_t remaining_elements) {
-  if (argument.kind != ValueKind::integer) {
+  if (argument.container != ContainerKind::scalar ||
+      argument.scalar.type != ScalarType::integer) {
+    Error error = make_error(ErrorKind::type_mismatch, location,
+                             "ioata requires a scalar integer argument");
+    error.primitive = PrimitiveErrorContext{"ioata"};
+    error.argument_position = 1;
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
-        Error{ErrorKind::type_mismatch, location,
-              "ioata requires a scalar integer argument"},
+        make_int_value(0),
+        std::move(error),
     };
   }
-  if (argument.integer > remaining_elements) {
+  if (argument.scalar.integer > remaining_elements) {
+    Error error = make_error(
+        ErrorKind::allocation_limit_exceeded, location,
+        "program ioata results exceed the Level 1 element limit");
+    error.primitive = PrimitiveErrorContext{"ioata"};
+    error.argument_position = 1;
+    const std::size_t requested =
+        static_cast<std::size_t>(argument.scalar.integer);
+    error.resource = ResourceErrorContext{
+        ResourceErrorReason::profile_limit,
+        requested,
+        std::nullopt,
+        "bootstrap-level1",
+        std::nullopt,
+        static_cast<std::size_t>(ioata_element_limit),
+        static_cast<std::size_t>(ioata_element_limit - remaining_elements),
+        requested,
+    };
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
-        Error{ErrorKind::allocation_limit_exceeded, location,
-              "program ioata results exceed the Level 1 element limit"},
+        make_int_value(0),
+        std::move(error),
     };
   }
 
   std::vector<std::int64_t> elements;
-  if (argument.integer > 0) {
-    elements.reserve(static_cast<std::size_t>(argument.integer));
-    for (std::int64_t value = 1; value <= argument.integer; ++value) {
+  if (argument.scalar.integer > 0) {
+    elements.reserve(static_cast<std::size_t>(argument.scalar.integer));
+    for (std::int64_t value = 1; value <= argument.scalar.integer; ++value) {
       elements.push_back(value);
     }
   }
+  ValueConstructionResult constructed = make_int_vector(std::move(elements));
   return ValueResult{
       true,
-      Value{ValueKind::array, 0, std::move(elements)},
-      Error{ErrorKind::none, SourceLocation{0, 1, 1}, ""},
+      std::move(constructed.value),
+      make_error(ErrorKind::none, SourceLocation{0, 1, 1}, ""),
   };
 }
 
@@ -368,7 +402,7 @@ ProgramResult evaluate_program(const Program &program) {
   for (std::size_t index = 0; index < program.nodes.size(); ++index) {
     const ExpressionNode &node = program.nodes[index];
     if (node.kind == ExpressionKind::integer) {
-      node_values.push_back(Value{ValueKind::integer, node.integer, {}});
+      node_values.push_back(make_int_value(node.integer));
       continue;
     }
     const Value &argument = node_values[node.argument];
@@ -388,7 +422,7 @@ ProgramResult evaluate_program(const Program &program) {
       return ProgramResult{false, {}, std::move(result.error)};
     }
     remaining_ioata_elements -=
-        static_cast<std::int64_t>(result.value.elements.size());
+        static_cast<std::int64_t>(value_length(result.value));
     node_values.push_back(std::move(result.value));
   }
 
@@ -409,17 +443,16 @@ ProgramResult evaluate_program(const Program &program) {
 ValueResult evaluate_expression(std::string_view source) {
   const TokenizeResult tokenized = tokenize(source);
   if (!tokenized.ok) {
-    return ValueResult{false, Value{ValueKind::integer, 0, {}},
-                       tokenized.error};
+    return ValueResult{false, make_int_value(0), tokenized.error};
   }
   const ParseResult parsed = parse_program(source, tokenized.tokens);
   if (!parsed.ok) {
-    return ValueResult{false, Value{ValueKind::integer, 0, {}}, parsed.error};
+    return ValueResult{false, make_int_value(0), parsed.error};
   }
   if (parsed.program.roots.empty()) {
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
+        make_int_value(0),
         Error{ErrorKind::empty_expression, tokenized.tokens.back().location,
               "expected one expression"},
     };
@@ -429,15 +462,14 @@ ValueResult evaluate_expression(std::string_view source) {
         parsed.program.nodes[parsed.program.roots[1]].location;
     return ValueResult{
         false,
-        Value{ValueKind::integer, 0, {}},
+        make_int_value(0),
         Error{ErrorKind::trailing_token, location,
               "expected one expression, found a complete program"},
     };
   }
   ProgramResult evaluated = evaluate_program(parsed.program);
   if (!evaluated.ok) {
-    return ValueResult{false, Value{ValueKind::integer, 0, {}},
-                       std::move(evaluated.error)};
+    return ValueResult{false, make_int_value(0), std::move(evaluated.error)};
   }
   return ValueResult{
       true,
@@ -458,22 +490,6 @@ ProgramResult evaluate_source(std::string_view source) {
   return evaluate_program(parsed.program);
 }
 
-std::string format_value(const Value &value) {
-  if (value.kind == ValueKind::integer) {
-    return std::to_string(value.integer);
-  }
-
-  std::string formatted = "(";
-  for (std::size_t index = 0; index < value.elements.size(); ++index) {
-    if (index != 0) {
-      formatted += ' ';
-    }
-    formatted += std::to_string(value.elements[index]);
-  }
-  formatted += ')';
-  return formatted;
-}
-
 TEST_CASE("integer expressions preserve signed 64-bit values") {
   const ValueResult ordinary = evaluate_expression("5");
   const ValueResult minimum =
@@ -481,12 +497,15 @@ TEST_CASE("integer expressions preserve signed 64-bit values") {
   const ValueResult maximum = evaluate_expression("9223372036854775807");
 
   REQUIRE(ordinary.ok);
-  CHECK(ordinary.value.kind == ValueKind::integer);
-  CHECK(ordinary.value.integer == std::int64_t{5});
+  CHECK(ordinary.value.container == ContainerKind::scalar);
+  CHECK(ordinary.value.scalar.type == ScalarType::integer);
+  CHECK(ordinary.value.scalar.integer == std::int64_t{5});
   REQUIRE(minimum.ok);
-  CHECK(minimum.value.integer == std::numeric_limits<std::int64_t>::min());
+  CHECK(minimum.value.scalar.integer ==
+        std::numeric_limits<std::int64_t>::min());
   REQUIRE(maximum.ok);
-  CHECK(maximum.value.integer == std::numeric_limits<std::int64_t>::max());
+  CHECK(maximum.value.scalar.integer ==
+        std::numeric_limits<std::int64_t>::max());
 }
 
 TEST_CASE("Level 1 primitives and value formatting remain exact") {
@@ -496,13 +515,16 @@ TEST_CASE("Level 1 primitives and value formatting remain exact") {
   const ValueResult negative = evaluate_expression("ioata -5");
 
   REQUIRE(incremented.ok);
-  CHECK(incremented.value.kind == ValueKind::integer);
-  CHECK(incremented.value.integer == std::int64_t{6});
+  CHECK(incremented.value.container == ContainerKind::scalar);
+  CHECK(incremented.value.scalar.type == ScalarType::integer);
+  CHECK(incremented.value.scalar.integer == std::int64_t{6});
   CHECK(format_value(incremented.value) == "6");
 
   REQUIRE(array.ok);
-  CHECK(array.value.kind == ValueKind::array);
-  CHECK(array.value.elements == std::vector<std::int64_t>{1, 2, 3, 4, 5});
+  CHECK(array.value.container == ContainerKind::vector);
+  CHECK(array.value.vector.element_type == ScalarType::integer);
+  CHECK(array.value.vector.integers ==
+        std::vector<std::int64_t>{1, 2, 3, 4, 5});
   CHECK(format_value(array.value) == "(1 2 3 4 5)");
 
   REQUIRE(zero.ok);
@@ -580,9 +602,9 @@ TEST_CASE("internal flat evaluator handles nested prefix calls") {
 
 TEST_CASE("internal primitive kernels preserve semantic errors") {
   const SourceLocation location{17, 3, 4};
-  const Value maximum{ValueKind::integer,
-                      std::numeric_limits<std::int64_t>::max(), {}};
-  const Value array{ValueKind::array, 0, {1, 2, 3}};
+  const Value maximum =
+      make_int_value(std::numeric_limits<std::int64_t>::max());
+  const Value array = make_int_vector({1, 2, 3}).value;
 
   const ValueResult overflow = apply_inc(maximum, location);
   const ValueResult wrong_inc_type = apply_inc(array, location);
@@ -594,35 +616,57 @@ TEST_CASE("internal primitive kernels preserve semantic errors") {
   CHECK(overflow.error.location.offset == 17);
   CHECK(overflow.error.location.line == 3);
   CHECK(overflow.error.location.column == 4);
+  REQUIRE(overflow.error.primitive.has_value());
+  CHECK(overflow.error.primitive->name == "inc");
+  REQUIRE(overflow.error.argument_position.has_value());
+  CHECK(*overflow.error.argument_position == 1);
+  REQUIRE(overflow.error.domain.has_value());
+  CHECK(overflow.error.domain->reason ==
+        DomainErrorReason::integer_overflow);
+  REQUIRE(overflow.error.domain->operands.size() == 1);
+  CHECK(overflow.error.domain->operands[0].integer ==
+        std::numeric_limits<std::int64_t>::max());
   CHECK_FALSE(wrong_inc_type.ok);
   CHECK(wrong_inc_type.error.kind == ErrorKind::type_mismatch);
+  REQUIRE(wrong_inc_type.error.primitive.has_value());
+  CHECK(wrong_inc_type.error.primitive->name == "inc");
   CHECK_FALSE(wrong_ioata_type.ok);
   CHECK(wrong_ioata_type.error.kind == ErrorKind::type_mismatch);
+  REQUIRE(wrong_ioata_type.error.primitive.has_value());
+  CHECK(wrong_ioata_type.error.primitive->name == "ioata");
 }
 
 TEST_CASE("ioata enforces one pre-allocation retained-element budget") {
   const SourceLocation location{6, 1, 7};
-  const Value request{ValueKind::integer, ioata_element_limit + 1, {}};
-  const Value boundary{ValueKind::integer, ioata_element_limit, {}};
+  const Value request = make_int_value(ioata_element_limit + 1);
+  const Value boundary = make_int_value(ioata_element_limit);
 
   const ValueResult rejected =
       apply_ioata(request, location, ioata_element_limit);
   CHECK_FALSE(rejected.ok);
   CHECK(rejected.error.kind == ErrorKind::allocation_limit_exceeded);
-  CHECK(rejected.value.elements.empty());
+  CHECK(rejected.value.container == ContainerKind::scalar);
   CHECK(rejected.error.location.offset == 6);
   CHECK(rejected.error.location.line == 1);
   CHECK(rejected.error.location.column == 7);
+  REQUIRE(rejected.error.primitive.has_value());
+  CHECK(rejected.error.primitive->name == "ioata");
+  REQUIRE(rejected.error.resource.has_value());
+  CHECK(rejected.error.resource->reason == ResourceErrorReason::profile_limit);
+  REQUIRE(rejected.error.resource->requested_elements.has_value());
+  CHECK(*rejected.error.resource->requested_elements ==
+        static_cast<std::size_t>(ioata_element_limit + 1));
+  CHECK(rejected.error.resource->profile == "bootstrap-level1");
 
   const ValueResult allowed =
       apply_ioata(boundary, location, ioata_element_limit);
   REQUIRE(allowed.ok);
-  REQUIRE(allowed.value.elements.size() ==
+  REQUIRE(allowed.value.vector.integers.size() ==
           static_cast<std::size_t>(ioata_element_limit));
-  CHECK(allowed.value.elements.back() == ioata_element_limit);
+  CHECK(allowed.value.vector.integers.back() == ioata_element_limit);
 
   const ValueResult no_remaining =
-      apply_ioata(Value{ValueKind::integer, 1, {}}, location, 0);
+      apply_ioata(make_int_value(1), location, 0);
   CHECK_FALSE(no_remaining.ok);
   CHECK(no_remaining.error.kind == ErrorKind::allocation_limit_exceeded);
 }

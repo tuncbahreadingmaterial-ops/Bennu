@@ -44,8 +44,8 @@ CEmissionResult emit_c_source(std::string_view source) {
   bool has_integer = false;
   bool has_array = false;
   for (const Value &value : evaluated.values) {
-    has_integer = has_integer || value.kind == ValueKind::integer;
-    has_array = has_array || value.kind == ValueKind::array;
+    has_integer = has_integer || value.container == ContainerKind::scalar;
+    has_array = has_array || value.container == ContainerKind::vector;
   }
 
   std::string output =
@@ -79,13 +79,13 @@ CEmissionResult emit_c_source(std::string_view source) {
   output += "int main(void) {\n";
 
   for (const Value &value : evaluated.values) {
-    if (value.kind == ValueKind::integer) {
+    if (value.container == ContainerKind::scalar) {
       output += "  if (bennu_print_integer(";
-      append_integer_constant(output, value.integer);
+      append_integer_constant(output, value.scalar.integer);
     } else {
       output += "  if (bennu_print_array(";
       append_integer_constant(
-          output, static_cast<std::int64_t>(value.elements.size()));
+          output, static_cast<std::int64_t>(value.vector.integers.size()));
     }
     output += ") != 0) {\n    return 1;\n  }\n";
   }
