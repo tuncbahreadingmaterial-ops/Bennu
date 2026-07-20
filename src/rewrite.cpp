@@ -2,12 +2,14 @@
 #include "bennu/primitive.hpp"
 #include "bennu/resources.hpp"
 #include "bennu/value.hpp"
+#include "rewrite_backend.hpp"
+#include "rewrite_c_runtime.hpp"
 
 #include "doctest/doctest.h"
 
+#include <bit>
 #include <array>
 #ifndef DOCTEST_CONFIG_DISABLE
-#include <bit>
 #include <ostream>
 #endif
 #include <charconv>
@@ -1375,10 +1377,34 @@ struct RewriteEvaluationDiagnostic {
   ValueFormatError formatting_error;
 };
 
+struct RewriteLoweringNode {
+  RewriteNodeKind kind;
+  ContainerKind container;
+  ScalarType element_type;
+  std::size_t element_count;
+  PrimitiveImplementation implementation;
+  std::size_t first_argument;
+  std::size_t argument_count;
+  std::size_t first_element;
+  bool boolean;
+  std::int64_t integer;
+  double double_precision;
+};
+
+struct RewriteLoweringProgram {
+  std::vector<RewriteLoweringNode> nodes;
+  std::vector<std::size_t> arguments;
+  std::vector<std::size_t> roots;
+  std::vector<std::uint8_t> boolean_elements;
+  std::vector<std::int64_t> integer_elements;
+  std::vector<double> double_elements;
+};
+
 struct RewriteEvaluationResult {
   bool ok;
   std::vector<Value> values;
   std::vector<std::string> formatted;
+  RewriteLoweringProgram lowering;
   RewriteEvaluationDiagnostic diagnostic;
   EvaluationResources resources;
   std::size_t scalar_kernel_invocations;
@@ -1427,6 +1453,7 @@ RewriteEvaluationResult rewrite_evaluation_failure(
   return RewriteEvaluationResult{false,
                                  {},
                                  {},
+                                 {},
                                  std::move(diagnostic),
                                  resources,
                                  scalar_kernel_invocations};
@@ -1440,6 +1467,53 @@ Value scalar_literal_value(const RewriteNode &node) {
     return make_int_value(node.integer);
   }
   return make_double_value(node.double_precision);
+}
+
+PrimitiveImplementation lowering_implementation(
+    const PrimitiveDescriptor &descriptor,
+    std::span<const Value> arguments) {
+  if (descriptor.lifting == LiftingMode::none) {
+    return descriptor.id == PrimitiveId::iota
+               ? PrimitiveImplementation::iota_integer
+               : PrimitiveImplementation::none;
+  }
+  std::array<ScalarType, 2> types{};
+  if (arguments.size() > types.size()) {
+    return PrimitiveImplementation::none;
+  }
+  for (std::size_t index = 0U; index < arguments.size(); ++index) {
+    if (!value_element_type(arguments[index], types[index]).ok) {
+      return PrimitiveImplementation::none;
+    }
+  }
+  const SignatureSelectionResult selected = select_primitive_signature(
+      descriptor,
+      std::span<const ScalarType>(types.data(), arguments.size()));
+  return selected.status == SignatureSelectionStatus::success &&
+                 selected.signature != nullptr
+             ? selected.signature->implementation
+             : PrimitiveImplementation::none;
+}
+
+RewriteLoweringNode lowering_node(const RewriteNode &node, const Value &value,
+                                  PrimitiveImplementation implementation,
+                                  std::size_t first_argument,
+                                  std::size_t argument_count) {
+  ScalarType element_type = ScalarType::boolean;
+  std::size_t element_count = 1U;
+  static_cast<void>(value_element_type(value, element_type));
+  static_cast<void>(value_length(value, element_count));
+  return RewriteLoweringNode{node.kind,
+                             value.container,
+                             element_type,
+                             element_count,
+                             implementation,
+                             first_argument,
+                             argument_count,
+                             node.first_element,
+                             node.boolean,
+                             node.integer,
+                             node.double_precision};
 }
 
 VectorAllocationResult vector_literal_value(EvaluationResources &resources,
@@ -1634,6 +1708,10 @@ RewriteEvaluationResult evaluate_rewrite_source(
   std::vector<std::uint8_t> node_live(parsed.program.nodes.size(),
                                       std::uint8_t{0U});
   std::size_t scalar_kernel_invocations = 0U;
+  RewriteLoweringProgram lowering;
+  lowering.nodes.reserve(parsed.program.nodes.size());
+  lowering.arguments = parsed.program.arguments;
+  lowering.roots = parsed.program.roots;
 
   for (std::size_t node_index = 0U;
        node_index < parsed.program.nodes.size(); ++node_index) {
@@ -1641,6 +1719,9 @@ RewriteEvaluationResult evaluate_rewrite_source(
     if (node.kind == RewriteNodeKind::scalar_literal) {
       node_values[node_index] = scalar_literal_value(node);
       node_live[node_index] = std::uint8_t{1U};
+      lowering.nodes.push_back(lowering_node(
+          node, node_values[node_index], PrimitiveImplementation::none, 0U,
+          0U));
       continue;
     }
     if (node.kind == RewriteNodeKind::vector_literal) {
@@ -1649,6 +1730,9 @@ RewriteEvaluationResult evaluate_rewrite_source(
       if (literal.ok) {
         node_values[node_index] = std::move(literal.value);
         node_live[node_index] = std::uint8_t{1U};
+        lowering.nodes.push_back(lowering_node(
+            node, node_values[node_index], PrimitiveImplementation::none, 0U,
+            0U));
         continue;
       }
       RewriteEvaluationDiagnostic diagnostic =
@@ -1704,6 +1788,8 @@ RewriteEvaluationResult evaluate_rewrite_source(
 
     PrimitiveApplicationContext application_context{
         resources, scalar_kernel_invocations};
+    const PrimitiveImplementation implementation =
+        lowering_implementation(*descriptor, arguments);
     PrimitiveApplicationResult applied = apply_primitive(
         application_context, *descriptor, arguments,
         rewrite_source_location(call.name_span.begin));
@@ -1719,6 +1805,9 @@ RewriteEvaluationResult evaluate_rewrite_source(
     }
     node_values[node_index] = std::move(applied.value);
     node_live[node_index] = std::uint8_t{1U};
+    lowering.nodes.push_back(lowering_node(
+        node, node_values[node_index], implementation, call.first_argument,
+        call.argument_count));
   }
 
   std::vector<Value> values;
@@ -1752,12 +1841,312 @@ RewriteEvaluationResult evaluate_rewrite_source(
         scalar_kernel_invocations);
   }
 
+  lowering.boolean_elements = parsed.program.boolean_elements;
+  lowering.integer_elements = parsed.program.integer_elements;
+  lowering.double_elements = parsed.program.double_elements;
   return RewriteEvaluationResult{true,
                                  std::move(values),
                                  std::move(formatted),
+                                 std::move(lowering),
                                  empty_rewrite_evaluation_diagnostic(),
                                  resources,
                                  scalar_kernel_invocations};
+}
+
+void append_c_unsigned(std::string &source, std::size_t value) {
+  std::array<char, 32> digits{};
+  const std::to_chars_result converted =
+      std::to_chars(digits.data(), digits.data() + digits.size(), value);
+  source.append(digits.data(), converted.ptr);
+  source.push_back('U');
+}
+
+void append_c_integer(std::string &source, std::int64_t value) {
+  if (value == std::numeric_limits<std::int64_t>::min()) {
+    source += "(-INT64_C(9223372036854775807) - INT64_C(1))";
+    return;
+  }
+  if (value < 0) {
+    source += "(-INT64_C(";
+    value = -value;
+    std::array<char, 32> digits{};
+    const std::to_chars_result converted =
+        std::to_chars(digits.data(), digits.data() + digits.size(), value);
+    source.append(digits.data(), converted.ptr);
+    source += "))";
+    return;
+  }
+  source += "INT64_C(";
+  std::array<char, 32> digits{};
+  const std::to_chars_result converted =
+      std::to_chars(digits.data(), digits.data() + digits.size(), value);
+  source.append(digits.data(), converted.ptr);
+  source.push_back(')');
+}
+
+void append_c_double_bits(std::string &source, double value) {
+  const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
+  std::array<char, 32> digits{};
+  const std::to_chars_result converted = std::to_chars(
+      digits.data(), digits.data() + digits.size(), bits, 16);
+  source += "UINT64_C(0x";
+  const std::size_t digit_count =
+      static_cast<std::size_t>(converted.ptr - digits.data());
+  source.append(16U - digit_count, '0');
+  source.append(digits.data(), converted.ptr);
+  source.push_back(')');
+}
+
+std::string_view c_implementation_name(PrimitiveImplementation implementation) {
+  switch (implementation) {
+  case PrimitiveImplementation::inc_integer:
+    return "BENNU_IMPL_INC_INT";
+  case PrimitiveImplementation::inc_double:
+    return "BENNU_IMPL_INC_DOUBLE";
+  case PrimitiveImplementation::add_integer:
+    return "BENNU_IMPL_ADD_INT";
+  case PrimitiveImplementation::add_double:
+    return "BENNU_IMPL_ADD_DOUBLE";
+  case PrimitiveImplementation::equals_boolean:
+    return "BENNU_IMPL_EQUALS_BOOL";
+  case PrimitiveImplementation::equals_integer:
+    return "BENNU_IMPL_EQUALS_INT";
+  case PrimitiveImplementation::equals_double:
+    return "BENNU_IMPL_EQUALS_DOUBLE";
+  case PrimitiveImplementation::logical_not_boolean:
+    return "BENNU_IMPL_NOT_BOOL";
+  case PrimitiveImplementation::iota_integer:
+    return "BENNU_IMPL_IOTA_INT";
+  case PrimitiveImplementation::none:
+    break;
+  }
+  return "0";
+}
+
+std::string_view c_type_name(ScalarType type) {
+  if (type == ScalarType::boolean) {
+    return "BENNU_BOOL";
+  }
+  if (type == ScalarType::integer) {
+    return "BENNU_INT";
+  }
+  return "BENNU_DOUBLE";
+}
+
+void append_literal_arrays(std::string &source,
+                           const RewriteLoweringProgram &program) {
+  for (std::size_t node_index = 0U; node_index < program.nodes.size();
+       ++node_index) {
+    const RewriteLoweringNode &node = program.nodes[node_index];
+    if (node.kind != RewriteNodeKind::vector_literal ||
+        node.element_count == 0U) {
+      continue;
+    }
+    source += "static const ";
+    if (node.element_type == ScalarType::boolean) {
+      source += "uint8_t";
+    } else if (node.element_type == ScalarType::integer) {
+      source += "int64_t";
+    } else {
+      source += "uint64_t";
+    }
+    source += " bennu_literal_" + std::to_string(node_index) + "[] = {";
+    for (std::size_t index = 0U; index < node.element_count; ++index) {
+      if (index != 0U) {
+        source += ", ";
+      }
+      const std::size_t payload_index = node.first_element + index;
+      if (node.element_type == ScalarType::boolean) {
+        source += program.boolean_elements[payload_index] == std::uint8_t{0U}
+                      ? "UINT8_C(0)"
+                      : "UINT8_C(1)";
+      } else if (node.element_type == ScalarType::integer) {
+        append_c_integer(source, program.integer_elements[payload_index]);
+      } else {
+        append_c_double_bits(source, program.double_elements[payload_index]);
+      }
+    }
+    source += "};\n";
+  }
+  if (!program.nodes.empty()) {
+    source.push_back('\n');
+  }
+}
+
+void append_resource_initialization(
+    std::string &source, const RewriteBackendConfiguration &configuration) {
+  const auto append_presence = [&source](const std::optional<std::size_t> &limit) {
+    source += limit.has_value() ? "1, " : "0, ";
+  };
+  const auto append_value = [&source](const std::optional<std::size_t> &limit) {
+    append_c_unsigned(source, limit.value_or(0U));
+    source += ", ";
+  };
+  source += "  BennuResources bennu_resources = {";
+  append_presence(configuration.limits.max_vector_bytes);
+  append_presence(configuration.limits.max_live_evaluation_bytes);
+  append_presence(configuration.limits.max_work_units);
+  append_value(configuration.limits.max_vector_bytes);
+  append_value(configuration.limits.max_live_evaluation_bytes);
+  append_value(configuration.limits.max_work_units);
+  source += "0U, 0U, 0U, ";
+  source += configuration.runtime_allocation_failure
+                        .fail_at_reservation_ordinal.has_value()
+                ? "1, "
+                : "0, ";
+  append_c_unsigned(
+      source,
+      configuration.runtime_allocation_failure.fail_at_reservation_ordinal
+          .value_or(0U));
+  source += ", BENNU_FAILURE_NONE};\n";
+}
+
+void append_scalar_node(std::string &source, std::size_t node_index,
+                        const RewriteLoweringNode &node) {
+  source += "  bennu_values[" + std::to_string(node_index) + "] = ";
+  if (node.element_type == ScalarType::boolean) {
+    source += node.boolean ? "bennu_scalar_bool(UINT8_C(1));\n"
+                           : "bennu_scalar_bool(UINT8_C(0));\n";
+  } else if (node.element_type == ScalarType::integer) {
+    source += "bennu_scalar_int(";
+    append_c_integer(source, node.integer);
+    source += ");\n";
+  } else {
+    source += "bennu_scalar_double_bits(";
+    append_c_double_bits(source, node.double_precision);
+    source += ");\n";
+  }
+}
+
+void append_vector_node(std::string &source, std::size_t node_index,
+                        const RewriteLoweringNode &node) {
+  source += "  if (!bennu_literal(&bennu_resources, &bennu_values[" +
+            std::to_string(node_index) + "], ";
+  source += c_type_name(node.element_type);
+  source += ", ";
+  source += node.element_count == 0U
+                ? "NULL"
+                : "bennu_literal_" + std::to_string(node_index);
+  source += ", ";
+  append_c_unsigned(source, node.element_count);
+  source += ")) { goto bennu_failure; }\n";
+}
+
+void append_call_node(std::string &source, std::size_t node_index,
+                      const RewriteLoweringNode &node,
+                      const RewriteLoweringProgram &program) {
+  const std::size_t left = program.arguments[node.first_argument];
+  const std::size_t right = node.argument_count == 2U
+                                ? program.arguments[node.first_argument + 1U]
+                                : 0U;
+  source += "  if (!bennu_apply(&bennu_resources, ";
+  source += c_implementation_name(node.implementation);
+  source += ", &bennu_values[" + std::to_string(node_index) +
+            "], &bennu_values[" + std::to_string(left) + "], ";
+  source += node.argument_count == 2U
+                ? "&bennu_values[" + std::to_string(right) + "]"
+                : "NULL";
+  source += ", ";
+  append_c_unsigned(source, node.argument_count);
+  source += ")) { goto bennu_failure; }\n";
+  for (std::size_t argument = 0U; argument < node.argument_count; ++argument) {
+    const std::size_t argument_node =
+        program.arguments[node.first_argument + argument];
+    source += "  bennu_release(&bennu_resources, &bennu_values[" +
+              std::to_string(argument_node) + "]);\n";
+  }
+}
+
+RewriteCBackendResult emit_rewrite_c_source_impl(
+    std::string_view source,
+    const RewriteBackendConfiguration &configuration) {
+  const RewriteEvaluationCreationData creation{
+      configuration.profile, configuration.limits,
+      configuration.validation_allocation_failure};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
+  if (!evaluated.ok) {
+    return RewriteCBackendResult{false, {}, "rewrite validation failed"};
+  }
+  if (evaluated.lowering.nodes.size() == 0U &&
+      !evaluated.lowering.roots.empty()) {
+    release_rewrite_evaluation_result(evaluated);
+    return RewriteCBackendResult{false, {}, "rewrite lowering failed"};
+  }
+
+  std::string generated;
+  append_rewrite_c_runtime(generated);
+  append_literal_arrays(generated, evaluated.lowering);
+  generated += "int main(void) {\n";
+  append_resource_initialization(generated, configuration);
+  generated += "  (void)bennu_literal;\n"
+               "  (void)bennu_apply;\n"
+               "  (void)bennu_print_value;\n";
+  if (!evaluated.lowering.nodes.empty()) {
+    generated += "  static BennuValue bennu_values[" +
+                 std::to_string(evaluated.lowering.nodes.size()) +
+                 "] = {{0}};\n";
+  }
+  generated +=
+      "  if (setlocale(LC_NUMERIC, \"C\") == NULL) {\n"
+      "    bennu_set_failure(&bennu_resources, BENNU_FAILURE_INTERNAL);\n";
+  if (!evaluated.lowering.nodes.empty()) {
+    generated += "    goto bennu_failure;\n";
+  } else {
+    generated += "    (void)bennu_report_failure(bennu_resources.failure);\n"
+                 "    return 1;\n";
+  }
+  generated += "  }\n";
+
+  for (std::size_t index = 0U; index < evaluated.lowering.nodes.size();
+       ++index) {
+    const RewriteLoweringNode &node = evaluated.lowering.nodes[index];
+    if (node.kind == RewriteNodeKind::scalar_literal) {
+      append_scalar_node(generated, index, node);
+    } else if (node.kind == RewriteNodeKind::vector_literal) {
+      append_vector_node(generated, index, node);
+    } else {
+      append_call_node(generated, index, node, evaluated.lowering);
+    }
+  }
+  for (const std::size_t root : evaluated.lowering.roots) {
+    generated += "  if (!bennu_print_value(&bennu_values[" +
+                 std::to_string(root) + "])) { goto bennu_output_failure; }\n";
+  }
+  if (!evaluated.lowering.nodes.empty()) {
+    generated += "  { size_t bennu_index = 0U;\n"
+                 "    for (bennu_index = 0U; bennu_index < ";
+    append_c_unsigned(generated, evaluated.lowering.nodes.size());
+    generated += "; ++bennu_index) {\n"
+                 "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
+                 "    }\n"
+                 "  }\n";
+  }
+  generated += "  return fflush(stdout) == 0 ? 0 : 1;\n";
+  if (!evaluated.lowering.nodes.empty()) {
+    generated += "bennu_failure:\n"
+                 "  { size_t bennu_index = 0U;\n"
+                 "    for (bennu_index = 0U; bennu_index < ";
+    append_c_unsigned(generated, evaluated.lowering.nodes.size());
+    generated += "; ++bennu_index) {\n"
+                 "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
+                 "    }\n"
+                 "  }\n"
+                 "  (void)bennu_report_failure(bennu_resources.failure);\n"
+                 "  return 1;\n"
+                 "bennu_output_failure:\n"
+                 "  { size_t bennu_index = 0U;\n"
+                 "    for (bennu_index = 0U; bennu_index < ";
+    append_c_unsigned(generated, evaluated.lowering.nodes.size());
+    generated += "; ++bennu_index) {\n"
+                 "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
+                 "    }\n"
+                 "  }\n"
+                 "  (void)fputs(\"OutputError: stdout failure\\n\", stderr);\n"
+                 "  return 1;\n";
+  }
+  generated += "}\n";
+  release_rewrite_evaluation_result(evaluated);
+  return RewriteCBackendResult{true, std::move(generated), {}};
 }
 
 #ifndef DOCTEST_CONFIG_DISABLE
@@ -3553,4 +3942,33 @@ TEST_CASE("rewrite evaluator clears formatted roots after a formatting failure")
 }
 
 } // namespace
+
+RewriteCBackendResult emit_rewrite_c_source_internal(
+    std::string_view source,
+    const RewriteBackendConfiguration &configuration) {
+  return emit_rewrite_c_source_impl(source, configuration);
+}
+
+#ifdef BENNU_REWRITE_BACKEND_TEST_DRIVER
+RewriteEvaluationTextResult evaluate_rewrite_text_internal(
+    std::string_view source,
+    const RewriteBackendConfiguration &configuration) {
+  const RewriteEvaluationCreationData creation{
+      configuration.profile, configuration.limits,
+      configuration.validation_allocation_failure};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
+  if (!evaluated.ok) {
+    return RewriteEvaluationTextResult{false, {},
+                                       "rewrite validation failed"};
+  }
+  std::string output;
+  for (const std::string &root : evaluated.formatted) {
+    output += root;
+    output.push_back('\n');
+  }
+  release_rewrite_evaluation_result(evaluated);
+  return RewriteEvaluationTextResult{true, std::move(output), {}};
+}
+#endif
+
 } // namespace bennu

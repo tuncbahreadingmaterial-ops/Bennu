@@ -25,6 +25,8 @@ set(bennu_implementation_sources
   src/path_encoding.cpp
   src/primitive.cpp
   src/rewrite.cpp
+  src/rewrite_backend.cpp
+  src/rewrite_c_runtime.cpp
   src/resources.cpp
   src/value.cpp
 )
@@ -201,6 +203,39 @@ if(BUILD_TESTING)
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
+  )
+
+  add_executable(bennu_rewrite_backend_test_driver
+    ${bennu_implementation_sources}
+    tests/rewrite_backend_test_driver.cpp
+  )
+  target_include_directories(bennu_rewrite_backend_test_driver PRIVATE
+    include
+    src
+  )
+  target_include_directories(bennu_rewrite_backend_test_driver SYSTEM PRIVATE
+    third_party/doctest
+  )
+  target_compile_definitions(bennu_rewrite_backend_test_driver PRIVATE
+    BENNU_REWRITE_BACKEND_TEST_DRIVER
+    DOCTEST_CONFIG_DISABLE
+    DOCTEST_CONFIG_NO_EXCEPTIONS
+    DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+  )
+  set_target_properties(bennu_rewrite_backend_test_driver PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(
+    NAME rewrite_backend.differential
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_REWRITE_BACKEND_DRIVER=$<TARGET_FILE:bennu_rewrite_backend_test_driver>"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/rewrite_backend_contract.cmake"
   )
 
   function(add_cli_contract_test name case_name)
