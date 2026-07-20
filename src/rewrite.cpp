@@ -1,9 +1,12 @@
+#include "bennu/application.hpp"
 #include "bennu/primitive.hpp"
+#include "bennu/resources.hpp"
 #include "bennu/value.hpp"
 
 #include "doctest/doctest.h"
 
 #ifndef DOCTEST_CONFIG_DISABLE
+#include <array>
 #include <bit>
 #include <ostream>
 #endif
@@ -17,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
@@ -1340,6 +1344,422 @@ RewriteResolutionResult resolve_rewrite_primitives(RewriteProgram &program) {
       RewriteDiagnostic{RewriteParseError::none, empty, empty, empty}};
 }
 
+enum class RewriteEvaluationStage {
+  none,
+  parse,
+  resolution,
+  primitive_table,
+  resource_admission,
+  literal,
+  application,
+  formatting,
+};
+
+struct RewriteEvaluationCreationData {
+  ExecutionProfile profile;
+  ResourceLimits limits;
+  AllocationFailureInjection allocation_failure;
+};
+
+struct RewriteEvaluationDiagnostic {
+  RewriteEvaluationStage stage;
+  RewriteDiagnostic rewrite;
+  Error error;
+  RewriteSpan primary;
+  RewriteSpan context;
+  RewriteSpan related;
+  RewriteSpan primitive_name;
+  RewriteSpan call;
+  std::vector<RewriteSpan> arguments;
+  ValueInvariant formatting_invariant;
+  ValueFormatError formatting_error;
+};
+
+struct RewriteEvaluationResult {
+  bool ok;
+  std::vector<Value> values;
+  std::vector<std::string> formatted;
+  RewriteEvaluationDiagnostic diagnostic;
+  EvaluationResources resources;
+  std::size_t scalar_kernel_invocations;
+};
+
+EvaluationResources make_rewrite_resources(
+    const RewriteEvaluationCreationData &creation) {
+  if (creation.profile == ExecutionProfile::trusted_local_v1 &&
+      !creation.limits.max_vector_bytes.has_value() &&
+      !creation.limits.max_live_evaluation_bytes.has_value() &&
+      !creation.limits.max_work_units.has_value()) {
+    return make_trusted_local_resources(creation.allocation_failure);
+  }
+  return EvaluationResources{creation.profile,
+                             creation.limits,
+                             creation.allocation_failure,
+                             0U,
+                             0U,
+                             0U};
+}
+
+SourceLocation rewrite_source_location(RewritePosition position) {
+  return SourceLocation{position.offset, position.line, position.column};
+}
+
+RewriteEvaluationDiagnostic empty_rewrite_evaluation_diagnostic() {
+  const RewriteSpan empty =
+      insertion_span(RewritePosition{1U, 1U, 1U});
+  return RewriteEvaluationDiagnostic{
+      RewriteEvaluationStage::none,
+      RewriteDiagnostic{RewriteParseError::none, empty, empty, empty},
+      make_error(ErrorKind::none, rewrite_source_location(empty.begin)),
+      empty,
+      empty,
+      empty,
+      empty,
+      empty,
+      {},
+      ValueInvariant::none,
+      ValueFormatError::none};
+}
+
+RewriteEvaluationResult rewrite_evaluation_failure(
+    EvaluationResources resources, RewriteEvaluationDiagnostic diagnostic,
+    std::size_t scalar_kernel_invocations) {
+  return RewriteEvaluationResult{false,
+                                 {},
+                                 {},
+                                 std::move(diagnostic),
+                                 resources,
+                                 scalar_kernel_invocations};
+}
+
+Value scalar_literal_value(const RewriteNode &node) {
+  if (node.element_type == ScalarType::boolean) {
+    return make_bool_value(node.boolean);
+  }
+  if (node.element_type == ScalarType::integer) {
+    return make_int_value(node.integer);
+  }
+  return make_double_value(node.double_precision);
+}
+
+VectorAllocationResult vector_literal_value(EvaluationResources &resources,
+                                             const RewriteProgram &program,
+                                             const RewriteNode &node) {
+  const SourceLocation location = rewrite_source_location(node.span.begin);
+  if (node.element_type == ScalarType::boolean) {
+    return copy_bool_vector(
+        resources,
+        std::span<const std::uint8_t>(program.boolean_elements)
+            .subspan(node.first_element, node.element_count),
+        location, "vector-literal");
+  }
+  if (node.element_type == ScalarType::integer) {
+    return copy_int_vector(
+        resources,
+        std::span<const std::int64_t>(program.integer_elements)
+            .subspan(node.first_element, node.element_count),
+        location, "vector-literal");
+  }
+  return copy_double_vector(
+      resources,
+      std::span<const double>(program.double_elements)
+          .subspan(node.first_element, node.element_count),
+      location, "vector-literal");
+}
+
+void release_rewrite_values(EvaluationResources &resources,
+                            std::vector<Value> &values) {
+  for (Value &value : values) {
+    if (value.container == ContainerKind::vector) {
+      release_vector_reservation(resources, value);
+    } else {
+      destroy_value(value);
+    }
+  }
+  values.clear();
+}
+
+void release_rewrite_node_values(EvaluationResources &resources,
+                                 std::vector<Value> &values,
+                                 std::vector<std::uint8_t> &live) {
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    if (live[index] == std::uint8_t{0U}) {
+      continue;
+    }
+    if (values[index].container == ContainerKind::vector) {
+      release_vector_reservation(resources, values[index]);
+    } else {
+      destroy_value(values[index]);
+    }
+    live[index] = std::uint8_t{0U};
+  }
+}
+
+RewriteEvaluationDiagnostic application_rewrite_diagnostic(
+    const RewriteProgram &program, const RewriteCall &call, Error error) {
+  RewriteEvaluationDiagnostic diagnostic =
+      empty_rewrite_evaluation_diagnostic();
+  diagnostic.stage = RewriteEvaluationStage::application;
+  diagnostic.primitive_name = call.name_span;
+  diagnostic.call = call.span;
+  diagnostic.context = call.span;
+  diagnostic.related = call.name_span;
+  diagnostic.arguments.assign(
+      program.argument_spans.begin() +
+          static_cast<std::ptrdiff_t>(call.first_argument),
+      program.argument_spans.begin() + static_cast<std::ptrdiff_t>(
+                                           call.first_argument +
+                                           call.argument_count));
+
+  diagnostic.primary = call.name_span;
+  if ((error.kind == ErrorKind::type_mismatch ||
+       error.kind == ErrorKind::shape_mismatch) &&
+      error.argument_position.has_value() &&
+      *error.argument_position >= 1U &&
+      *error.argument_position <= diagnostic.arguments.size()) {
+    diagnostic.primary =
+        diagnostic.arguments[*error.argument_position - 1U];
+  }
+  error.location = rewrite_source_location(diagnostic.primary.begin);
+  diagnostic.error = std::move(error);
+  return diagnostic;
+}
+
+bool format_rewrite_root_values(const RewriteProgram &program,
+                                const std::vector<Value> &values,
+                                std::vector<std::string> &formatted,
+                                RewriteEvaluationDiagnostic &diagnostic) {
+  formatted.clear();
+  if (values.size() != program.roots.size()) {
+    diagnostic = empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::formatting;
+    diagnostic.formatting_error = ValueFormatError::invalid_value;
+    return false;
+  }
+  formatted.reserve(values.size());
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    ValueFormattingResult result = format_value(values[index]);
+    if (!result.ok) {
+      formatted.clear();
+      diagnostic = empty_rewrite_evaluation_diagnostic();
+      diagnostic.stage = RewriteEvaluationStage::formatting;
+      diagnostic.primary = program.nodes[program.roots[index]].span;
+      diagnostic.context = diagnostic.primary;
+      diagnostic.formatting_invariant = result.invariant;
+      diagnostic.formatting_error = result.error;
+      return false;
+    }
+    formatted.push_back(std::move(result.formatted));
+  }
+  return true;
+}
+
+void release_rewrite_evaluation_result(RewriteEvaluationResult &result) {
+  release_rewrite_values(result.resources, result.values);
+  result.formatted.clear();
+}
+
+RewriteEvaluationResult evaluate_rewrite_source(
+    std::string_view source, const RewriteEvaluationCreationData &creation) {
+  EvaluationResources resources = make_rewrite_resources(creation);
+  RewriteParseResult parsed = parse_rewrite(source);
+  if (!parsed.ok) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::parse;
+    diagnostic.rewrite = parsed.diagnostic;
+    diagnostic.primary = parsed.diagnostic.primary;
+    diagnostic.context = parsed.diagnostic.context;
+    diagnostic.related = parsed.diagnostic.related;
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  const RewriteResolutionResult resolved =
+      resolve_rewrite_primitives(parsed.program);
+  if (!resolved.ok) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::resolution;
+    diagnostic.rewrite = resolved.diagnostic;
+    diagnostic.primary = resolved.diagnostic.primary;
+    diagnostic.context = resolved.diagnostic.context;
+    diagnostic.related = resolved.diagnostic.related;
+    diagnostic.error = make_error(
+        ErrorKind::unknown_name,
+        rewrite_source_location(resolved.diagnostic.primary.begin));
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  if (!production_primitive_table_validation().ok) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::primitive_table;
+    diagnostic.error = make_error(
+        ErrorKind::invalid_primitive_table, SourceLocation{1U, 1U, 1U});
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  WorkChargeResult resource_admission = charge_work(
+      resources, 0U, SourceLocation{1U, 1U, 1U}, "rewrite-evaluator");
+  if (!resource_admission.ok) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::resource_admission;
+    diagnostic.error = std::move(resource_admission.error);
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  std::size_t maximum_call_arity = 0U;
+  for (const RewriteCall &call : parsed.program.calls) {
+    if (call.argument_count > maximum_call_arity) {
+      maximum_call_arity = call.argument_count;
+    }
+  }
+  std::vector<Value> arguments;
+  arguments.reserve(maximum_call_arity);
+
+  std::vector<std::size_t> remaining_uses(parsed.program.nodes.size(), 0U);
+  for (const std::size_t argument : parsed.program.arguments) {
+    ++remaining_uses[argument];
+  }
+  for (const std::size_t root : parsed.program.roots) {
+    ++remaining_uses[root];
+  }
+
+  std::vector<Value> node_values;
+  node_values.reserve(parsed.program.nodes.size());
+  for (std::size_t index = 0U; index < parsed.program.nodes.size(); ++index) {
+    node_values.push_back(make_int_value(0));
+  }
+  std::vector<std::uint8_t> node_live(parsed.program.nodes.size(),
+                                      std::uint8_t{0U});
+  std::size_t scalar_kernel_invocations = 0U;
+
+  for (std::size_t node_index = 0U;
+       node_index < parsed.program.nodes.size(); ++node_index) {
+    const RewriteNode &node = parsed.program.nodes[node_index];
+    if (node.kind == RewriteNodeKind::scalar_literal) {
+      node_values[node_index] = scalar_literal_value(node);
+      node_live[node_index] = std::uint8_t{1U};
+      continue;
+    }
+    if (node.kind == RewriteNodeKind::vector_literal) {
+      VectorAllocationResult literal =
+          vector_literal_value(resources, parsed.program, node);
+      if (literal.ok) {
+        node_values[node_index] = std::move(literal.value);
+        node_live[node_index] = std::uint8_t{1U};
+        continue;
+      }
+      RewriteEvaluationDiagnostic diagnostic =
+          empty_rewrite_evaluation_diagnostic();
+      diagnostic.stage = RewriteEvaluationStage::literal;
+      diagnostic.primary = node.span;
+      diagnostic.context = node.span;
+      diagnostic.error = std::move(literal.error);
+      release_rewrite_node_values(resources, node_values, node_live);
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+
+    const RewriteCall &call = parsed.program.calls[node.call_index];
+    const PrimitiveDescriptor *descriptor =
+        call.primitive.has_value() ? find_primitive(*call.primitive) : nullptr;
+    if (descriptor == nullptr) {
+      Error error = make_error(ErrorKind::invalid_primitive_table,
+                               rewrite_source_location(call.name_span.begin));
+      RewriteEvaluationDiagnostic diagnostic =
+          application_rewrite_diagnostic(parsed.program, call,
+                                         std::move(error));
+      release_rewrite_node_values(resources, node_values, node_live);
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+
+    bool invalid_forward_use = false;
+    for (std::size_t argument_index = 0U;
+         argument_index < call.argument_count; ++argument_index) {
+      const std::size_t argument_node =
+          parsed.program.arguments[call.first_argument + argument_index];
+      if (node_live[argument_node] == std::uint8_t{0U} ||
+          remaining_uses[argument_node] != 1U) {
+        invalid_forward_use = true;
+        break;
+      }
+      arguments.push_back(std::move(node_values[argument_node]));
+      node_live[argument_node] = std::uint8_t{0U};
+      --remaining_uses[argument_node];
+    }
+    if (invalid_forward_use) {
+      release_rewrite_values(resources, arguments);
+      Error error = make_error(ErrorKind::invalid_primitive_table,
+                               rewrite_source_location(call.name_span.begin));
+      RewriteEvaluationDiagnostic diagnostic =
+          application_rewrite_diagnostic(parsed.program, call,
+                                         std::move(error));
+      release_rewrite_node_values(resources, node_values, node_live);
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+
+    PrimitiveApplicationContext application_context{
+        resources, scalar_kernel_invocations};
+    PrimitiveApplicationResult applied = apply_primitive(
+        application_context, *descriptor, arguments,
+        rewrite_source_location(call.name_span.begin));
+    scalar_kernel_invocations = application_context.scalar_kernel_invocations;
+    release_rewrite_values(resources, arguments);
+    if (!applied.ok) {
+      RewriteEvaluationDiagnostic diagnostic =
+          application_rewrite_diagnostic(parsed.program, call,
+                                         std::move(applied.error));
+      release_rewrite_node_values(resources, node_values, node_live);
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+    node_values[node_index] = std::move(applied.value);
+    node_live[node_index] = std::uint8_t{1U};
+  }
+
+  std::vector<Value> values;
+  values.reserve(parsed.program.roots.size());
+  for (const std::size_t root : parsed.program.roots) {
+    if (node_live[root] == std::uint8_t{0U} || remaining_uses[root] != 1U) {
+      release_rewrite_values(resources, values);
+      release_rewrite_node_values(resources, node_values, node_live);
+      RewriteEvaluationDiagnostic diagnostic =
+          empty_rewrite_evaluation_diagnostic();
+      diagnostic.stage = RewriteEvaluationStage::primitive_table;
+      diagnostic.error = make_error(ErrorKind::invalid_primitive_table,
+                                     SourceLocation{1U, 1U, 1U});
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+    values.push_back(std::move(node_values[root]));
+    node_live[root] = std::uint8_t{0U};
+    --remaining_uses[root];
+  }
+
+  std::vector<std::string> formatted;
+  RewriteEvaluationDiagnostic formatting_diagnostic =
+      empty_rewrite_evaluation_diagnostic();
+  if (!format_rewrite_root_values(parsed.program, values, formatted,
+                                  formatting_diagnostic)) {
+    release_rewrite_values(resources, values);
+    release_rewrite_node_values(resources, node_values, node_live);
+    return rewrite_evaluation_failure(
+        resources, std::move(formatting_diagnostic),
+        scalar_kernel_invocations);
+  }
+
+  return RewriteEvaluationResult{true,
+                                 std::move(values),
+                                 std::move(formatted),
+                                 empty_rewrite_evaluation_diagnostic(),
+                                 resources,
+                                 scalar_kernel_invocations};
+}
+
 #ifndef DOCTEST_CONFIG_DISABLE
 bool rewrite_program_invariants_hold(const RewriteProgram &program) {
   const auto positions_equal = [](RewritePosition left,
@@ -1460,6 +1880,170 @@ struct RewriteInvalidFixture {
   RewriteParseError error;
   RewriteSpan primary;
 };
+
+struct RewriteEvaluatorGoldenFixture {
+  std::string_view name;
+  std::string_view coverage;
+  std::string_view source;
+  std::string_view formatted;
+};
+
+struct RewriteEvaluatorErrorFixture {
+  std::string_view name;
+  std::string_view coverage;
+  std::string_view source;
+  ErrorKind error;
+  std::optional<std::size_t> argument_position;
+  std::optional<std::size_t> element_index;
+};
+
+bool error_value_type_equal(ErrorValueType left, ErrorValueType right) {
+  return left.container == right.container && left.element == right.element;
+}
+
+bool scalar_value_equal(const ScalarValue &left, const ScalarValue &right) {
+  if (left.type != right.type) {
+    return false;
+  }
+  if (left.type == ScalarType::boolean) {
+    return left.boolean == right.boolean;
+  }
+  if (left.type == ScalarType::integer) {
+    return left.integer == right.integer;
+  }
+  return std::bit_cast<std::uint64_t>(left.double_precision) ==
+         std::bit_cast<std::uint64_t>(right.double_precision);
+}
+
+bool value_equal(const Value &left, const Value &right) {
+  if (left.container != right.container) {
+    return false;
+  }
+  ScalarType left_type = ScalarType::boolean;
+  ScalarType right_type = ScalarType::boolean;
+  if (!value_element_type(left, left_type).ok ||
+      !value_element_type(right, right_type).ok || left_type != right_type) {
+    return false;
+  }
+  if (left.container == ContainerKind::scalar) {
+    return scalar_value_equal(left.scalar, right.scalar);
+  }
+  std::size_t left_length = 0U;
+  std::size_t right_length = 0U;
+  if (!value_length(left, left_length).ok ||
+      !value_length(right, right_length).ok || left_length != right_length) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < left_length; ++index) {
+    const ScalarProjectionResult left_element = project_scalar(left, index);
+    const ScalarProjectionResult right_element = project_scalar(right, index);
+    if (!left_element.ok || !right_element.ok ||
+        !scalar_value_equal(left_element.value, right_element.value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool type_error_equal(const TypeErrorContext &left,
+                      const TypeErrorContext &right) {
+  if (left.actual_arguments.size() != right.actual_arguments.size() ||
+      left.accepted_signatures.size() != right.accepted_signatures.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < left.actual_arguments.size(); ++index) {
+    if (!error_value_type_equal(left.actual_arguments[index],
+                                right.actual_arguments[index])) {
+      return false;
+    }
+  }
+  for (std::size_t signature = 0U;
+       signature < left.accepted_signatures.size(); ++signature) {
+    const TypeErrorSignatureContext &left_signature =
+        left.accepted_signatures[signature];
+    const TypeErrorSignatureContext &right_signature =
+        right.accepted_signatures[signature];
+    if (left_signature.parameters.size() !=
+            right_signature.parameters.size() ||
+        !error_value_type_equal(left_signature.result,
+                                right_signature.result)) {
+      return false;
+    }
+    for (std::size_t parameter = 0U;
+         parameter < left_signature.parameters.size(); ++parameter) {
+      if (!error_value_type_equal(left_signature.parameters[parameter],
+                                  right_signature.parameters[parameter])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool domain_error_equal(const DomainErrorContext &left,
+                        const DomainErrorContext &right) {
+  if (left.reason != right.reason ||
+      left.signature.result_type != right.signature.result_type ||
+      left.signature.parameter_types != right.signature.parameter_types ||
+      left.operands.size() != right.operands.size()) {
+    return false;
+  }
+  for (std::size_t index = 0U; index < left.operands.size(); ++index) {
+    if (!scalar_value_equal(left.operands[index], right.operands[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool structured_error_equal(const Error &left, const Error &right) {
+  if (left.kind != right.kind ||
+      left.primitive.has_value() != right.primitive.has_value() ||
+      left.arity.has_value() != right.arity.has_value() ||
+      left.type.has_value() != right.type.has_value() ||
+      left.argument_position != right.argument_position ||
+      left.shape.has_value() != right.shape.has_value() ||
+      left.element_index != right.element_index ||
+      left.resource.has_value() != right.resource.has_value() ||
+      left.domain.has_value() != right.domain.has_value()) {
+    return false;
+  }
+  if (left.primitive.has_value() &&
+      (left.primitive->name != right.primitive->name ||
+       left.primitive->id != right.primitive->id)) {
+    return false;
+  }
+  if (left.arity.has_value() &&
+      (left.arity->supplied != right.arity->supplied ||
+       left.arity->accepted != right.arity->accepted)) {
+    return false;
+  }
+  if (left.type.has_value() && !type_error_equal(*left.type, *right.type)) {
+    return false;
+  }
+  if (left.shape.has_value() &&
+      (left.shape->expected != right.shape->expected ||
+       left.shape->actual != right.shape->actual)) {
+    return false;
+  }
+  if (left.resource.has_value()) {
+    const ResourceErrorContext &left_resource = *left.resource;
+    const ResourceErrorContext &right_resource = *right.resource;
+    if (left_resource.reason != right_resource.reason ||
+        left_resource.requested_elements !=
+            right_resource.requested_elements ||
+        left_resource.requested_bytes != right_resource.requested_bytes ||
+        left_resource.profile != right_resource.profile ||
+        left_resource.limit_kind != right_resource.limit_kind ||
+        left_resource.configured_limit != right_resource.configured_limit ||
+        left_resource.usage_before != right_resource.usage_before ||
+        left_resource.refused_charge != right_resource.refused_charge) {
+      return false;
+    }
+  }
+  return !left.domain.has_value() ||
+         domain_error_equal(*left.domain, *right.domain);
+}
 
 void append_size(std::string &snapshot, std::size_t value) {
   char buffer[32];
@@ -1655,6 +2239,7 @@ std::string rewrite_flat_snapshot(const RewriteProgram &program) {
 }
 
 #include "../tests/fixtures/rewrite_conformance_fixture.inc"
+#include "../tests/fixtures/rewrite_evaluator_conformance_fixture.inc"
 #endif
 
 TEST_CASE("rewrite tokenizer uses generic categories and one-based byte spans") {
@@ -2162,6 +2747,809 @@ TEST_CASE("rewrite parser is deterministic over a fixed adversarial corpus") {
       CHECK(rewrite_program_invariants_hold(second.program));
     }
   }
+}
+
+TEST_CASE("rewrite evaluator returns formatted scalar roots in source order") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated =
+      evaluate_rewrite_source("true\n42\n-0.0", creation);
+
+  REQUIRE(evaluated.ok);
+  REQUIRE(evaluated.values.size() == 3U);
+  REQUIRE(evaluated.formatted.size() == 3U);
+  CHECK(evaluated.formatted[0] == "true");
+  CHECK(evaluated.formatted[1] == "42");
+  CHECK(evaluated.formatted[2] == "-0.0");
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.resources.work_units == 0U);
+  release_rewrite_evaluation_result(evaluated);
+}
+
+TEST_CASE("rewrite evaluator validates every complete execution profile early") {
+  struct MalformedProfileCase {
+    RewriteEvaluationCreationData creation;
+    std::string_view source;
+  };
+  const ResourceLimits no_limits{
+      std::nullopt, std::nullopt, std::nullopt};
+  const ResourceLimits vector_limit{8U, std::nullopt, std::nullopt};
+  const std::array<MalformedProfileCase, 6> cases{{
+      {{ExecutionProfile::bounded_v1, no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       ""},
+      {{ExecutionProfile::bounded_v1, no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       "42"},
+      {{ExecutionProfile::trusted_local_v1, vector_limit,
+        AllocationFailureInjection{std::nullopt}},
+       ""},
+      {{ExecutionProfile::trusted_local_v1, vector_limit,
+        AllocationFailureInjection{std::nullopt}},
+       "42"},
+      {{static_cast<ExecutionProfile>(999), no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       ""},
+      {{static_cast<ExecutionProfile>(999), no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       "42"},
+  }};
+
+  for (const MalformedProfileCase &profile_case : cases) {
+    RewriteEvaluationResult evaluated = evaluate_rewrite_source(
+        profile_case.source, profile_case.creation);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.stage ==
+          RewriteEvaluationStage::resource_admission);
+    CHECK(evaluated.diagnostic.error.kind ==
+          ErrorKind::invalid_execution_profile);
+    REQUIRE(evaluated.diagnostic.error.primitive.has_value());
+    CHECK(evaluated.diagnostic.error.primitive->name == "rewrite-evaluator");
+    CHECK_FALSE(evaluated.diagnostic.error.resource.has_value());
+    CHECK(evaluated.diagnostic.error.location.offset == 1U);
+    CHECK(evaluated.diagnostic.error.location.line == 1U);
+    CHECK(evaluated.diagnostic.error.location.column == 1U);
+    CHECK(evaluated.values.empty());
+    CHECK(evaluated.formatted.empty());
+    CHECK(evaluated.scalar_kernel_invocations == 0U);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluated.resources.work_units == 0U);
+    CHECK(evaluated.resources.reservation_ordinal == 0U);
+  }
+}
+
+TEST_CASE("rewrite evaluator constructs accounted typed vector literals") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source(
+      "(false true)\n(1 2)\n(1.0 -0.0)\nBool()\nInt()\nDouble()",
+      creation);
+
+  REQUIRE(evaluated.ok);
+  if (!evaluated.ok) {
+    return;
+  }
+  REQUIRE(evaluated.formatted.size() == 6U);
+  if (evaluated.formatted.size() != 6U) {
+    release_rewrite_evaluation_result(evaluated);
+    return;
+  }
+  CHECK(evaluated.formatted[0] == "(false true)");
+  CHECK(evaluated.formatted[1] == "(1 2)");
+  CHECK(evaluated.formatted[2] == "(1.0 -0.0)");
+  CHECK(evaluated.formatted[3] == "()");
+  CHECK(evaluated.formatted[4] == "()");
+  CHECK(evaluated.formatted[5] == "()");
+  CHECK(evaluated.resources.live_evaluation_bytes == 34U);
+  CHECK(evaluated.resources.reservation_ordinal == 3U);
+  release_rewrite_evaluation_result(evaluated);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+}
+
+TEST_CASE("rewrite evaluator applies nested primitives through shared semantics") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source(
+      "inc 5\ninc inc 5\nadd[1 2.5]\nadd[10 (1 2 3)]\n"
+      "equals[2 (1 2 3 2)]\nnot[(false true)]\niota[3]",
+      creation);
+
+  REQUIRE(evaluated.ok);
+  if (!evaluated.ok) {
+    return;
+  }
+  REQUIRE(evaluated.formatted.size() == 7U);
+  if (evaluated.formatted.size() != 7U) {
+    release_rewrite_evaluation_result(evaluated);
+    return;
+  }
+  CHECK(evaluated.formatted[0] == "6");
+  CHECK(evaluated.formatted[1] == "7");
+  CHECK(evaluated.formatted[2] == "3.5");
+  CHECK(evaluated.formatted[3] == "(11 12 13)");
+  CHECK(evaluated.formatted[4] == "(false true false true)");
+  CHECK(evaluated.formatted[5] == "(true false)");
+  CHECK(evaluated.formatted[6] == "(1 2 3)");
+  CHECK(evaluated.scalar_kernel_invocations == 13U);
+  CHECK(evaluated.resources.work_units == 16U);
+  CHECK(evaluated.resources.live_evaluation_bytes == 54U);
+  release_rewrite_evaluation_result(evaluated);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+}
+
+TEST_CASE("rewrite evaluator locates structured runtime diagnostics from spans") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+
+  RewriteEvaluationResult arity =
+      evaluate_rewrite_source("add[true]", creation);
+  REQUIRE_FALSE(arity.ok);
+  CHECK(arity.diagnostic.error.kind == ErrorKind::arity_error);
+  CHECK(span_is(arity.diagnostic.primary, 1U, 1U, 1U, 4U, 1U, 4U));
+  CHECK(span_is(arity.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(arity.diagnostic.call, 1U, 1U, 1U, 10U, 1U, 10U));
+  REQUIRE(arity.diagnostic.arguments.size() == 1U);
+  CHECK(span_is(arity.diagnostic.arguments[0], 5U, 1U, 5U, 9U, 1U, 9U));
+  CHECK(arity.diagnostic.error.location.offset == 1U);
+
+  RewriteEvaluationResult type = evaluate_rewrite_source(
+      "true\r\nadd[\r\n  (1 2)\r\n  (true false true)\r\n]", creation);
+  REQUIRE_FALSE(type.ok);
+  CHECK(type.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(type.diagnostic.error.argument_position == 2U);
+  CHECK(span_is(type.diagnostic.primary, 24U, 4U, 3U, 41U, 4U, 20U));
+  CHECK(span_is(type.diagnostic.primitive_name, 7U, 2U, 1U, 10U, 2U,
+                4U));
+  CHECK(span_is(type.diagnostic.call, 7U, 2U, 1U, 44U, 5U, 2U));
+  REQUIRE(type.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(type.diagnostic.arguments[0], 15U, 3U, 3U, 20U, 3U,
+                8U));
+  CHECK(span_is(type.diagnostic.arguments[1], 24U, 4U, 3U, 41U, 4U,
+                20U));
+  CHECK(type.diagnostic.error.location.offset == 24U);
+  CHECK(type.diagnostic.error.location.line == 4U);
+  CHECK(type.diagnostic.error.location.column == 3U);
+  CHECK(type.scalar_kernel_invocations == 0U);
+  CHECK(type.values.empty());
+  CHECK(type.formatted.empty());
+
+  RewriteEvaluationResult shape = evaluate_rewrite_source(
+      "add[(1 2) (10 20 30)]", creation);
+  REQUIRE_FALSE(shape.ok);
+  CHECK(shape.diagnostic.error.kind == ErrorKind::shape_mismatch);
+  CHECK(shape.diagnostic.error.argument_position == 2U);
+  CHECK(span_is(shape.diagnostic.primary, 11U, 1U, 11U, 21U, 1U, 21U));
+  CHECK(span_is(shape.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(shape.diagnostic.call, 1U, 1U, 1U, 22U, 1U, 22U));
+  REQUIRE(shape.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(shape.diagnostic.arguments[0], 5U, 1U, 5U, 10U, 1U,
+                10U));
+  CHECK(span_is(shape.diagnostic.arguments[1], 11U, 1U, 11U, 21U, 1U,
+                21U));
+  CHECK(shape.scalar_kernel_invocations == 0U);
+  CHECK(shape.values.empty());
+  CHECK(shape.formatted.empty());
+
+  RewriteEvaluationResult prefix =
+      evaluate_rewrite_source("inc true", creation);
+  REQUIRE_FALSE(prefix.ok);
+  CHECK(prefix.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(span_is(prefix.diagnostic.primary, 5U, 1U, 5U, 9U, 1U, 9U));
+  CHECK(span_is(prefix.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(prefix.diagnostic.call, 1U, 1U, 1U, 9U, 1U, 9U));
+  REQUIRE(prefix.diagnostic.arguments.size() == 1U);
+  CHECK(span_is(prefix.diagnostic.arguments[0], 5U, 1U, 5U, 9U, 1U,
+                9U));
+  CHECK(prefix.scalar_kernel_invocations == 0U);
+  CHECK(prefix.values.empty());
+  CHECK(prefix.formatted.empty());
+
+  RewriteEvaluationResult domain = evaluate_rewrite_source(
+      "add[(9223372036854775807 0) (1 9223372036854775807)]",
+      creation);
+  REQUIRE_FALSE(domain.ok);
+  CHECK(domain.diagnostic.error.kind == ErrorKind::domain_error);
+  CHECK(domain.diagnostic.error.element_index == 0U);
+  CHECK(domain.diagnostic.error.domain.has_value());
+  CHECK(span_is(domain.diagnostic.primary, 1U, 1U, 1U, 4U, 1U, 4U));
+  CHECK(span_is(domain.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(domain.diagnostic.call, 1U, 1U, 1U, 53U, 1U, 53U));
+  REQUIRE(domain.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(domain.diagnostic.arguments[0], 5U, 1U, 5U, 28U, 1U,
+                28U));
+  CHECK(span_is(domain.diagnostic.arguments[1], 29U, 1U, 29U, 52U, 1U,
+                52U));
+  CHECK(domain.resources.live_evaluation_bytes == 0U);
+
+  const RewriteEvaluationCreationData resource_creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{1U}};
+  RewriteEvaluationResult resource =
+      evaluate_rewrite_source("inc[(1 2)]", resource_creation);
+  REQUIRE_FALSE(resource.ok);
+  CHECK(resource.diagnostic.error.kind == ErrorKind::resource_error);
+  CHECK(span_is(resource.diagnostic.primary, 1U, 1U, 1U, 4U, 1U, 4U));
+  CHECK(span_is(resource.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(resource.diagnostic.call, 1U, 1U, 1U, 11U, 1U, 11U));
+  REQUIRE(resource.diagnostic.arguments.size() == 1U);
+  CHECK(span_is(resource.diagnostic.arguments[0], 5U, 1U, 5U, 10U, 1U,
+                10U));
+  CHECK(resource.scalar_kernel_invocations == 0U);
+  CHECK(resource.values.empty());
+  CHECK(resource.formatted.empty());
+  CHECK(resource.resources.live_evaluation_bytes == 0U);
+
+  RewriteEvaluationResult unknown =
+      evaluate_rewrite_source("bogus[1]", creation);
+  REQUIRE_FALSE(unknown.ok);
+  CHECK(unknown.diagnostic.stage == RewriteEvaluationStage::resolution);
+  CHECK(unknown.diagnostic.rewrite.error ==
+        RewriteParseError::unknown_primitive);
+  CHECK(span_is(unknown.diagnostic.primary, 1U, 1U, 1U, 6U, 1U, 6U));
+
+  RewriteEvaluationResult syntax =
+      evaluate_rewrite_source("add[1, 2]", creation);
+  REQUIRE_FALSE(syntax.ok);
+  CHECK(syntax.diagnostic.stage == RewriteEvaluationStage::parse);
+  CHECK(syntax.diagnostic.rewrite.error == RewriteParseError::invalid_byte);
+  CHECK(span_is(syntax.diagnostic.primary, 6U, 1U, 6U, 7U, 1U, 7U));
+}
+
+TEST_CASE("rewrite evaluator hides earlier roots when a later root fails") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated =
+      evaluate_rewrite_source("iota[2]\nadd[1 true]", creation);
+
+  REQUIRE_FALSE(evaluated.ok);
+  CHECK(evaluated.values.empty());
+  CHECK(evaluated.formatted.empty());
+  CHECK(evaluated.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(evaluated.diagnostic.error.argument_position == 2U);
+  CHECK(span_is(evaluated.diagnostic.primary, 15U, 2U, 7U, 19U, 2U,
+                11U));
+  CHECK(evaluated.resources.work_units == 2U);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.scalar_kernel_invocations == 0U);
+}
+
+TEST_CASE("rewrite evaluator enforces cumulative work and live-byte lifetimes") {
+  const RewriteEvaluationCreationData work_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, std::nullopt, 3U},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult exact =
+      evaluate_rewrite_source("inc 1\ninc 2\ninc 3", work_creation);
+  REQUIRE(exact.ok);
+  CHECK(exact.resources.work_units == 3U);
+  release_rewrite_evaluation_result(exact);
+
+  RewriteEvaluationResult reset =
+      evaluate_rewrite_source("inc 1\ninc 2\ninc 3", work_creation);
+  REQUIRE(reset.ok);
+  CHECK(reset.resources.work_units == 3U);
+  release_rewrite_evaluation_result(reset);
+
+  RewriteEvaluationResult one_past = evaluate_rewrite_source(
+      "inc 1\ninc 2\ninc 3\ninc 4", work_creation);
+  REQUIRE_FALSE(one_past.ok);
+  CHECK(one_past.values.empty());
+  CHECK(one_past.formatted.empty());
+  CHECK(one_past.diagnostic.error.kind == ErrorKind::resource_error);
+  REQUIRE(one_past.diagnostic.error.resource.has_value());
+  CHECK(one_past.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_work_units);
+  CHECK(one_past.diagnostic.error.resource->usage_before == 3U);
+  CHECK(one_past.diagnostic.error.resource->refused_charge == 1U);
+  CHECK(one_past.resources.work_units == 3U);
+  CHECK(one_past.scalar_kernel_invocations == 3U);
+
+  const RewriteEvaluationCreationData live_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, 16U, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult released =
+      evaluate_rewrite_source("inc[inc[(1)]]", live_creation);
+  REQUIRE(released.ok);
+  CHECK(released.formatted[0] == "(3)");
+  CHECK(released.resources.live_evaluation_bytes == 8U);
+  CHECK(released.resources.reservation_ordinal == 3U);
+  release_rewrite_evaluation_result(released);
+  CHECK(released.resources.live_evaluation_bytes == 0U);
+
+  const RewriteEvaluationCreationData live_one_past_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, 15U, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult live_one_past = evaluate_rewrite_source(
+      "inc[inc[(1)]]", live_one_past_creation);
+  REQUIRE_FALSE(live_one_past.ok);
+  REQUIRE(live_one_past.diagnostic.error.resource.has_value());
+  CHECK(live_one_past.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_live_evaluation_bytes);
+  CHECK(live_one_past.diagnostic.error.resource->usage_before == 8U);
+  CHECK(live_one_past.diagnostic.error.resource->refused_charge == 8U);
+  CHECK(span_is(live_one_past.diagnostic.primary, 5U, 1U, 5U, 8U, 1U,
+                8U));
+  CHECK(live_one_past.scalar_kernel_invocations == 0U);
+  CHECK(live_one_past.resources.live_evaluation_bytes == 0U);
+  CHECK(live_one_past.values.empty());
+  CHECK(live_one_past.formatted.empty());
+
+  const RewriteEvaluationCreationData retained_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, 23U, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult retained =
+      evaluate_rewrite_source("iota[2]\niota[1]", retained_creation);
+  REQUIRE_FALSE(retained.ok);
+  REQUIRE(retained.diagnostic.error.resource.has_value());
+  CHECK(retained.diagnostic.error.resource->usage_before == 16U);
+  CHECK(retained.diagnostic.error.resource->refused_charge == 8U);
+  CHECK(retained.resources.work_units == 2U);
+  CHECK(retained.scalar_kernel_invocations == 0U);
+  CHECK(retained.resources.live_evaluation_bytes == 0U);
+  CHECK(retained.values.empty());
+  CHECK(retained.formatted.empty());
+
+  const RewriteEvaluationCreationData empty_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, std::nullopt, 0U},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult empty =
+      evaluate_rewrite_source(" \t\n\n", empty_creation);
+  REQUIRE(empty.ok);
+  CHECK(empty.values.empty());
+  CHECK(empty.formatted.empty());
+  CHECK(empty.resources.live_evaluation_bytes == 0U);
+  CHECK(empty.resources.work_units == 0U);
+  release_rewrite_evaluation_result(empty);
+}
+
+TEST_CASE("rewrite evaluator refuses resources before latent scalar domain work") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, std::nullopt, 0U},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source(
+      "inc[(9223372036854775807)]", creation);
+
+  REQUIRE_FALSE(evaluated.ok);
+  CHECK(evaluated.diagnostic.stage == RewriteEvaluationStage::application);
+  CHECK(evaluated.diagnostic.error.kind == ErrorKind::resource_error);
+  REQUIRE(evaluated.diagnostic.error.primitive.has_value());
+  CHECK(evaluated.diagnostic.error.primitive->name == "inc");
+  REQUIRE(evaluated.diagnostic.error.resource.has_value());
+  CHECK(evaluated.diagnostic.error.resource->reason ==
+        ResourceErrorReason::profile_limit);
+  CHECK(evaluated.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_work_units);
+  CHECK(evaluated.diagnostic.error.resource->usage_before == 0U);
+  CHECK(evaluated.diagnostic.error.resource->refused_charge == 1U);
+  CHECK_FALSE(evaluated.diagnostic.error.domain.has_value());
+  CHECK(evaluated.scalar_kernel_invocations == 0U);
+  CHECK(evaluated.resources.work_units == 0U);
+  CHECK(evaluated.resources.reservation_ordinal == 1U);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.values.empty());
+  CHECK(evaluated.formatted.empty());
+}
+
+TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
+  const RewriteParseResult parsed_literal = parse_rewrite("(1)");
+  REQUIRE(parsed_literal.ok);
+  REQUIRE(parsed_literal.program.nodes.size() == 1U);
+  EvaluationResources malformed_literal_resources{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}, 0U, 0U, 0U};
+  VectorAllocationResult malformed_literal = vector_literal_value(
+      malformed_literal_resources, parsed_literal.program,
+      parsed_literal.program.nodes[0]);
+  REQUIRE_FALSE(malformed_literal.ok);
+  CHECK(malformed_literal.error.kind == ErrorKind::invalid_execution_profile);
+  REQUIRE(malformed_literal.error.primitive.has_value());
+  CHECK(malformed_literal.error.primitive->name == "vector-literal");
+  CHECK(malformed_literal_resources.live_evaluation_bytes == 0U);
+  CHECK(malformed_literal_resources.work_units == 0U);
+  CHECK(malformed_literal_resources.reservation_ordinal == 0U);
+
+  const RewriteEvaluationCreationData vector_exact_creation{
+      ExecutionProfile::bounded_v1,
+      ResourceLimits{16U, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult vector_exact =
+      evaluate_rewrite_source("(1 2)", vector_exact_creation);
+  REQUIRE(vector_exact.ok);
+  CHECK(vector_exact.resources.live_evaluation_bytes == 16U);
+  release_rewrite_evaluation_result(vector_exact);
+  CHECK(vector_exact.resources.live_evaluation_bytes == 0U);
+
+  RewriteEvaluationResult vector_one_past =
+      evaluate_rewrite_source("(1 2 3)", vector_exact_creation);
+  REQUIRE_FALSE(vector_one_past.ok);
+  REQUIRE(vector_one_past.diagnostic.error.primitive.has_value());
+  CHECK(vector_one_past.diagnostic.error.primitive->name ==
+        "vector-literal");
+  REQUIRE(vector_one_past.diagnostic.error.resource.has_value());
+  CHECK(vector_one_past.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_vector_bytes);
+  CHECK(vector_one_past.diagnostic.error.resource->configured_limit == 16U);
+  CHECK(vector_one_past.diagnostic.error.resource->refused_charge == 24U);
+  CHECK(vector_one_past.scalar_kernel_invocations == 0U);
+  CHECK(vector_one_past.resources.live_evaluation_bytes == 0U);
+  CHECK(vector_one_past.values.empty());
+  CHECK(vector_one_past.formatted.empty());
+
+  const RewriteEvaluationCreationData literal_failure_creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{0U}};
+  RewriteEvaluationResult literal =
+      evaluate_rewrite_source("(1 2)", literal_failure_creation);
+  REQUIRE_FALSE(literal.ok);
+  CHECK(literal.diagnostic.stage == RewriteEvaluationStage::literal);
+  REQUIRE(literal.diagnostic.error.resource.has_value());
+  CHECK(literal.diagnostic.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  REQUIRE(literal.diagnostic.error.primitive.has_value());
+  CHECK(literal.diagnostic.error.primitive->name == "vector-literal");
+  CHECK(literal.resources.reservation_ordinal == 1U);
+  CHECK(literal.resources.live_evaluation_bytes == 0U);
+  CHECK(literal.scalar_kernel_invocations == 0U);
+  CHECK(literal.values.empty());
+  CHECK(literal.formatted.empty());
+
+  const RewriteEvaluationCreationData result_failure_creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{1U}};
+  RewriteEvaluationResult lifted =
+      evaluate_rewrite_source("inc[(1 2)]", result_failure_creation);
+  REQUIRE_FALSE(lifted.ok);
+  CHECK(lifted.diagnostic.stage == RewriteEvaluationStage::application);
+  REQUIRE(lifted.diagnostic.error.resource.has_value());
+  CHECK(lifted.diagnostic.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(lifted.resources.reservation_ordinal == 2U);
+  CHECK(lifted.resources.live_evaluation_bytes == 0U);
+  CHECK(lifted.resources.work_units == 0U);
+  CHECK(lifted.scalar_kernel_invocations == 0U);
+  CHECK(lifted.values.empty());
+  CHECK(lifted.formatted.empty());
+
+  RewriteEvaluationResult structural =
+      evaluate_rewrite_source("iota[2]", literal_failure_creation);
+  REQUIRE_FALSE(structural.ok);
+  REQUIRE(structural.diagnostic.error.resource.has_value());
+  CHECK(structural.diagnostic.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(structural.resources.reservation_ordinal == 1U);
+  CHECK(structural.resources.live_evaluation_bytes == 0U);
+  CHECK(structural.scalar_kernel_invocations == 0U);
+  CHECK(structural.values.empty());
+  CHECK(structural.formatted.empty());
+}
+
+#ifndef DOCTEST_CONFIG_DISABLE
+TEST_CASE("rewrite evaluator matches the tracked Section 15 and 16 corpus") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  for (const RewriteEvaluatorGoldenFixture &fixture :
+       rewrite_evaluator_golden_fixtures) {
+    INFO(std::string(fixture.name));
+    INFO(std::string(fixture.coverage));
+    RewriteEvaluationResult evaluated =
+        evaluate_rewrite_source(fixture.source, creation);
+    REQUIRE(evaluated.ok);
+    if (!evaluated.ok) {
+      continue;
+    }
+    REQUIRE(evaluated.values.size() == 1U);
+    REQUIRE(evaluated.formatted.size() == 1U);
+    if (evaluated.formatted.size() == 1U) {
+      CHECK(evaluated.formatted[0] == fixture.formatted);
+    }
+    if (fixture.formatted == "()") {
+      CHECK(evaluated.scalar_kernel_invocations == 0U);
+    }
+    release_rewrite_evaluation_result(evaluated);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  }
+
+  for (const RewriteEvaluatorErrorFixture &fixture :
+       rewrite_evaluator_error_fixtures) {
+    INFO(std::string(fixture.name));
+    INFO(std::string(fixture.coverage));
+    RewriteEvaluationResult evaluated =
+        evaluate_rewrite_source(fixture.source, creation);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.values.empty());
+    CHECK(evaluated.formatted.empty());
+    CHECK(evaluated.diagnostic.error.kind == fixture.error);
+    CHECK(evaluated.diagnostic.error.argument_position.has_value() ==
+          fixture.argument_position.has_value());
+    if (fixture.argument_position.has_value()) {
+      CHECK(evaluated.diagnostic.error.argument_position ==
+            *fixture.argument_position);
+    }
+    CHECK(evaluated.diagnostic.error.element_index.has_value() ==
+          fixture.element_index.has_value());
+    if (fixture.element_index.has_value()) {
+      CHECK(evaluated.diagnostic.error.element_index ==
+            *fixture.element_index);
+    }
+    if (fixture.error == ErrorKind::arity_error ||
+        fixture.error == ErrorKind::type_mismatch ||
+        fixture.error == ErrorKind::shape_mismatch) {
+      CHECK(evaluated.scalar_kernel_invocations == 0U);
+    }
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  }
+}
+#endif
+
+TEST_CASE("rewrite evaluation matches direct primitive values and errors") {
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+
+  RewriteEvaluationResult parsed_nested =
+      evaluate_rewrite_source("add[inc[1] inc[2]]", creation);
+  REQUIRE(parsed_nested.ok);
+  EvaluationResources nested_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  PrimitiveApplicationContext nested_context{nested_resources, 0U};
+  std::vector<Value> first_arguments;
+  first_arguments.push_back(make_int_value(1));
+  PrimitiveApplicationResult first = apply_primitive(
+      nested_context, *find_primitive(PrimitiveId::inc), first_arguments,
+      SourceLocation{5U, 1U, 5U});
+  REQUIRE(first.ok);
+  release_rewrite_values(nested_resources, first_arguments);
+  std::vector<Value> second_arguments;
+  second_arguments.push_back(make_int_value(2));
+  PrimitiveApplicationResult second = apply_primitive(
+      nested_context, *find_primitive(PrimitiveId::inc), second_arguments,
+      SourceLocation{12U, 1U, 12U});
+  REQUIRE(second.ok);
+  release_rewrite_values(nested_resources, second_arguments);
+  std::vector<Value> nested_arguments;
+  nested_arguments.push_back(std::move(first.value));
+  nested_arguments.push_back(std::move(second.value));
+  PrimitiveApplicationResult direct_nested = apply_primitive(
+      nested_context, *find_primitive(PrimitiveId::add), nested_arguments,
+      SourceLocation{1U, 1U, 1U});
+  REQUIRE(direct_nested.ok);
+  ValueFormattingResult direct_nested_format =
+      format_value(direct_nested.value);
+  REQUIRE(direct_nested_format.ok);
+  REQUIRE(parsed_nested.values.size() == 1U);
+  REQUIRE(parsed_nested.formatted.size() == 1U);
+  CHECK(value_equal(parsed_nested.values[0], direct_nested.value));
+  CHECK(parsed_nested.formatted[0] == direct_nested_format.formatted);
+  CHECK(parsed_nested.scalar_kernel_invocations ==
+        nested_context.scalar_kernel_invocations);
+  CHECK(parsed_nested.resources.work_units == nested_resources.work_units);
+  release_rewrite_values(nested_resources, nested_arguments);
+  destroy_value(direct_nested.value);
+  CHECK(nested_resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(parsed_nested);
+  CHECK(parsed_nested.resources.live_evaluation_bytes == 0U);
+
+  RewriteEvaluationResult parsed_arity =
+      evaluate_rewrite_source("add[1]", creation);
+  REQUIRE_FALSE(parsed_arity.ok);
+  EvaluationResources arity_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  PrimitiveApplicationContext arity_context{arity_resources, 0U};
+  std::vector<Value> arity_arguments;
+  arity_arguments.push_back(make_int_value(1));
+  PrimitiveApplicationResult direct_arity = apply_primitive(
+      arity_context, *find_primitive(PrimitiveId::add), arity_arguments,
+      SourceLocation{1U, 1U, 1U});
+  REQUIRE_FALSE(direct_arity.ok);
+  CHECK(structured_error_equal(parsed_arity.diagnostic.error,
+                               direct_arity.error));
+  CHECK(parsed_arity.scalar_kernel_invocations ==
+        arity_context.scalar_kernel_invocations);
+  release_rewrite_values(arity_resources, arity_arguments);
+  destroy_value(direct_arity.value);
+  release_rewrite_evaluation_result(parsed_arity);
+
+  RewriteEvaluationResult parsed_type =
+      evaluate_rewrite_source("add[true 1]", creation);
+  REQUIRE_FALSE(parsed_type.ok);
+  EvaluationResources type_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  PrimitiveApplicationContext type_context{type_resources, 0U};
+  std::vector<Value> type_arguments;
+  type_arguments.push_back(make_bool_value(true));
+  type_arguments.push_back(make_int_value(1));
+  PrimitiveApplicationResult direct_type = apply_primitive(
+      type_context, *find_primitive(PrimitiveId::add), type_arguments,
+      SourceLocation{1U, 1U, 1U});
+  REQUIRE_FALSE(direct_type.ok);
+  CHECK(structured_error_equal(parsed_type.diagnostic.error,
+                               direct_type.error));
+  CHECK(parsed_type.scalar_kernel_invocations ==
+        type_context.scalar_kernel_invocations);
+  release_rewrite_values(type_resources, type_arguments);
+  destroy_value(direct_type.value);
+  release_rewrite_evaluation_result(parsed_type);
+
+  RewriteEvaluationResult parsed_shape = evaluate_rewrite_source(
+      "add[(1 2) (10 20 30)]", creation);
+  REQUIRE_FALSE(parsed_shape.ok);
+  EvaluationResources shape_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  const std::array<std::int64_t, 2> shape_left{{1, 2}};
+  const std::array<std::int64_t, 3> shape_right{{10, 20, 30}};
+  VectorAllocationResult direct_left = copy_int_vector(
+      shape_resources, shape_left, SourceLocation{5U, 1U, 5U},
+      "vector-literal");
+  VectorAllocationResult direct_right = copy_int_vector(
+      shape_resources, shape_right, SourceLocation{11U, 1U, 11U},
+      "vector-literal");
+  REQUIRE(direct_left.ok);
+  REQUIRE(direct_right.ok);
+  std::vector<Value> shape_arguments;
+  shape_arguments.push_back(std::move(direct_left.value));
+  shape_arguments.push_back(std::move(direct_right.value));
+  PrimitiveApplicationContext shape_context{shape_resources, 0U};
+  PrimitiveApplicationResult direct_shape = apply_primitive(
+      shape_context, *find_primitive(PrimitiveId::add), shape_arguments,
+      SourceLocation{1U, 1U, 1U});
+  REQUIRE_FALSE(direct_shape.ok);
+  CHECK(structured_error_equal(parsed_shape.diagnostic.error,
+                               direct_shape.error));
+  CHECK(parsed_shape.scalar_kernel_invocations ==
+        shape_context.scalar_kernel_invocations);
+  release_rewrite_values(shape_resources, shape_arguments);
+  destroy_value(direct_shape.value);
+  CHECK(shape_resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(parsed_shape);
+
+  RewriteEvaluationResult parsed_domain = evaluate_rewrite_source(
+      "add[(0 9223372036854775807) (0 1)]", creation);
+  REQUIRE_FALSE(parsed_domain.ok);
+  EvaluationResources domain_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  const std::array<std::int64_t, 2> domain_left{
+      {0, std::numeric_limits<std::int64_t>::max()}};
+  const std::array<std::int64_t, 2> domain_right{{0, 1}};
+  VectorAllocationResult direct_domain_left = copy_int_vector(
+      domain_resources, domain_left, SourceLocation{5U, 1U, 5U},
+      "vector-literal");
+  VectorAllocationResult direct_domain_right = copy_int_vector(
+      domain_resources, domain_right, SourceLocation{29U, 1U, 29U},
+      "vector-literal");
+  REQUIRE(direct_domain_left.ok);
+  REQUIRE(direct_domain_right.ok);
+  std::vector<Value> domain_arguments;
+  domain_arguments.push_back(std::move(direct_domain_left.value));
+  domain_arguments.push_back(std::move(direct_domain_right.value));
+  PrimitiveApplicationContext domain_context{domain_resources, 0U};
+  PrimitiveApplicationResult direct_domain = apply_primitive(
+      domain_context, *find_primitive(PrimitiveId::add), domain_arguments,
+      SourceLocation{1U, 1U, 1U});
+  REQUIRE_FALSE(direct_domain.ok);
+  CHECK(structured_error_equal(parsed_domain.diagnostic.error,
+                               direct_domain.error));
+  CHECK(parsed_domain.diagnostic.error.element_index == 1U);
+  REQUIRE(parsed_domain.diagnostic.error.domain.has_value());
+  CHECK(parsed_domain.diagnostic.error.domain->reason ==
+        DomainErrorReason::integer_overflow);
+  CHECK(parsed_domain.scalar_kernel_invocations ==
+        domain_context.scalar_kernel_invocations);
+  release_rewrite_values(domain_resources, domain_arguments);
+  destroy_value(direct_domain.value);
+  CHECK(domain_resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(parsed_domain);
+
+  const RewriteEvaluationCreationData allocation_creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{1U}};
+  RewriteEvaluationResult parsed_allocation =
+      evaluate_rewrite_source("inc[(1 2)]", allocation_creation);
+  REQUIRE_FALSE(parsed_allocation.ok);
+  EvaluationResources allocation_resources =
+      make_trusted_local_resources(AllocationFailureInjection{1U});
+  const std::array<std::int64_t, 2> allocation_input{{1, 2}};
+  VectorAllocationResult direct_allocation_input = copy_int_vector(
+      allocation_resources, allocation_input, SourceLocation{5U, 1U, 5U},
+      "vector-literal");
+  REQUIRE(direct_allocation_input.ok);
+  std::vector<Value> allocation_arguments;
+  allocation_arguments.push_back(std::move(direct_allocation_input.value));
+  PrimitiveApplicationContext allocation_context{allocation_resources, 0U};
+  PrimitiveApplicationResult direct_allocation = apply_primitive(
+      allocation_context, *find_primitive(PrimitiveId::inc),
+      allocation_arguments, SourceLocation{1U, 1U, 1U});
+  REQUIRE_FALSE(direct_allocation.ok);
+  CHECK(structured_error_equal(parsed_allocation.diagnostic.error,
+                               direct_allocation.error));
+  CHECK(parsed_allocation.resources.work_units ==
+        allocation_resources.work_units);
+  CHECK(parsed_allocation.resources.reservation_ordinal ==
+        allocation_resources.reservation_ordinal);
+  CHECK(parsed_allocation.scalar_kernel_invocations ==
+        allocation_context.scalar_kernel_invocations);
+  release_rewrite_values(allocation_resources, allocation_arguments);
+  destroy_value(direct_allocation.value);
+  CHECK(allocation_resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(parsed_allocation);
+  CHECK(parsed_allocation.resources.live_evaluation_bytes == 0U);
+}
+
+TEST_CASE("rewrite evaluator executes deep programs without recursive evaluation") {
+  constexpr std::size_t depth = 4000U;
+  std::string source;
+  source.reserve(depth * 4U + 1U);
+  for (std::size_t index = 0U; index < depth; ++index) {
+    source += "inc ";
+  }
+  source += '1';
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult evaluated =
+      evaluate_rewrite_source(source, creation);
+
+  REQUIRE(evaluated.ok);
+  REQUIRE(evaluated.formatted.size() == 1U);
+  CHECK(evaluated.formatted[0] == "4001");
+  CHECK(evaluated.scalar_kernel_invocations == depth);
+  CHECK(evaluated.resources.work_units == depth);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(evaluated);
+}
+
+TEST_CASE("rewrite evaluator clears formatted roots after a formatting failure") {
+  const RewriteParseResult parsed = parse_rewrite("1\n2");
+  REQUIRE(parsed.ok);
+  std::vector<Value> values;
+  values.push_back(make_int_value(1));
+  values.push_back(make_int_value(2));
+  values[1].scalar.boolean = true;
+  std::vector<std::string> formatted{"must-not-escape"};
+  RewriteEvaluationDiagnostic diagnostic =
+      empty_rewrite_evaluation_diagnostic();
+
+  const bool formatted_ok = format_rewrite_root_values(
+      parsed.program, values, formatted, diagnostic);
+
+  CHECK_FALSE(formatted_ok);
+  CHECK(formatted.empty());
+  CHECK(diagnostic.stage == RewriteEvaluationStage::formatting);
+  CHECK(diagnostic.formatting_error == ValueFormatError::invalid_value);
+  CHECK(diagnostic.formatting_invariant ==
+        ValueInvariant::inactive_scalar_field);
+  CHECK(span_is(diagnostic.primary, 3U, 2U, 1U, 4U, 2U, 2U));
+  EvaluationResources resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  release_rewrite_values(resources, values);
 }
 
 } // namespace
