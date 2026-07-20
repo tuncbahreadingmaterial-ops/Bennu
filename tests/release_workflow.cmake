@@ -39,6 +39,7 @@ require_workflow_text("DEBIAN_FRONTEND=noninteractive" "non-interactive pinned p
 require_workflow_text("useradd --create-home --uid 1001 bennu-ci" "unprivileged Linux test account")
 require_workflow_text("runuser -u bennu-ci -- ctest --test-dir build --output-on-failure" "unprivileged complete Linux CTest")
 require_workflow_text("runuser -u bennu-ci -- cmake --build build --verbose" "recorded Linux compile/link command lines")
+require_workflow_text("git config --global --add safe.directory \"$GITHUB_WORKSPACE\"" "container checkout ownership trust before provenance inspection")
 string(REGEX MATCHALL "libc6-dev=2\\.39-0ubuntu8" linux_libc_development_packages "${workflow_text}")
 list(LENGTH linux_libc_development_packages linux_libc_development_package_count)
 if(NOT linux_libc_development_package_count EQUAL 2)
