@@ -85,6 +85,7 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           main_sha=$(git rev-parse refs/remotes/origin/main)
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
