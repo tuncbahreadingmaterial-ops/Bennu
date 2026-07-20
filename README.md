@@ -40,7 +40,7 @@ distribution/library combinations may work when they provide those interfaces,
 but the release contract is tested on Ubuntu rather than on mixed userlands.
 
 Before `bennu.exe` can launch, Windows users must install the
-[Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version),
+[Microsoft Visual C++ 2017-2026 Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version),
 On every release target, only `bennu build` requires an external C11 compiler;
 `--help`, `repl`, `run`, and `emit-c` do not require one.
 
