@@ -5,8 +5,8 @@
 
 #include "doctest/doctest.h"
 
-#ifndef DOCTEST_CONFIG_DISABLE
 #include <array>
+#ifndef DOCTEST_CONFIG_DISABLE
 #include <bit>
 #include <ostream>
 #endif
