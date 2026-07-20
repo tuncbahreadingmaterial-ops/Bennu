@@ -131,6 +131,38 @@ jobs:
           -Platform '${{ matrix.platform }}'
           -Archive '${{ matrix.archive }}'
 
+      - name: Verify durable Windows release asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_ASSET_URL: https://github.com/tuncbahreadingmaterial-ops/Bennu/releases/download/v0.1.0/bennu-v0.1.0-windows-x64.zip
+          WINDOWS_ASSET_SHA256: 4b87f4af18251a6c4f19e60eb015421141bbe235354102b7f5ebd094035ebc12
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "durable-bennu-v0.1.0-windows-x64.zip"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "durable-bennu-v0.1.0-windows-x64"
+          $repacked = Join-Path $env:RUNNER_TEMP "durable-bennu-repacked.zip"
+          Invoke-WebRequest -Uri $env:WINDOWS_ASSET_URL -OutFile $archive
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($hash -cne $env:WINDOWS_ASSET_SHA256) {
+            throw "Durable Windows asset SHA256 mismatch: expected $env:WINDOWS_ASSET_SHA256, observed $hash"
+          }
+
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $extractRoot)
+          $entries = @(Get-ChildItem -LiteralPath $extractRoot -File | ForEach-Object { $_.Name } | Sort-Object)
+          $expectedEntries = @("LICENSE", "bennu.exe")
+          if ($entries.Count -ne $expectedEntries.Count -or
+              (Compare-Object -CaseSensitive $entries $expectedEntries)) {
+            throw "Durable Windows asset layout mismatch: $($entries -join ', ')"
+          }
+
+          ./tools/release/package-and-smoke.ps1 `
+            -BennuExecutable (Join-Path $extractRoot "bennu.exe") `
+            -Source 'examples/level1.bennu' `
+            -License (Join-Path $extractRoot "LICENSE") `
+            -Platform 'windows-x64' `
+            -Archive $repacked
+          Write-Host "Verified durable Windows release asset SHA256: $hash"
+
       - name: Controlled required-job failure
         if: github.event_name == 'workflow_dispatch' && inputs.force_failure
         shell: pwsh
