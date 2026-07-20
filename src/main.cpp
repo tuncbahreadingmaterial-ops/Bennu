@@ -54,8 +54,6 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
     return "allocation limit exceeded";
   case bennu::ErrorKind::empty_expression:
     return "empty expression";
-  case bennu::ErrorKind::invalid_program:
-    return "invalid program";
   }
   return "unknown error";
 }

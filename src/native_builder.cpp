@@ -1,6 +1,8 @@
 #include "bennu/native_builder.hpp"
 #include "bennu/path_encoding.hpp"
 
+#include "doctest/doctest.h"
+
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -651,6 +653,38 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
     return NativeBuildResult{false, std::move(message)};
   }
   return NativeBuildResult{true, {}};
+}
+
+TEST_CASE("native compiler selection preserves precedence and attribution") {
+  const CompilerSelection explicit_selection =
+      select_c_compiler("explicit cc", "environment cc",
+                        NativePlatform::gcc_like);
+  REQUIRE(explicit_selection.ok);
+  CHECK(explicit_selection.executable == "explicit cc");
+  CHECK(explicit_selection.configuration ==
+        CompilerConfiguration::explicit_option);
+
+  const CompilerSelection environment_selection =
+      select_c_compiler("", "environment cc", NativePlatform::gcc_like);
+  REQUIRE(environment_selection.ok);
+  CHECK(environment_selection.executable == "environment cc");
+  CHECK(environment_selection.configuration ==
+        CompilerConfiguration::environment);
+}
+
+TEST_CASE("native compiler command lines preserve argument boundaries") {
+  const std::vector<std::string> gcc = make_c_compiler_arguments(
+      NativePlatform::gcc_like, "clang", "/tmp/source ; $.c",
+      "/tmp/output ; $");
+  CHECK(gcc == std::vector<std::string>{"-std=c11", "/tmp/source ; $.c", "-o",
+                                        "/tmp/output ; $"});
+
+  const std::vector<std::string> msvc = make_c_compiler_arguments(
+      NativePlatform::windows_msvc, "cl.exe", "C:\\source ; $.c",
+      "C:\\output ; $.exe");
+  CHECK(msvc == std::vector<std::string>{"/nologo", "/std:c11",
+                                         "C:\\source ; $.c",
+                                         "/Fe:C:\\output ; $.exe"});
 }
 
 } // namespace bennu
