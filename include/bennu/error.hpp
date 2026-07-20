@@ -86,11 +86,33 @@ struct ShapeErrorContext {
   std::vector<std::size_t> actual;
 };
 
+struct ArityErrorContext {
+  std::size_t supplied;
+  std::vector<std::size_t> accepted;
+};
+
+struct ErrorValueType {
+  ContainerKind container;
+  ScalarType element;
+};
+
+struct TypeErrorSignatureContext {
+  std::vector<ErrorValueType> parameters;
+  ErrorValueType result;
+};
+
+struct TypeErrorContext {
+  std::vector<ErrorValueType> actual_arguments;
+  std::vector<TypeErrorSignatureContext> accepted_signatures;
+};
+
 struct Error {
   ErrorKind kind;
   SourceLocation location;
   std::string message;
   std::optional<PrimitiveErrorContext> primitive{};
+  std::optional<ArityErrorContext> arity{};
+  std::optional<TypeErrorContext> type{};
   // Argument positions are one-based; vector element indices are zero-based.
   std::optional<std::size_t> argument_position{};
   std::optional<ShapeErrorContext> shape{};
