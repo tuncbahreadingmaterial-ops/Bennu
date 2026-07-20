@@ -464,7 +464,7 @@ TEST_CASE("S16-03 dyadic primitives accept equal vectors in both argument positi
     REQUIRE(result.ok);
     CHECK(result.value.container == ContainerKind::vector);
     CHECK(result.value.vector.element_type == vector_case.expected_type);
-    CHECK(formatted(result.value) == vector_case.expected);
+    CHECK(formatted(result.value) == std::string(vector_case.expected));
     CHECK(context.scalar_kernel_invocations == 3);
     release_vector_reservation(resources, result.value);
   }
