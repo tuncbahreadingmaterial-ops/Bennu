@@ -12,6 +12,7 @@ if(BUILD_TESTING)
 endif()
 
 set(bennu_implementation_sources
+  src/application.cpp
   src/c_emitter.cpp
   src/error.cpp
   src/evaluator.cpp
