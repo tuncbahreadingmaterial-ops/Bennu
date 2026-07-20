@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Bennu LANGUAGES CXX)
 
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   enable_language(C)

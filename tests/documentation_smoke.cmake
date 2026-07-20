@@ -37,7 +37,8 @@ require_documented_text("${readme}" "README quick start"
 require_documented_text("${readme}" "README quick start" "`ioata n`")
 require_documented_text("${readme}" "README quick start" "`inc n`")
 require_documented_text("${readme}" "README quick start" "Linux x64")
-require_documented_text("${readme}" "README quick start" "Windows x64")
+require_documented_text("${readme}" "README quick start"
+  "Windows 11 x64 or newer")
 require_documented_text("${readme}" "README quick start" "macOS arm64")
 require_documented_text("${readme}" "README quick start"
   "./build/bennu repl")

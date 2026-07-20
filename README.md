@@ -24,12 +24,18 @@ release installation layout.
 The v0.1.0 release targets are:
 
 - Linux x64
-- Windows x64
+- Windows 11 x64 or newer
 - macOS arm64
 
 Building Bennu from source requires a C++20 compiler, CMake 3.20 or newer, and
 Ninja. The default test configuration and generated programs also require a
 C11 compiler. Bennu does not bundle, download, or install a C compiler.
+
+The Windows release statically links the Microsoft C and C++ runtime, so
+`bennu.exe` does not require a separately installed Visual C++ Redistributable.
+Its remaining PE imports must be Windows system or API-set DLLs. On every
+release target, only `bennu build` requires an external C11 compiler; `--help`,
+`repl`, `run`, and `emit-c` launch without one.
 
 ## Level 1 quick start
 

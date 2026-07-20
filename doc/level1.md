@@ -7,8 +7,9 @@ runner, deterministic C11 emitter, and external-compiler native build.
 
 ## Supported targets and prerequisites
 
-The supported v0.1.0 release targets are Linux x64, Windows x64, and macOS
-arm64. Other systems may build from source but are not Level 1 release targets.
+The supported v0.1.0 release targets are Linux x64, Windows 11 x64 or newer,
+and macOS arm64. Other systems may build from source but are not Level 1
+release targets.
 
 A source build requires:
 
@@ -20,6 +21,13 @@ A source build requires:
 Bennu does not bundle, download, or install a C compiler. Install a platform C
 toolchain separately and ensure its driver is available by name on `PATH`, or
 pass its executable path explicitly.
+
+The Windows archive statically links the Microsoft C and C++ runtime and does
+not require a separately installed Visual C++ Redistributable. Release
+packaging rejects `MSVCP*.dll` and `VCRUNTIME*.dll` imports and any non-system
+PE dependency absent from the archive. On all targets,
+only `bennu build` requires an external C11 compiler. `--help`, `repl`, `run`,
+and `emit-c` do not.
 
 From a clean checkout:
 
@@ -248,6 +256,7 @@ LICENSE
 
 Download the archive matching the operating system and CPU architecture,
 extract both files into a directory of your choice, and run `bennu` or
-`bennu.exe` from that directory. The release binary still requires an external
-C11 compiler only when using `bennu build`; REPL, run, and emit-C do not bundle
-or install one.
+`bennu.exe` from that directory. The Windows executable is self-contained with
+respect to the Microsoft C and C++ runtime. On every target, only `bennu build`
+requires an external C11 compiler; REPL, run, and emit-C neither require nor
+install one.
