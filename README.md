@@ -15,10 +15,6 @@ Each nonblank source line contains one expression. Calls can be nested, as in
 successful evaluated results have the exact `>>` prefix. Level 1 does not have
 array literals, array-lifted `inc`, variables, or additional primitives.
 
-See the [Level 1 language and toolchain](doc/level1.md) reference for the exact
-grammar, limits, command behavior, compiler selection, Anka differences, and
-release installation layout.
-
 ## Supported platforms and prerequisites
 
 The v0.1.0 release targets are:

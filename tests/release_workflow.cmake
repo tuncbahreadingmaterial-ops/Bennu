@@ -154,8 +154,7 @@ foreach(required_clean_windows_text IN ITEMS
   endif()
 endforeach()
 
-foreach(document IN ITEMS "${BENNU_SOURCE_DIR}/README.md"
-                          "${BENNU_SOURCE_DIR}/doc/level1.md")
+foreach(document IN ITEMS "${BENNU_SOURCE_DIR}/README.md")
   file(READ "${document}" document_text)
   string(FIND "${document_text}" "Ubuntu 24.04 LTS x64 or newer" unsupported_linux_newer_at)
   if(NOT unsupported_linux_newer_at EQUAL -1)
