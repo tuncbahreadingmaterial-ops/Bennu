@@ -15,6 +15,13 @@
 #include <system_error>
 #include <vector>
 
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+#include <cerrno>
+#include <cfenv>
+#include <cstdlib>
+#include <locale.h>
+#endif
+
 namespace bennu {
 namespace {
 
@@ -271,8 +278,80 @@ bool decimal_rounds_to_zero(std::string_view spelling) {
   return true;
 }
 
+struct RewriteDoubleParser {
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+  locale_t c_locale;
+#endif
+};
+
+RewriteDoubleParser make_rewrite_double_parser() {
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+  return RewriteDoubleParser{newlocale(LC_NUMERIC_MASK, "C", nullptr)};
+#else
+  return RewriteDoubleParser{};
+#endif
+}
+
+void destroy_rewrite_double_parser(RewriteDoubleParser parser) {
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+  if (parser.c_locale != nullptr) {
+    freelocale(parser.c_locale);
+  }
+#else
+  static_cast<void>(parser);
+#endif
+}
+
+std::from_chars_result parse_finite_double(
+    std::string_view spelling, const RewriteDoubleParser &parser,
+    double &converted_value) {
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+  if (parser.c_locale == nullptr) {
+    return std::from_chars_result{spelling.data(),
+                                  std::errc::invalid_argument};
+  }
+  const int previous_rounding = std::fegetround();
+  if (previous_rounding == -1 ||
+      (previous_rounding != FE_TONEAREST &&
+       std::fesetround(FE_TONEAREST) != 0)) {
+    return std::from_chars_result{spelling.data(),
+                                  std::errc::invalid_argument};
+  }
+
+  const std::string terminated(spelling);
+  char *converted_end = nullptr;
+  errno = 0;
+  converted_value =
+      strtod_l(terminated.c_str(), &converted_end, parser.c_locale);
+  const int conversion_errno = errno;
+  const bool restore_failed =
+      previous_rounding != FE_TONEAREST &&
+      std::fesetround(previous_rounding) != 0;
+  if (restore_failed) {
+    return std::from_chars_result{spelling.data(),
+                                  std::errc::invalid_argument};
+  }
+
+  const std::size_t converted_size =
+      static_cast<std::size_t>(converted_end - terminated.c_str());
+  std::errc error{};
+  if (conversion_errno == ERANGE &&
+      (converted_value == 0.0 || !std::isfinite(converted_value))) {
+    error = std::errc::result_out_of_range;
+  } else if (converted_size != spelling.size()) {
+    error = std::errc::invalid_argument;
+  }
+  return std::from_chars_result{spelling.data() + converted_size, error};
+#else
+  static_cast<void>(parser);
+  return std::from_chars(spelling.data(), spelling.data() + spelling.size(),
+                         converted_value, std::chars_format::general);
+#endif
+}
+
 RewriteToken numeric_token(std::string_view spelling, RewritePosition begin,
-                           RewritePosition end) {
+                           RewritePosition end,
+                           const RewriteDoubleParser &double_parser) {
   RewriteToken token =
       make_token(RewriteTokenKind::malformed_literal, begin, end);
   token.literal_error = RewriteLiteralError::malformed;
@@ -299,10 +378,8 @@ RewriteToken numeric_token(std::string_view spelling, RewritePosition begin,
     return token;
   }
   double converted_value = 0.0;
-  const auto converted = std::from_chars(spelling.data(),
-                                         spelling.data() + spelling.size(),
-                                         converted_value,
-                                         std::chars_format::general);
+  const auto converted =
+      parse_finite_double(spelling, double_parser, converted_value);
   if (converted.ec == std::errc::result_out_of_range) {
     if (decimal_rounds_to_zero(spelling)) {
       token.kind = RewriteTokenKind::double_literal;
@@ -330,6 +407,7 @@ RewriteToken numeric_token(std::string_view spelling, RewritePosition begin,
 RewriteTokens tokenize_rewrite(std::string_view source) {
   RewriteTokens result{};
   result.source.assign(source);
+  const RewriteDoubleParser double_parser = make_rewrite_double_parser();
   std::size_t index = 0U;
   RewritePosition position{1U, 1U, 1U};
   while (index < source.size()) {
@@ -415,7 +493,8 @@ RewriteTokens tokenize_rewrite(std::string_view source) {
                is_numeric_candidate_byte(source[index]));
       const std::string_view spelling = source.substr(
           begin.offset - 1U, position.offset - begin.offset);
-      result.tokens.push_back(numeric_token(spelling, begin, position));
+      result.tokens.push_back(
+          numeric_token(spelling, begin, position, double_parser));
       continue;
     }
 
@@ -442,6 +521,7 @@ RewriteTokens tokenize_rewrite(std::string_view source) {
     result.tokens.push_back(make_token(kind, begin, position));
   }
   result.end = position;
+  destroy_rewrite_double_parser(double_parser);
   return result;
 }
 
@@ -1476,6 +1556,26 @@ TEST_CASE("rewrite tokenizer distinguishes decimal overflow from underflow") {
     CHECK_FALSE(parsed.ok);
   }
 }
+
+#if defined(__APPLE__) || defined(BENNU_REWRITE_STRTOD_L)
+TEST_CASE("rewrite strtod fallback uses nearest rounding and restores the mode") {
+  const int original_rounding = std::fegetround();
+  const int set_result = std::fesetround(FE_UPWARD);
+  const RewriteTokens tokens = tokenize_rewrite("0.1");
+  const int observed_rounding = std::fegetround();
+  const int restore_result = original_rounding == -1
+                                 ? 0
+                                 : std::fesetround(original_rounding);
+
+  REQUIRE(original_rounding != -1);
+  REQUIRE(set_result == 0);
+  REQUIRE(tokens.tokens.size() == 1U);
+  CHECK(tokens.tokens[0].kind == RewriteTokenKind::double_literal);
+  CHECK(tokens.tokens[0].double_precision == 0x1.999999999999ap-4);
+  CHECK(observed_rounding == FE_UPWARD);
+  CHECK(restore_result == 0);
+}
+#endif
 
 TEST_CASE("rewrite parser builds postorder generic calls and contiguous arenas") {
   const RewriteParseResult parsed = parse_rewrite(
