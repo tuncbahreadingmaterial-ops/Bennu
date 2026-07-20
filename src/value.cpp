@@ -6,9 +6,10 @@
 #include <bit>
 #include <charconv>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <ostream>
 #include <string>
-#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -104,19 +105,23 @@ std::size_t active_vector_length(const VectorValue &vector) {
   return 0;
 }
 
-std::string format_double(double value) {
+bool append_double(std::string &formatted, double value) {
   const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
   if ((bits & binary64_exponent_mask) == binary64_exponent_mask) {
     if ((bits & binary64_fraction_mask) != 0) {
-      return "nan";
+      formatted += "nan";
+      return true;
     }
-    return (bits >> 63U) != 0 ? "-inf" : "inf";
+    formatted += (bits >> 63U) != 0 ? "-inf" : "inf";
+    return true;
   }
   if (bits == UINT64_C(0)) {
-    return "0.0";
+    formatted += "0.0";
+    return true;
   }
   if (bits == UINT64_C(0x8000000000000000)) {
-    return "-0.0";
+    formatted += "-0.0";
+    return true;
   }
 
   std::array<char, 64> buffer{};
@@ -124,47 +129,66 @@ std::string format_double(double value) {
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
                     std::chars_format::general);
   if (converted.ec != std::errc{}) {
-    return {};
+    return false;
   }
-  std::string formatted(buffer.data(), converted.ptr);
-  const std::size_t exponent = formatted.find_first_of("eE");
-  if (exponent == std::string::npos) {
-    if (formatted.find('.') == std::string::npos) {
+  const char *exponent = buffer.data();
+  while (exponent != converted.ptr && *exponent != 'e' && *exponent != 'E') {
+    ++exponent;
+  }
+  if (exponent == converted.ptr) {
+    const char *point = buffer.data();
+    while (point != converted.ptr && *point != '.') {
+      ++point;
+    }
+    formatted.append(buffer.data(), converted.ptr);
+    if (point == converted.ptr) {
       formatted += ".0";
     }
-    return formatted;
+    return true;
   }
 
-  formatted[exponent] = 'e';
-  std::size_t digits = exponent + 1;
+  formatted.append(buffer.data(),
+                   static_cast<std::size_t>(exponent - buffer.data()));
+  formatted += 'e';
+  const char *digits = exponent + 1;
   bool negative = false;
-  if (formatted[digits] == '+' || formatted[digits] == '-') {
-    negative = formatted[digits] == '-';
+  if (digits != converted.ptr && (*digits == '+' || *digits == '-')) {
+    negative = *digits == '-';
     ++digits;
   }
-  while (digits + 1 < formatted.size() && formatted[digits] == '0') {
+  while (digits + 1 < converted.ptr && *digits == '0') {
     ++digits;
   }
-  std::string normalized = formatted.substr(0, exponent + 1);
   if (negative) {
-    normalized += '-';
+    formatted += '-';
   }
-  normalized += formatted.substr(digits);
-  return normalized;
+  formatted.append(digits,
+                   static_cast<std::size_t>(converted.ptr - digits));
+  return true;
 }
 
-void append_scalar(std::string &formatted, const ScalarValue &scalar) {
+bool append_integer(std::string &formatted, std::int64_t value) {
+  std::array<char, 32> buffer{};
+  const std::to_chars_result converted =
+      std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+  if (converted.ec != std::errc{}) {
+    return false;
+  }
+  formatted.append(buffer.data(), converted.ptr);
+  return true;
+}
+
+bool append_scalar(std::string &formatted, const ScalarValue &scalar) {
   switch (scalar.type) {
   case ScalarType::boolean:
     formatted += scalar.boolean ? "true" : "false";
-    return;
+    return true;
   case ScalarType::integer:
-    formatted += std::to_string(scalar.integer);
-    return;
+    return append_integer(formatted, scalar.integer);
   case ScalarType::double_precision:
-    formatted += format_double(scalar.double_precision);
-    return;
+    return append_double(formatted, scalar.double_precision);
   }
+  return false;
 }
 
 } // namespace
@@ -278,28 +302,48 @@ ValueValidationResult validate_value(const Value &value) {
   return ValueValidationResult{false, ValueInvariant::unknown_container};
 }
 
-ScalarType value_element_type(const Value &value) {
-  return value.container == ContainerKind::scalar ? value.scalar.type
-                                                  : value.vector.element_type;
+ValueValidationResult value_element_type(const Value &value,
+                                         ScalarType &element_type) {
+  element_type = ScalarType::boolean;
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    return validation;
+  }
+  element_type = value.container == ContainerKind::scalar
+                     ? value.scalar.type
+                     : value.vector.element_type;
+  return validation;
 }
 
-std::size_t value_rank(const Value &value) {
-  return value.container == ContainerKind::scalar ? 0 : 1;
+ValueValidationResult value_rank(const Value &value, std::size_t &rank) {
+  rank = 0;
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    return validation;
+  }
+  rank = value.container == ContainerKind::scalar ? 0 : 1;
+  return validation;
 }
 
-std::size_t value_length(const Value &value) {
-  return value.container == ContainerKind::scalar
-             ? 1
-             : active_vector_length(value.vector);
+ValueValidationResult value_length(const Value &value, std::size_t &length) {
+  length = 0;
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    return validation;
+  }
+  length = value.container == ContainerKind::scalar
+               ? 1
+               : active_vector_length(value.vector);
+  return validation;
 }
 
 ScalarProjectionResult project_scalar(const Value &value, std::size_t index) {
-  if (value.container == ContainerKind::scalar) {
-    return ScalarProjectionResult{true, value.scalar, ValueAccessError::none};
-  }
-  if (value.container != ContainerKind::vector) {
+  if (!validate_value(value).ok) {
     return ScalarProjectionResult{false, empty_scalar(),
                                   ValueAccessError::invalid_value};
+  }
+  if (value.container == ContainerKind::scalar) {
+    return ScalarProjectionResult{true, value.scalar, ValueAccessError::none};
   }
   switch (value.vector.element_type) {
   case ScalarType::boolean:
@@ -341,15 +385,30 @@ void destroy_value(Value &value) {
   value = invalid_construction_value();
 }
 
-std::string format_value(const Value &value) {
-  if (value.container == ContainerKind::scalar) {
-    std::string formatted;
-    append_scalar(formatted, value.scalar);
-    return formatted;
+ValueFormattingResult format_value(const Value &value) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    return ValueFormattingResult{false, {}, validation.invariant,
+                                 ValueFormatError::invalid_value};
   }
 
-  std::string formatted = "(";
+  std::string formatted;
+  if (value.container == ContainerKind::scalar) {
+    if (!append_scalar(formatted, value.scalar)) {
+      return ValueFormattingResult{false, {}, ValueInvariant::none,
+                                   ValueFormatError::conversion_failure};
+    }
+    return ValueFormattingResult{true, std::move(formatted),
+                                 ValueInvariant::none, ValueFormatError::none};
+  }
+
   const std::size_t length = active_vector_length(value.vector);
+  constexpr std::size_t maximum_element_bytes = 25;
+  if (length <=
+      (formatted.max_size() - std::size_t{2}) / maximum_element_bytes) {
+    formatted.reserve(std::size_t{2} + length * maximum_element_bytes);
+  }
+  formatted += '(';
   for (std::size_t index = 0; index < length; ++index) {
     if (index != 0) {
       formatted += ' ';
@@ -359,16 +418,54 @@ std::string format_value(const Value &value) {
       formatted += value.vector.booleans[index] != 0 ? "true" : "false";
       break;
     case ScalarType::integer:
-      formatted += std::to_string(value.vector.integers[index]);
+      if (!append_integer(formatted, value.vector.integers[index])) {
+        return ValueFormattingResult{false, {}, ValueInvariant::none,
+                                     ValueFormatError::conversion_failure};
+      }
       break;
     case ScalarType::double_precision:
-      formatted += format_double(value.vector.doubles[index]);
+      if (!append_double(formatted, value.vector.doubles[index])) {
+        return ValueFormattingResult{false, {}, ValueInvariant::none,
+                                     ValueFormatError::conversion_failure};
+      }
       break;
     }
   }
   formatted += ')';
-  return formatted;
+  return ValueFormattingResult{true, std::move(formatted), ValueInvariant::none,
+                               ValueFormatError::none};
 }
+
+namespace {
+
+[[maybe_unused]] std::string format_valid_test_value(const Value &value) {
+  ValueFormattingResult result = format_value(value);
+  CHECK(result.ok);
+  return std::move(result.formatted);
+}
+
+[[maybe_unused]] ScalarType valid_element_type_for_test(const Value &value) {
+  (void)value;
+  ScalarType element_type = ScalarType::boolean;
+  CHECK(value_element_type(value, element_type).ok);
+  return element_type;
+}
+
+[[maybe_unused]] std::size_t valid_rank_for_test(const Value &value) {
+  (void)value;
+  std::size_t rank = 0;
+  CHECK(value_rank(value, rank).ok);
+  return rank;
+}
+
+[[maybe_unused]] std::size_t valid_length_for_test(const Value &value) {
+  (void)value;
+  std::size_t length = 0;
+  CHECK(value_length(value, length).ok);
+  return length;
+}
+
+} // namespace
 
 TEST_CASE("typed scalar construction produces valid direct tagged values") {
   const Value boolean = make_bool_value(true);
@@ -407,12 +504,12 @@ TEST_CASE("vectors keep one untagged typed payload and preserve empty types") {
   CHECK(booleans.value.vector.element_type == ScalarType::boolean);
   CHECK(integers.value.vector.element_type == ScalarType::integer);
   CHECK(doubles.value.vector.element_type == ScalarType::double_precision);
-  CHECK(value_length(booleans.value) == 0);
-  CHECK(value_length(integers.value) == 0);
-  CHECK(value_length(doubles.value) == 0);
-  CHECK(format_value(booleans.value) == "()");
-  CHECK(format_value(integers.value) == "()");
-  CHECK(format_value(doubles.value) == "()");
+  CHECK(valid_length_for_test(booleans.value) == 0);
+  CHECK(valid_length_for_test(integers.value) == 0);
+  CHECK(valid_length_for_test(doubles.value) == 0);
+  CHECK(format_valid_test_value(booleans.value) == "()");
+  CHECK(format_valid_test_value(integers.value) == "()");
+  CHECK(format_valid_test_value(doubles.value) == "()");
 }
 
 TEST_CASE("construction and validation reject invalid homogeneous payloads") {
@@ -456,16 +553,16 @@ TEST_CASE("rank length and projection follow scalar and vector identity") {
   const Value scalar = make_int_value(42);
   const Value vector = make_int_vector({4, 5, 6}).value;
 
-  CHECK(value_rank(scalar) == 0);
-  CHECK(value_length(scalar) == 1);
-  CHECK(value_element_type(scalar) == ScalarType::integer);
+  CHECK(valid_rank_for_test(scalar) == 0);
+  CHECK(valid_length_for_test(scalar) == 1);
+  CHECK(valid_element_type_for_test(scalar) == ScalarType::integer);
   const ScalarProjectionResult broadcast = project_scalar(scalar, 12);
   REQUIRE(broadcast.ok);
   CHECK(broadcast.value.integer == 42);
 
-  CHECK(value_rank(vector) == 1);
-  CHECK(value_length(vector) == 3);
-  CHECK(value_element_type(vector) == ScalarType::integer);
+  CHECK(valid_rank_for_test(vector) == 1);
+  CHECK(valid_length_for_test(vector) == 3);
+  CHECK(valid_element_type_for_test(vector) == ScalarType::integer);
   const ScalarProjectionResult projected = project_scalar(vector, 1);
   REQUIRE(projected.ok);
   CHECK(projected.value.type == ScalarType::integer);
@@ -476,38 +573,42 @@ TEST_CASE("rank length and projection follow scalar and vector identity") {
 }
 
 TEST_CASE("canonical scalar and vector formatting is byte exact") {
-  CHECK(format_value(make_bool_value(false)) == "false");
-  CHECK(format_value(make_bool_value(true)) == "true");
-  CHECK(format_value(make_int_value(INT64_MIN)) == "-9223372036854775808");
-  CHECK(format_value(make_int_value(INT64_MAX)) == "9223372036854775807");
-  CHECK(format_value(make_double_value(1.0)) == "1.0");
-  CHECK(format_value(make_double_value(-42.0)) == "-42.0");
-  CHECK(format_value(make_double_value(1.0e20)) == "1e20");
-  CHECK(format_value(make_double_value(1.0e-7)) == "1e-7");
-  CHECK(format_value(make_double_value(-0.0)) == "-0.0");
-  CHECK(format_value(make_double_value(std::numeric_limits<double>::infinity())) ==
+  CHECK(format_valid_test_value(make_bool_value(false)) == "false");
+  CHECK(format_valid_test_value(make_bool_value(true)) == "true");
+  CHECK(format_valid_test_value(make_int_value(INT64_MIN)) ==
+        "-9223372036854775808");
+  CHECK(format_valid_test_value(make_int_value(INT64_MAX)) ==
+        "9223372036854775807");
+  CHECK(format_valid_test_value(make_double_value(1.0)) == "1.0");
+  CHECK(format_valid_test_value(make_double_value(-42.0)) == "-42.0");
+  CHECK(format_valid_test_value(make_double_value(1.0e20)) == "1e20");
+  CHECK(format_valid_test_value(make_double_value(1.0e-7)) == "1e-7");
+  CHECK(format_valid_test_value(make_double_value(-0.0)) == "-0.0");
+  CHECK(format_valid_test_value(
+            make_double_value(std::numeric_limits<double>::infinity())) ==
         "inf");
-  CHECK(format_value(make_double_value(
+  CHECK(format_valid_test_value(make_double_value(
             -std::numeric_limits<double>::infinity())) == "-inf");
-  CHECK(format_value(make_double_value(
+  CHECK(format_valid_test_value(make_double_value(
             std::numeric_limits<double>::quiet_NaN())) == "nan");
 
-  CHECK(format_value(make_bool_vector({0, 1, 0}).value) ==
+  CHECK(format_valid_test_value(make_bool_vector({0, 1, 0}).value) ==
         "(false true false)");
-  CHECK(format_value(make_int_vector({1, -2, 3}).value) == "(1 -2 3)");
-  CHECK(format_value(make_double_vector({1.0, 2.5, 3.0}).value) ==
+  CHECK(format_valid_test_value(make_int_vector({1, -2, 3}).value) ==
+        "(1 -2 3)");
+  CHECK(format_valid_test_value(make_double_vector({1.0, 2.5, 3.0}).value) ==
         "(1.0 2.5 3.0)");
-  CHECK(format_value(make_double_vector(
-                         {std::numeric_limits<double>::quiet_NaN(),
-                          std::numeric_limits<double>::infinity(),
-                          -std::numeric_limits<double>::infinity(), -0.0})
-                         .value) == "(nan inf -inf -0.0)");
+  CHECK(format_valid_test_value(
+            make_double_vector({std::numeric_limits<double>::quiet_NaN(),
+                                std::numeric_limits<double>::infinity(),
+                                -std::numeric_limits<double>::infinity(), -0.0})
+                .value) == "(nan inf -inf -0.0)");
 }
 
 TEST_CASE("binary64 formatting round trips boundaries and normalizes spelling") {
   struct FormatCase {
     std::uint64_t bits;
-    std::string_view expected;
+    const char *expected;
   };
   const std::array<FormatCase, 7> cases{{
       {UINT64_C(0x0000000000000001), "5e-324"},
@@ -521,16 +622,14 @@ TEST_CASE("binary64 formatting round trips boundaries and normalizes spelling") 
   for (const FormatCase &format_case : cases) {
     CAPTURE(format_case.expected);
     const double value = std::bit_cast<double>(format_case.bits);
-    const std::string formatted = format_value(make_double_value(value));
+    const std::string formatted =
+        format_valid_test_value(make_double_value(value));
     CHECK(formatted == format_case.expected);
     if ((format_case.bits & binary64_exponent_mask) !=
         binary64_exponent_mask) {
-      double parsed = 0.0;
-      const std::from_chars_result round_trip = std::from_chars(
-          formatted.data(), formatted.data() + formatted.size(), parsed,
-          std::chars_format::general);
-      CHECK(round_trip.ec == std::errc{});
-      CHECK(round_trip.ptr == formatted.data() + formatted.size());
+      char *round_trip_end = nullptr;
+      const double parsed = std::strtod(formatted.c_str(), &round_trip_end);
+      CHECK(round_trip_end == formatted.c_str() + formatted.size());
       CHECK(std::bit_cast<std::uint64_t>(parsed) == format_case.bits);
     }
   }
@@ -539,7 +638,62 @@ TEST_CASE("binary64 formatting round trips boundaries and normalizes spelling") 
       std::bit_cast<double>(UINT64_C(0xfff0000000000001)));
   CHECK(std::bit_cast<std::uint64_t>(normalized.scalar.double_precision) ==
         UINT64_C(0x7ff8000000000000));
-  CHECK(format_value(normalized) == "nan");
+  CHECK(format_valid_test_value(normalized) == "nan");
+}
+
+TEST_CASE("public value consumers reject malformed plain records") {
+  Value unknown_container = make_int_vector({1}).value;
+  unknown_container.container = static_cast<ContainerKind>(99);
+  Value unknown_scalar = make_bool_value(false);
+  unknown_scalar.scalar.type = static_cast<ScalarType>(99);
+  Value inactive_payload = make_int_vector({1}).value;
+  inactive_payload.vector.doubles.push_back(2.0);
+  Value invalid_boolean = make_bool_vector({0, 1}).value;
+  invalid_boolean.vector.booleans[1] = 2;
+  Value noncanonical_nan = make_double_vector({1.0}).value;
+  noncanonical_nan.vector.doubles[0] =
+      std::bit_cast<double>(UINT64_C(0xfff8123456789abc));
+
+  const std::array<const Value *, 5> invalid_values{{
+      &unknown_container,
+      &unknown_scalar,
+      &inactive_payload,
+      &invalid_boolean,
+      &noncanonical_nan,
+  }};
+  for (const Value *value : invalid_values) {
+    CAPTURE(validate_value(*value).invariant);
+    CHECK_FALSE(validate_value(*value).ok);
+
+    ScalarType element_type = ScalarType::double_precision;
+    const ValueValidationResult element_result =
+        value_element_type(*value, element_type);
+    CHECK_FALSE(element_result.ok);
+    CHECK(element_result.invariant == validate_value(*value).invariant);
+    CHECK(element_type == ScalarType::boolean);
+
+    std::size_t rank = 99;
+    const ValueValidationResult rank_result = value_rank(*value, rank);
+    CHECK_FALSE(rank_result.ok);
+    CHECK(rank_result.invariant == validate_value(*value).invariant);
+    CHECK(rank == 0);
+
+    std::size_t length = 99;
+    const ValueValidationResult length_result = value_length(*value, length);
+    CHECK_FALSE(length_result.ok);
+    CHECK(length_result.invariant == validate_value(*value).invariant);
+    CHECK(length == 0);
+
+    const ScalarProjectionResult projection = project_scalar(*value, 0);
+    CHECK_FALSE(projection.ok);
+    CHECK(projection.error == ValueAccessError::invalid_value);
+
+    const ValueFormattingResult formatting = format_value(*value);
+    CHECK_FALSE(formatting.ok);
+    CHECK(formatting.formatted.empty());
+    CHECK(formatting.invariant == validate_value(*value).invariant);
+    CHECK(formatting.error == ValueFormatError::invalid_value);
+  }
 }
 
 TEST_CASE("explicit destruction releases owned payload and leaves a valid value") {
