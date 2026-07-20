@@ -1,1 +1,2 @@
-tests/fixtures/level1-example.c text eol=lf
+third_party/doctest/LICENSE.txt text eol=lf
+third_party/doctest/doctest/doctest.h text eol=lf
