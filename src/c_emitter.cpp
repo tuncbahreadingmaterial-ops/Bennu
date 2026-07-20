@@ -1,5 +1,7 @@
 #include "bennu/c_emitter.hpp"
 
+#include "doctest/doctest.h"
+
 #include <array>
 #include <charconv>
 #include <cstdint>
@@ -94,6 +96,32 @@ CEmissionResult emit_c_source(std::string_view source) {
       std::move(output),
       Error{ErrorKind::none, SourceLocation{0, 1, 1}, ""},
   };
+}
+
+TEST_CASE("C emission is deterministic and specializes used value kinds") {
+  const CEmissionResult scalar = emit_c_source("inc 5");
+  const CEmissionResult scalar_repeat = emit_c_source("inc 5");
+  const CEmissionResult array = emit_c_source("ioata 0");
+
+  REQUIRE(scalar.ok);
+  REQUIRE(scalar_repeat.ok);
+  CHECK(scalar.source == scalar_repeat.source);
+  CHECK(scalar.source.find("bennu_print_integer") != std::string::npos);
+  CHECK(scalar.source.find("bennu_print_array") == std::string::npos);
+  REQUIRE(array.ok);
+  CHECK(array.source.find("bennu_print_array") != std::string::npos);
+  CHECK(array.source.find("bennu_print_integer") == std::string::npos);
+}
+
+TEST_CASE("C emission returns the shared semantic error without partial source") {
+  const CEmissionResult result =
+      emit_c_source("inc 5\ninc 9223372036854775807\n");
+
+  CHECK_FALSE(result.ok);
+  CHECK(result.source.empty());
+  CHECK(result.error.kind == ErrorKind::integer_overflow);
+  CHECK(result.error.location.line == 2);
+  CHECK(result.error.location.column == 1);
 }
 
 } // namespace bennu

@@ -1,5 +1,8 @@
 #include "bennu/evaluator.hpp"
 
+#include "doctest/doctest.h"
+
+#include <array>
 #include <charconv>
 #include <limits>
 #include <utility>
@@ -7,6 +10,54 @@
 namespace bennu {
 
 namespace {
+
+constexpr std::int64_t ioata_element_limit = 1'000'000;
+
+enum class TokenKind {
+  integer,
+  inc,
+  ioata,
+  name,
+  newline,
+  end,
+};
+
+struct Token {
+  TokenKind kind;
+  SourceLocation location;
+  std::size_t length;
+  bool separated;
+};
+
+struct TokenizeResult {
+  bool ok;
+  std::vector<Token> tokens;
+  Error error;
+};
+
+enum class ExpressionKind {
+  integer,
+  inc,
+  ioata,
+};
+
+struct ExpressionNode {
+  ExpressionKind kind;
+  SourceLocation location;
+  std::int64_t integer;
+  std::size_t argument;
+};
+
+struct Program {
+  std::vector<ExpressionNode> nodes;
+  std::vector<std::size_t> roots;
+};
+
+struct ParseResult {
+  bool ok;
+  Program program;
+  Error error;
+};
 
 bool is_ascii_letter(char character) {
   return (character >= 'a' && character <= 'z') ||
@@ -21,47 +72,6 @@ bool is_name_character(char character) {
   return is_ascii_letter(character) || is_ascii_digit(character) ||
          character == '_';
 }
-
-bool is_known_token_kind(TokenKind kind) {
-  return kind == TokenKind::integer || kind == TokenKind::inc ||
-         kind == TokenKind::ioata || kind == TokenKind::name ||
-         kind == TokenKind::newline || kind == TokenKind::end;
-}
-
-SourceLocation source_end_location(std::string_view source) {
-  SourceLocation location{0, 1, 1};
-  while (location.offset < source.size()) {
-    if (source[location.offset] == '\r' &&
-        location.offset + 1 < source.size() &&
-        source[location.offset + 1] == '\n') {
-      location.offset += 2;
-      ++location.line;
-      location.column = 1;
-    } else if (source[location.offset] == '\n') {
-      ++location.offset;
-      ++location.line;
-      location.column = 1;
-    } else {
-      ++location.offset;
-      ++location.column;
-    }
-  }
-  return location;
-}
-
-bool source_locations_match(const SourceLocation &left,
-                            const SourceLocation &right) {
-  return left.offset == right.offset && left.line == right.line &&
-         left.column == right.column;
-}
-
-bool tokens_match(const Token &left, const Token &right) {
-  return left.kind == right.kind &&
-         source_locations_match(left.location, right.location) &&
-         left.length == right.length && left.separated == right.separated;
-}
-
-} // namespace
 
 TokenizeResult tokenize(std::string_view source) {
   std::vector<Token> tokens;
@@ -173,103 +183,6 @@ TokenizeResult tokenize(std::string_view source) {
 ParseResult parse_program(std::string_view source,
                           const std::vector<Token> &tokens) {
   Program program;
-  for (const Token &token : tokens) {
-    if (token.location.offset > source.size() ||
-        token.length > source.size() - token.location.offset) {
-      return ParseResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, token.location,
-                "token span is outside the source buffer"},
-      };
-    }
-    if (!is_known_token_kind(token.kind)) {
-      return ParseResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, token.location,
-                "token has an unknown kind"},
-      };
-    }
-    if (token.kind == TokenKind::end && token.length != 0) {
-      return ParseResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, token.location,
-                "end token must have zero length"},
-      };
-    }
-  }
-  if (tokens.empty() || tokens.back().kind != TokenKind::end) {
-    return ParseResult{
-        false,
-        {},
-        Error{ErrorKind::invalid_program, source_end_location(source),
-              "token stream must end with an end token"},
-    };
-  }
-  const Token &end_token = tokens.back();
-  if (end_token.location.offset != source.size()) {
-    return ParseResult{
-        false,
-        {},
-        Error{ErrorKind::invalid_program, end_token.location,
-              "end token must be at the end of source"},
-    };
-  }
-  for (std::size_t index = 0; index + 1 < tokens.size(); ++index) {
-    if (tokens[index].kind == TokenKind::end) {
-      return ParseResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, tokens[index + 1].location,
-                "token stream contains input after an end token"},
-      };
-    }
-  }
-
-  const TokenizeResult canonical = tokenize(source);
-  if (!canonical.ok) {
-    return ParseResult{
-        false,
-        {},
-        Error{ErrorKind::invalid_program, canonical.error.location,
-              "token stream cannot correspond to source: " +
-                  canonical.error.message},
-    };
-  }
-  std::size_t correspondence_index = 0;
-  while (correspondence_index < tokens.size() &&
-         correspondence_index < canonical.tokens.size()) {
-    if (!tokens_match(tokens[correspondence_index],
-                      canonical.tokens[correspondence_index])) {
-      const SourceLocation location =
-          tokens[correspondence_index].kind == TokenKind::end
-              ? canonical.tokens[correspondence_index].location
-              : tokens[correspondence_index].location;
-      return ParseResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, location,
-                "token stream does not match source text"},
-      };
-    }
-    ++correspondence_index;
-  }
-  if (correspondence_index != tokens.size() ||
-      correspondence_index != canonical.tokens.size()) {
-    const SourceLocation location = correspondence_index < tokens.size()
-                                        ? tokens[correspondence_index].location
-                                        : canonical.tokens[correspondence_index]
-                                              .location;
-    return ParseResult{
-        false,
-        {},
-        Error{ErrorKind::invalid_program, location,
-              "token stream does not match source text"},
-    };
-  }
-
   std::size_t cursor = 0;
   while (cursor < tokens.size()) {
     if (tokens[cursor].kind == TokenKind::newline) {
@@ -414,7 +327,8 @@ ValueResult apply_inc(const Value &argument, SourceLocation location) {
   };
 }
 
-ValueResult apply_ioata(const Value &argument, SourceLocation location) {
+ValueResult apply_ioata(const Value &argument, SourceLocation location,
+                        std::int64_t remaining_elements) {
   if (argument.kind != ValueKind::integer) {
     return ValueResult{
         false,
@@ -423,12 +337,12 @@ ValueResult apply_ioata(const Value &argument, SourceLocation location) {
               "ioata requires a scalar integer argument"},
     };
   }
-  if (argument.integer > ioata_element_limit) {
+  if (argument.integer > remaining_elements) {
     return ValueResult{
         false,
         Value{ValueKind::integer, 0, {}},
         Error{ErrorKind::allocation_limit_exceeded, location,
-              "ioata request exceeds the Level 1 element limit"},
+              "program ioata results exceed the Level 1 element limit"},
     };
   }
 
@@ -449,29 +363,12 @@ ValueResult apply_ioata(const Value &argument, SourceLocation location) {
 ProgramResult evaluate_program(const Program &program) {
   std::vector<Value> node_values;
   node_values.reserve(program.nodes.size());
-  std::int64_t ioata_elements = 0;
+  std::int64_t remaining_ioata_elements = ioata_element_limit;
   for (std::size_t index = 0; index < program.nodes.size(); ++index) {
     const ExpressionNode &node = program.nodes[index];
     if (node.kind == ExpressionKind::integer) {
       node_values.push_back(Value{ValueKind::integer, node.integer, {}});
       continue;
-    }
-    if (node.kind != ExpressionKind::inc &&
-        node.kind != ExpressionKind::ioata) {
-      return ProgramResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, node.location,
-                "expression has an unknown kind"},
-      };
-    }
-    if (node.argument >= index) {
-      return ProgramResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, node.location,
-                "expression argument must refer to an earlier node"},
-      };
     }
     const Value &argument = node_values[node.argument];
 
@@ -484,43 +381,20 @@ ProgramResult evaluate_program(const Program &program) {
       continue;
     }
 
-    if (argument.kind == ValueKind::integer && argument.integer > 0 &&
-        argument.integer > ioata_element_limit - ioata_elements) {
-      return ProgramResult{
-          false,
-          {},
-          Error{ErrorKind::allocation_limit_exceeded, node.location,
-                "program ioata results exceed the Level 1 element limit"},
-      };
-    }
-    ValueResult result = apply_ioata(argument, node.location);
+    ValueResult result =
+        apply_ioata(argument, node.location, remaining_ioata_elements);
     if (!result.ok) {
       return ProgramResult{false, {}, std::move(result.error)};
     }
-    ioata_elements += static_cast<std::int64_t>(result.value.elements.size());
+    remaining_ioata_elements -=
+        static_cast<std::int64_t>(result.value.elements.size());
     node_values.push_back(std::move(result.value));
   }
 
   std::vector<Value> results;
   results.reserve(program.roots.size());
-  std::size_t previous_root = 0;
-  bool has_previous_root = false;
   for (const std::size_t root : program.roots) {
-    if (root >= node_values.size() ||
-        (has_previous_root && root <= previous_root)) {
-      const SourceLocation location = root < program.nodes.size()
-                                          ? program.nodes[root].location
-                                          : SourceLocation{0, 1, 1};
-      return ProgramResult{
-          false,
-          {},
-          Error{ErrorKind::invalid_program, location,
-                "program roots must be unique nodes in source order"},
-      };
-    }
     results.push_back(std::move(node_values[root]));
-    previous_root = root;
-    has_previous_root = true;
   }
   return ProgramResult{
       true,
@@ -528,6 +402,8 @@ ProgramResult evaluate_program(const Program &program) {
       Error{ErrorKind::none, SourceLocation{0, 1, 1}, ""},
   };
 }
+
+} // namespace
 
 ValueResult evaluate_expression(std::string_view source) {
   const TokenizeResult tokenized = tokenize(source);
@@ -595,6 +471,213 @@ std::string format_value(const Value &value) {
   }
   formatted += ')';
   return formatted;
+}
+
+TEST_CASE("integer expressions preserve signed 64-bit values") {
+  const ValueResult ordinary = evaluate_expression("5");
+  const ValueResult minimum =
+      evaluate_expression("-9223372036854775808");
+  const ValueResult maximum = evaluate_expression("9223372036854775807");
+
+  REQUIRE(ordinary.ok);
+  CHECK(ordinary.value.kind == ValueKind::integer);
+  CHECK(ordinary.value.integer == std::int64_t{5});
+  REQUIRE(minimum.ok);
+  CHECK(minimum.value.integer == std::numeric_limits<std::int64_t>::min());
+  REQUIRE(maximum.ok);
+  CHECK(maximum.value.integer == std::numeric_limits<std::int64_t>::max());
+}
+
+TEST_CASE("Level 1 primitives and value formatting remain exact") {
+  const ValueResult incremented = evaluate_expression("inc 5");
+  const ValueResult array = evaluate_expression("ioata 5");
+  const ValueResult zero = evaluate_expression("ioata 0");
+  const ValueResult negative = evaluate_expression("ioata -5");
+
+  REQUIRE(incremented.ok);
+  CHECK(incremented.value.kind == ValueKind::integer);
+  CHECK(incremented.value.integer == std::int64_t{6});
+  CHECK(format_value(incremented.value) == "6");
+
+  REQUIRE(array.ok);
+  CHECK(array.value.kind == ValueKind::array);
+  CHECK(array.value.elements == std::vector<std::int64_t>{1, 2, 3, 4, 5});
+  CHECK(format_value(array.value) == "(1 2 3 4 5)");
+
+  REQUIRE(zero.ok);
+  CHECK(format_value(zero.value) == "()");
+  REQUIRE(negative.ok);
+  CHECK(format_value(negative.value) == "()");
+}
+
+TEST_CASE("program evaluation preserves source order and accepted whitespace") {
+  const ProgramResult ordered = evaluate_source("ioata 5\ninc 5");
+  REQUIRE(ordered.ok);
+  REQUIRE(ordered.values.size() == 2);
+  CHECK(format_value(ordered.values[0]) == "(1 2 3 4 5)");
+  CHECK(format_value(ordered.values[1]) == "6");
+
+  const ProgramResult mixed =
+      evaluate_source(" \tioata 2 \r\n\r\n\tinc 5\t\n\n-1");
+  REQUIRE(mixed.ok);
+  REQUIRE(mixed.values.size() == 3);
+  CHECK(format_value(mixed.values[0]) == "(1 2)");
+  CHECK(format_value(mixed.values[1]) == "6");
+  CHECK(format_value(mixed.values[2]) == "-1");
+
+  const ProgramResult empty = evaluate_source(" \t\r\n\n");
+  CHECK(empty.ok);
+  CHECK(empty.values.empty());
+}
+
+TEST_CASE("internal tokenizer preserves kinds and source locations") {
+  const TokenizeResult result = tokenize(" \tioata inc -5\r\n");
+
+  REQUIRE(result.ok);
+  REQUIRE(result.tokens.size() == 5);
+  CHECK(result.tokens[0].kind == TokenKind::ioata);
+  CHECK(result.tokens[0].location.line == 1);
+  CHECK(result.tokens[0].location.column == 3);
+  CHECK(result.tokens[1].kind == TokenKind::inc);
+  CHECK(result.tokens[2].kind == TokenKind::integer);
+  CHECK(result.tokens[3].kind == TokenKind::newline);
+  CHECK(result.tokens[3].length == 2);
+  CHECK(result.tokens[4].kind == TokenKind::end);
+  CHECK(result.tokens[4].location.line == 2);
+  CHECK(result.tokens[4].location.column == 1);
+}
+
+TEST_CASE("internal parser builds flat postorder nodes for nested calls") {
+  constexpr std::string_view source = "ioata inc 5";
+  const TokenizeResult tokenized = tokenize(source);
+  REQUIRE(tokenized.ok);
+
+  const ParseResult parsed = parse_program(source, tokenized.tokens);
+  REQUIRE(parsed.ok);
+  REQUIRE(parsed.program.nodes.size() == 3);
+  REQUIRE(parsed.program.roots.size() == 1);
+  CHECK(parsed.program.roots[0] == 2);
+  CHECK(parsed.program.nodes[0].kind == ExpressionKind::integer);
+  CHECK(parsed.program.nodes[1].kind == ExpressionKind::inc);
+  CHECK(parsed.program.nodes[1].argument == 0);
+  CHECK(parsed.program.nodes[2].kind == ExpressionKind::ioata);
+  CHECK(parsed.program.nodes[2].argument == 1);
+}
+
+TEST_CASE("internal flat evaluator handles nested prefix calls") {
+  constexpr std::string_view source = "ioata inc 5";
+  const TokenizeResult tokenized = tokenize(source);
+  REQUIRE(tokenized.ok);
+  const ParseResult parsed = parse_program(source, tokenized.tokens);
+  REQUIRE(parsed.ok);
+
+  const ProgramResult evaluated = evaluate_program(parsed.program);
+  REQUIRE(evaluated.ok);
+  REQUIRE(evaluated.values.size() == 1);
+  CHECK(format_value(evaluated.values[0]) == "(1 2 3 4 5 6)");
+}
+
+TEST_CASE("internal primitive kernels preserve semantic errors") {
+  const SourceLocation location{17, 3, 4};
+  const Value maximum{ValueKind::integer,
+                      std::numeric_limits<std::int64_t>::max(), {}};
+  const Value array{ValueKind::array, 0, {1, 2, 3}};
+
+  const ValueResult overflow = apply_inc(maximum, location);
+  const ValueResult wrong_inc_type = apply_inc(array, location);
+  const ValueResult wrong_ioata_type =
+      apply_ioata(array, location, ioata_element_limit);
+
+  CHECK_FALSE(overflow.ok);
+  CHECK(overflow.error.kind == ErrorKind::integer_overflow);
+  CHECK(overflow.error.location.offset == 17);
+  CHECK(overflow.error.location.line == 3);
+  CHECK(overflow.error.location.column == 4);
+  CHECK_FALSE(wrong_inc_type.ok);
+  CHECK(wrong_inc_type.error.kind == ErrorKind::type_mismatch);
+  CHECK_FALSE(wrong_ioata_type.ok);
+  CHECK(wrong_ioata_type.error.kind == ErrorKind::type_mismatch);
+}
+
+TEST_CASE("ioata enforces one pre-allocation retained-element budget") {
+  const SourceLocation location{6, 1, 7};
+  const Value request{ValueKind::integer, ioata_element_limit + 1, {}};
+  const Value boundary{ValueKind::integer, ioata_element_limit, {}};
+
+  const ValueResult rejected =
+      apply_ioata(request, location, ioata_element_limit);
+  CHECK_FALSE(rejected.ok);
+  CHECK(rejected.error.kind == ErrorKind::allocation_limit_exceeded);
+  CHECK(rejected.value.elements.empty());
+  CHECK(rejected.error.location.offset == 6);
+  CHECK(rejected.error.location.line == 1);
+  CHECK(rejected.error.location.column == 7);
+
+  const ValueResult allowed =
+      apply_ioata(boundary, location, ioata_element_limit);
+  REQUIRE(allowed.ok);
+  REQUIRE(allowed.value.elements.size() ==
+          static_cast<std::size_t>(ioata_element_limit));
+  CHECK(allowed.value.elements.back() == ioata_element_limit);
+
+  const ValueResult no_remaining =
+      apply_ioata(Value{ValueKind::integer, 1, {}}, location, 0);
+  CHECK_FALSE(no_remaining.ok);
+  CHECK(no_remaining.error.kind == ErrorKind::allocation_limit_exceeded);
+}
+
+TEST_CASE("complete programs cap cumulative retained ioata elements") {
+  const ProgramResult result =
+      evaluate_source("ioata 600000\nioata 600000");
+
+  CHECK_FALSE(result.ok);
+  CHECK(result.error.kind == ErrorKind::allocation_limit_exceeded);
+  CHECK(result.error.location.line == 2);
+  CHECK(result.error.location.column == 1);
+}
+
+TEST_CASE("source-reachable failures retain categories and locations") {
+  struct ErrorCase {
+    std::string_view source;
+    ErrorKind kind;
+    std::size_t offset;
+    std::size_t line;
+    std::size_t column;
+  };
+  const std::array<ErrorCase, 11> cases{{
+      {"\n\twat", ErrorKind::unknown_name, 2, 2, 2},
+      {"ioata @", ErrorKind::illegal_character, 6, 1, 7},
+      {"inc", ErrorKind::missing_argument, 0, 1, 1},
+      {"5 extra", ErrorKind::trailing_token, 2, 1, 3},
+      {"12x", ErrorKind::malformed_integer, 0, 1, 1},
+      {"-9223372036854775809", ErrorKind::integer_out_of_range, 0, 1, 1},
+      {"9223372036854775808", ErrorKind::integer_out_of_range, 0, 1, 1},
+      {"inc 9223372036854775807", ErrorKind::integer_overflow, 0, 1, 1},
+      {"\n  inc ioata 3", ErrorKind::type_mismatch, 3, 2, 3},
+      {"ioata 1000001", ErrorKind::allocation_limit_exceeded, 0, 1, 1},
+      {"inc-5", ErrorKind::expected_whitespace, 3, 1, 4},
+  }};
+
+  for (const ErrorCase &error_case : cases) {
+    CAPTURE(error_case.source);
+    const ValueResult result = evaluate_expression(error_case.source);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == error_case.kind);
+    CHECK(result.error.location.offset == error_case.offset);
+    CHECK(result.error.location.line == error_case.line);
+    CHECK(result.error.location.column == error_case.column);
+    CHECK_FALSE(result.error.message.empty());
+  }
+}
+
+TEST_CASE("one-expression API locates empty input at the source end") {
+  const ValueResult result = evaluate_expression("\r\n\t");
+
+  CHECK_FALSE(result.ok);
+  CHECK(result.error.kind == ErrorKind::empty_expression);
+  CHECK(result.error.location.offset == 3);
+  CHECK(result.error.location.line == 2);
+  CHECK(result.error.location.column == 2);
 }
 
 } // namespace bennu

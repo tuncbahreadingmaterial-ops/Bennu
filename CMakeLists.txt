@@ -11,22 +11,25 @@ if(BUILD_TESTING)
   enable_language(C)
 endif()
 
-add_library(bennu_core
+set(bennu_implementation_sources
   src/c_emitter.cpp
   src/evaluator.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
 )
-target_include_directories(bennu_core PUBLIC include)
-set_target_properties(bennu_core PROPERTIES
-  CXX_STANDARD 20
-  CXX_STANDARD_REQUIRED YES
-  CXX_EXTENSIONS NO
-)
 
-add_executable(bennu src/cli_output.cpp src/main.cpp)
-target_include_directories(bennu PRIVATE src)
-target_link_libraries(bennu PRIVATE bennu_core)
+add_executable(bennu
+  ${bennu_implementation_sources}
+  src/cli_output.cpp
+  src/main.cpp
+)
+target_include_directories(bennu PRIVATE include src)
+target_include_directories(bennu SYSTEM PRIVATE third_party/doctest)
+target_compile_definitions(bennu PRIVATE
+  DOCTEST_CONFIG_DISABLE
+  DOCTEST_CONFIG_NO_EXCEPTIONS
+  DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+)
 set_target_properties(bennu PROPERTIES
   CXX_STANDARD 20
   CXX_STANDARD_REQUIRED YES
@@ -49,32 +52,29 @@ file(GENERATE
 )
 
 if(BUILD_TESTING)
-  add_executable(bennu_evaluator_tests tests/evaluator_test.cpp)
-  target_link_libraries(bennu_evaluator_tests PRIVATE bennu_core)
-  set_target_properties(bennu_evaluator_tests PROPERTIES
+  add_executable(bennu_tests
+    ${bennu_implementation_sources}
+    tests/doctest_main.cpp
+  )
+  target_include_directories(bennu_tests PRIVATE include)
+  target_include_directories(bennu_tests SYSTEM PRIVATE third_party/doctest)
+  target_compile_definitions(bennu_tests PRIVATE
+    DOCTEST_CONFIG_NO_EXCEPTIONS
+    DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+  )
+  set_target_properties(bennu_tests PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
   )
-  add_test(NAME evaluator.unit COMMAND bennu_evaluator_tests)
-
-  add_executable(bennu_c_emitter_tests tests/c_emitter_test.cpp)
-  target_link_libraries(bennu_c_emitter_tests PRIVATE bennu_core)
-  set_target_properties(bennu_c_emitter_tests PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO
+  add_test(NAME unit.doctest COMMAND bennu_tests)
+  add_test(
+    NAME architecture.doctest_topology
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/doctest_topology.cmake"
   )
-  add_test(NAME c_emitter.unit COMMAND bennu_c_emitter_tests)
-
-  add_executable(bennu_native_builder_tests tests/native_builder_test.cpp)
-  target_link_libraries(bennu_native_builder_tests PRIVATE bennu_core)
-  set_target_properties(bennu_native_builder_tests PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO
-  )
-  add_test(NAME native_builder.unit COMMAND bennu_native_builder_tests)
 
   add_executable(bennu_stdout_tests tests/stdout_test.cpp src/cli_output.cpp)
   target_include_directories(bennu_stdout_tests PRIVATE src)
@@ -85,8 +85,11 @@ if(BUILD_TESTING)
   )
   add_test(NAME stdout.unit COMMAND bennu_stdout_tests)
 
-  add_executable(bennu_fake_c_compiler tests/fake_c_compiler.cpp)
-  target_link_libraries(bennu_fake_c_compiler PRIVATE bennu_core)
+  add_executable(bennu_fake_c_compiler
+    tests/fake_c_compiler.cpp
+    src/path_encoding.cpp
+  )
+  target_include_directories(bennu_fake_c_compiler PRIVATE include)
   set_target_properties(bennu_fake_c_compiler PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
