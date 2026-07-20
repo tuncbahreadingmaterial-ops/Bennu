@@ -60,6 +60,8 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
     return "shape mismatch";
   case bennu::ErrorKind::invalid_execution_profile:
     return "invalid execution profile";
+  case bennu::ErrorKind::invalid_primitive_table:
+    return "invalid primitive table";
   case bennu::ErrorKind::resource_error:
     return "resource error";
   case bennu::ErrorKind::domain_error:

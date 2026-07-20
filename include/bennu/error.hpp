@@ -1,6 +1,7 @@
 #ifndef BENNU_ERROR_HPP
 #define BENNU_ERROR_HPP
 
+#include "bennu/primitive_id.hpp"
 #include "bennu/value.hpp"
 
 #include <cstddef>
@@ -34,6 +35,7 @@ enum class ErrorKind {
   invalid_execution_profile,
   resource_error,
   domain_error,
+  invalid_primitive_table,
 };
 
 enum class ResourceErrorReason {
@@ -76,6 +78,7 @@ struct DomainErrorContext {
 
 struct PrimitiveErrorContext {
   std::string name;
+  std::optional<PrimitiveId> id{};
 };
 
 struct ShapeErrorContext {
