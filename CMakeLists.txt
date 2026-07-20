@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Bennu LANGUAGES CXX)
 
+option(BENNU_BUILD_ISSUE33_BENCHMARK
+  "Expose the opt-in Issue #33 C-backend prototype and benchmark targets"
+  OFF
+)
+
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
@@ -66,6 +71,91 @@ file(GENERATE
   OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bennu-build-info.txt"
   CONTENT "${bennu_build_info}"
 )
+
+if(BENNU_BUILD_ISSUE33_BENCHMARK)
+  enable_language(C)
+  if(NOT UNIX OR NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR
+      "Issue #33 measurement requires a Unix host and a configured GNU- or Clang-compatible C compiler"
+    )
+  endif()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  add_executable(bennu_issue33_prototype EXCLUDE_FROM_ALL
+    tools/issue33/prototype.cpp
+    src/application.cpp
+    src/error.cpp
+    src/primitive.cpp
+    src/resources.cpp
+    src/value.cpp
+  )
+  target_include_directories(bennu_issue33_prototype PRIVATE include src)
+  target_include_directories(bennu_issue33_prototype SYSTEM PRIVATE
+    third_party/doctest
+  )
+  target_compile_definitions(bennu_issue33_prototype PRIVATE
+    DOCTEST_CONFIG_DISABLE
+    DOCTEST_CONFIG_NO_EXCEPTIONS
+    DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+  )
+  set_target_properties(bennu_issue33_prototype PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+
+  set(bennu_issue33_driver
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/issue33/benchmark.py"
+  )
+  set(bennu_issue33_prototype_source
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/issue33/prototype.cpp"
+  )
+
+  add_custom_target(issue33_verify
+    COMMAND
+      "${Python3_EXECUTABLE}" "${bennu_issue33_driver}" verify
+      --prototype "$<TARGET_FILE:bennu_issue33_prototype>"
+      --prototype-source "${bennu_issue33_prototype_source}"
+      --cc "${CMAKE_C_COMPILER}"
+      --c-flag=-std=c11
+      --c-flag=-O2
+      --c-flag=-Wall
+      --c-flag=-Wextra
+      --c-flag=-Werror
+      --c-flag=-pedantic-errors
+    DEPENDS bennu_issue33_prototype
+    USES_TERMINAL
+    VERBATIM
+  )
+
+  add_custom_target(issue33_measure
+    COMMAND
+      "${Python3_EXECUTABLE}" "${bennu_issue33_driver}" measure
+      --prototype "$<TARGET_FILE:bennu_issue33_prototype>"
+      --prototype-source "${bennu_issue33_prototype_source}"
+      --cc "${CMAKE_C_COMPILER}"
+      --c-flag=-std=c11
+      --c-flag=-O2
+      --c-flag=-Wall
+      --c-flag=-Wextra
+      --c-flag=-Werror
+      --c-flag=-pedantic-errors
+      --source-dir "${CMAKE_CURRENT_SOURCE_DIR}"
+      --output "${CMAKE_CURRENT_BINARY_DIR}/issue33-evidence"
+      --samples 5
+      --build-type "$<CONFIG>"
+      --cmake-version "${CMAKE_VERSION}"
+      --c-compiler-id "${CMAKE_C_COMPILER_ID}"
+      --c-compiler-version "${CMAKE_C_COMPILER_VERSION}"
+      --cxx-compiler "${CMAKE_CXX_COMPILER}"
+      --cxx-compiler-id "${CMAKE_CXX_COMPILER_ID}"
+      --cxx-compiler-version "${CMAKE_CXX_COMPILER_VERSION}"
+      --cxx-flags "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELEASE} -std=c++20 -DDOCTEST_CONFIG_DISABLE -DDOCTEST_CONFIG_NO_EXCEPTIONS -DDOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS [src/primitive.cpp: -frounding-math -fno-fast-math]"
+    DEPENDS bennu_issue33_prototype
+    USES_TERMINAL
+    VERBATIM
+  )
+endif()
 
 if(BUILD_TESTING)
   add_executable(bennu_tests

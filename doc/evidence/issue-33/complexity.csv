@@ -1,0 +1,5 @@
+component,begin_line,end_line,physical_lines,substantive_lines,duplicated_semantic_responsibilities
+shared_validation,118,134,17,16,parse and primitive semantics; resource/profile admission; canonical formatting; failure-before-emission boundary
+constants,138,197,60,59,embeds evaluator-validated canonical result bytes; C literal escaping and chunking; checked stdout write and flush
+flat_runtime,201,258,58,57,typed Int payload storage; inc and nested-iota loop execution; Int/vector canonical formatting; checked stdout failures
+hybrid,262,286,25,24,exact 1000-element materialization threshold; result-size accounting; dispatch between constants and flat runtime semantics
