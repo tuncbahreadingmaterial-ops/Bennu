@@ -1,0 +1,22 @@
+{
+  "aggregation": "median of each numeric metric over recorded samples; warmup excluded",
+  "build_type": "Release",
+  "c_compiler": "/usr/bin/x86_64-linux-gnu-gcc-15",
+  "c_compiler_id": "GNU",
+  "c_compiler_version": "15.2.0",
+  "c_flags": "-std=c11 -O2 -Wall -Wextra -Werror -pedantic-errors",
+  "cmake_version": "4.4.0",
+  "cpu": "AMD Ryzen 5 7640HS w/ Radeon 760M Graphics",
+  "cxx_compiler": "/usr/bin/c++",
+  "cxx_compiler_id": "GNU",
+  "cxx_compiler_version": "15.2.0",
+  "cxx_flags": " -O3 -DNDEBUG -std=c++20 -DDOCTEST_CONFIG_DISABLE -DDOCTEST_CONFIG_NO_EXCEPTIONS -DDOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS [src/primitive.cpp: -frounding-math -fno-fast-math]",
+  "dirty": "false",
+  "host": "NucBoxM6Ultra",
+  "hybrid_threshold": "constants when total materialized vector elements <= 1000; flat runtime loops above 1000",
+  "os": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "peak_memory_method": "/usr/bin/time -q -f %M (maximum resident KiB)",
+  "revision": "0d5b1e68e3694ebec38f8fc25835a0518942489d",
+  "samples": 5,
+  "warmup": "one full emit/compile/execute verification per successful candidate/workload; one rejection check per failing pair"
+}
