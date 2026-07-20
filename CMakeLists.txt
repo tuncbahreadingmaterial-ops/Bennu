@@ -69,6 +69,7 @@ file(GENERATE
 if(BUILD_TESTING)
   add_executable(bennu_tests
     ${bennu_implementation_sources}
+    tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
   )
   target_include_directories(bennu_tests PRIVATE include)
