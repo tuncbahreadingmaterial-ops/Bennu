@@ -19,6 +19,7 @@ set(bennu_implementation_sources
   src/native_builder.cpp
   src/path_encoding.cpp
   src/primitive.cpp
+  src/rewrite.cpp
   src/resources.cpp
   src/value.cpp
 )

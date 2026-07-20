@@ -1,0 +1,1883 @@
+#include "bennu/primitive.hpp"
+#include "bennu/value.hpp"
+
+#include "doctest/doctest.h"
+
+#include <charconv>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+namespace bennu {
+namespace {
+
+struct RewritePosition {
+  std::size_t offset;
+  std::size_t line;
+  std::size_t column;
+};
+
+struct RewriteSpan {
+  RewritePosition begin;
+  RewritePosition end;
+};
+
+enum class RewriteTokenKind {
+  name,
+  bool_literal,
+  int_literal,
+  double_literal,
+  bool_type,
+  int_type,
+  double_type,
+  left_bracket,
+  right_bracket,
+  left_parenthesis,
+  right_parenthesis,
+  horizontal_space,
+  line_terminator,
+  malformed_literal,
+  invalid,
+};
+
+enum class RewriteLiteralError {
+  none,
+  malformed,
+  range,
+};
+
+struct RewriteToken {
+  RewriteTokenKind kind;
+  RewriteSpan span;
+  bool boolean;
+  std::int64_t integer;
+  double double_precision;
+  RewriteLiteralError literal_error;
+};
+
+struct RewriteTokens {
+  std::string source;
+  std::vector<RewriteToken> tokens;
+  RewritePosition end;
+};
+
+bool is_lowercase(char byte) { return byte >= 'a' && byte <= 'z'; }
+
+bool is_uppercase(char byte) { return byte >= 'A' && byte <= 'Z'; }
+
+bool is_digit(char byte) { return byte >= '0' && byte <= '9'; }
+
+bool is_horizontal_space(char byte) { return byte == ' ' || byte == '\t'; }
+
+bool is_numeric_candidate_byte(char byte) {
+  return is_lowercase(byte) || is_uppercase(byte) || is_digit(byte) ||
+         byte == '_' || byte == '.' || byte == '+' || byte == '-';
+}
+
+RewriteToken make_token(RewriteTokenKind kind, RewritePosition begin,
+                        RewritePosition end) {
+  return RewriteToken{kind,
+                      RewriteSpan{begin, end},
+                      false,
+                      0,
+                      0.0,
+                      RewriteLiteralError::none};
+}
+
+bool canonical_integer_grammar(std::string_view spelling) {
+  std::size_t digit = 0U;
+  if (!spelling.empty() && spelling.front() == '-') {
+    digit = 1U;
+  }
+  if (digit == spelling.size()) {
+    return false;
+  }
+  if (spelling[digit] == '0') {
+    return spelling.size() == digit + 1U && digit == 0U;
+  }
+  if (spelling[digit] < '1' || spelling[digit] > '9') {
+    return false;
+  }
+  for (std::size_t index = digit + 1U; index < spelling.size(); ++index) {
+    if (!is_digit(spelling[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool parse_canonical_integer(std::string_view spelling, std::int64_t &value) {
+  if (!canonical_integer_grammar(spelling)) {
+    return false;
+  }
+  const auto converted =
+      std::from_chars(spelling.data(), spelling.data() + spelling.size(), value);
+  return converted.ec == std::errc{} &&
+         converted.ptr == spelling.data() + spelling.size();
+}
+
+bool finite_double_grammar(std::string_view spelling) {
+  std::size_t index = 0U;
+  if (!spelling.empty() && spelling.front() == '-') {
+    index = 1U;
+  }
+  if (index == spelling.size()) {
+    return false;
+  }
+  const std::size_t integer_begin = index;
+  while (index < spelling.size() && is_digit(spelling[index])) {
+    ++index;
+  }
+  if (integer_begin == index) {
+    return false;
+  }
+  if (spelling[integer_begin] == '0' && index != integer_begin + 1U) {
+    return false;
+  }
+  bool has_fraction = false;
+  bool has_exponent = false;
+  if (index < spelling.size() && spelling[index] == '.') {
+    has_fraction = true;
+    ++index;
+    const std::size_t fraction_begin = index;
+    while (index < spelling.size() && is_digit(spelling[index])) {
+      ++index;
+    }
+    if (fraction_begin == index) {
+      return false;
+    }
+  }
+  if (index < spelling.size() &&
+      (spelling[index] == 'e' || spelling[index] == 'E')) {
+    has_exponent = true;
+    ++index;
+    if (index < spelling.size() &&
+        (spelling[index] == '+' || spelling[index] == '-')) {
+      ++index;
+    }
+    const std::size_t exponent_begin = index;
+    while (index < spelling.size() && is_digit(spelling[index])) {
+      ++index;
+    }
+    if (exponent_begin == index) {
+      return false;
+    }
+  }
+  return index == spelling.size() && (has_fraction || has_exponent);
+}
+
+std::int64_t decimal_scientific_exponent(std::string_view spelling) {
+  std::size_t index = spelling.front() == '-' ? 1U : 0U;
+  std::size_t digits_before_decimal = 0U;
+  std::size_t digit_ordinal = 0U;
+  const std::size_t missing = std::numeric_limits<std::size_t>::max();
+  std::size_t first_nonzero = missing;
+  while (index < spelling.size() && spelling[index] != 'e' &&
+         spelling[index] != 'E') {
+    if (spelling[index] == '.') {
+      digits_before_decimal = digit_ordinal;
+    } else {
+      if (first_nonzero == missing && spelling[index] != '0') {
+        first_nonzero = digit_ordinal;
+      }
+      ++digit_ordinal;
+    }
+    ++index;
+  }
+  if (spelling.find('.') == std::string_view::npos) {
+    digits_before_decimal = digit_ordinal;
+  }
+  if (first_nonzero == missing) {
+    return 0;
+  }
+
+  std::int64_t explicit_exponent = 0;
+  if (index < spelling.size()) {
+    ++index;
+    bool negative = false;
+    if (index < spelling.size() &&
+        (spelling[index] == '+' || spelling[index] == '-')) {
+      negative = spelling[index] == '-';
+      ++index;
+    }
+    while (index < spelling.size()) {
+      if (explicit_exponent < 1000000) {
+        explicit_exponent =
+            explicit_exponent * 10 + (spelling[index] - '0');
+      }
+      ++index;
+    }
+    if (negative) {
+      explicit_exponent = -explicit_exponent;
+    }
+  }
+  const std::int64_t before =
+      digits_before_decimal > 1000000U
+          ? 1000000
+          : static_cast<std::int64_t>(digits_before_decimal);
+  const std::int64_t leading =
+      first_nonzero > 1000000U
+          ? 1000000
+          : static_cast<std::int64_t>(first_nonzero);
+  return explicit_exponent + before - leading - 1;
+}
+
+bool decimal_rounds_to_zero(std::string_view spelling) {
+  const std::int64_t exponent = decimal_scientific_exponent(spelling);
+  if (exponent < -324) {
+    return true;
+  }
+  if (exponent != -324) {
+    return false;
+  }
+  constexpr std::string_view half_minimum_subnormal =
+      "24703282292062327208828439643411068618252990130716238221279284125033775";
+  std::size_t index = spelling.front() == '-' ? 1U : 0U;
+  std::size_t significant_index = 0U;
+  bool found_nonzero = false;
+  while (index < spelling.size() && spelling[index] != 'e' &&
+         spelling[index] != 'E') {
+    if (spelling[index] != '.') {
+      if (spelling[index] != '0' || found_nonzero) {
+        found_nonzero = true;
+        const char threshold =
+            significant_index < half_minimum_subnormal.size()
+                ? half_minimum_subnormal[significant_index]
+                : '0';
+        if (spelling[index] < threshold) {
+          return true;
+        }
+        if (spelling[index] > threshold) {
+          return false;
+        }
+        ++significant_index;
+      }
+    }
+    ++index;
+  }
+  while (significant_index < half_minimum_subnormal.size()) {
+    if (half_minimum_subnormal[significant_index] != '0') {
+      return true;
+    }
+    ++significant_index;
+  }
+  return true;
+}
+
+RewriteToken numeric_token(std::string_view spelling, RewritePosition begin,
+                           RewritePosition end) {
+  RewriteToken token =
+      make_token(RewriteTokenKind::malformed_literal, begin, end);
+  token.literal_error = RewriteLiteralError::malformed;
+  if (spelling == "-inf") {
+    token.kind = RewriteTokenKind::double_literal;
+    token.double_precision = -std::numeric_limits<double>::infinity();
+    token.literal_error = RewriteLiteralError::none;
+    return token;
+  }
+
+  std::int64_t integer = 0;
+  if (parse_canonical_integer(spelling, integer)) {
+    token.kind = RewriteTokenKind::int_literal;
+    token.integer = integer;
+    token.literal_error = RewriteLiteralError::none;
+    return token;
+  }
+  if (canonical_integer_grammar(spelling)) {
+    token.literal_error = RewriteLiteralError::range;
+    return token;
+  }
+
+  if (!finite_double_grammar(spelling)) {
+    return token;
+  }
+  double converted_value = 0.0;
+  const auto converted = std::from_chars(spelling.data(),
+                                         spelling.data() + spelling.size(),
+                                         converted_value,
+                                         std::chars_format::general);
+  if (converted.ec == std::errc::result_out_of_range) {
+    if (decimal_rounds_to_zero(spelling)) {
+      token.kind = RewriteTokenKind::double_literal;
+      token.double_precision = spelling.front() == '-'
+                                   ? -0.0
+                                   : 0.0;
+      token.literal_error = RewriteLiteralError::none;
+      return token;
+    }
+    token.literal_error = RewriteLiteralError::range;
+    return token;
+  }
+  if (converted.ec != std::errc{} ||
+      converted.ptr != spelling.data() + spelling.size() ||
+      !std::isfinite(converted_value)) {
+    token.literal_error = RewriteLiteralError::range;
+    return token;
+  }
+  token.kind = RewriteTokenKind::double_literal;
+  token.double_precision = converted_value;
+  token.literal_error = RewriteLiteralError::none;
+  return token;
+}
+
+RewriteTokens tokenize_rewrite(std::string_view source) {
+  RewriteTokens result{};
+  result.source.assign(source);
+  std::size_t index = 0U;
+  RewritePosition position{1U, 1U, 1U};
+  while (index < source.size()) {
+    const RewritePosition begin = position;
+    const char byte = source[index];
+    if (is_horizontal_space(byte)) {
+      do {
+        ++index;
+        ++position.offset;
+        ++position.column;
+      } while (index < source.size() && is_horizontal_space(source[index]));
+      result.tokens.push_back(make_token(
+          RewriteTokenKind::horizontal_space, begin, position));
+      continue;
+    }
+    if (byte == '\n' ||
+        (byte == '\r' && index + 1U < source.size() &&
+         source[index + 1U] == '\n')) {
+      if (byte == '\r') {
+        index += 2U;
+        position.offset += 2U;
+      } else {
+        ++index;
+        ++position.offset;
+      }
+      ++position.line;
+      position.column = 1U;
+      result.tokens.push_back(make_token(
+          RewriteTokenKind::line_terminator, begin, position));
+      continue;
+    }
+    if (is_lowercase(byte)) {
+      do {
+        ++index;
+        ++position.offset;
+        ++position.column;
+      } while (index < source.size() &&
+               (is_lowercase(source[index]) || is_digit(source[index]) ||
+                source[index] == '_'));
+      const std::string_view spelling = source.substr(
+          begin.offset - 1U, position.offset - begin.offset);
+      RewriteToken token = make_token(RewriteTokenKind::name, begin, position);
+      if (spelling == "true" || spelling == "false") {
+        token.kind = RewriteTokenKind::bool_literal;
+        token.boolean = spelling == "true";
+      } else if (spelling == "inf" || spelling == "nan") {
+        token.kind = RewriteTokenKind::double_literal;
+        token.double_precision = spelling == "inf"
+                                     ? std::numeric_limits<double>::infinity()
+                                     : std::numeric_limits<double>::quiet_NaN();
+      }
+      result.tokens.push_back(token);
+      continue;
+    }
+    if (is_uppercase(byte)) {
+      do {
+        ++index;
+        ++position.offset;
+        ++position.column;
+      } while (index < source.size() &&
+               (is_uppercase(source[index]) ||
+                is_lowercase(source[index]) || is_digit(source[index]) ||
+                source[index] == '_'));
+      const std::string_view spelling = source.substr(
+          begin.offset - 1U, position.offset - begin.offset);
+      RewriteTokenKind kind = RewriteTokenKind::invalid;
+      if (spelling == "Bool") {
+        kind = RewriteTokenKind::bool_type;
+      } else if (spelling == "Int") {
+        kind = RewriteTokenKind::int_type;
+      } else if (spelling == "Double") {
+        kind = RewriteTokenKind::double_type;
+      }
+      result.tokens.push_back(make_token(kind, begin, position));
+      continue;
+    }
+    if (is_digit(byte) || byte == '-' || byte == '+' || byte == '.') {
+      do {
+        ++index;
+        ++position.offset;
+        ++position.column;
+      } while (index < source.size() &&
+               is_numeric_candidate_byte(source[index]));
+      const std::string_view spelling = source.substr(
+          begin.offset - 1U, position.offset - begin.offset);
+      result.tokens.push_back(numeric_token(spelling, begin, position));
+      continue;
+    }
+
+    RewriteTokenKind kind = RewriteTokenKind::invalid;
+    switch (byte) {
+    case '[':
+      kind = RewriteTokenKind::left_bracket;
+      break;
+    case ']':
+      kind = RewriteTokenKind::right_bracket;
+      break;
+    case '(':
+      kind = RewriteTokenKind::left_parenthesis;
+      break;
+    case ')':
+      kind = RewriteTokenKind::right_parenthesis;
+      break;
+    default:
+      break;
+    }
+    ++index;
+    ++position.offset;
+    ++position.column;
+    result.tokens.push_back(make_token(kind, begin, position));
+  }
+  result.end = position;
+  return result;
+}
+
+enum class RewriteNodeKind {
+  scalar_literal,
+  vector_literal,
+  primitive_call,
+};
+
+enum class RewriteCallSyntax {
+  bracketed,
+  prefix,
+};
+
+enum class RewriteParseError {
+  none,
+  invalid_byte,
+  malformed_literal,
+  literal_range,
+  expected_expression,
+  primitive_requires_application,
+  whitespace_before_bracket,
+  missing_separator,
+  mismatched_delimiter,
+  missing_delimiter,
+  bare_empty_vector,
+  heterogeneous_vector,
+  invalid_vector_element,
+  trailing_input,
+  unknown_primitive,
+};
+
+struct RewriteNode {
+  RewriteNodeKind kind;
+  RewriteSpan span;
+  ScalarType element_type;
+  bool boolean;
+  std::int64_t integer;
+  double double_precision;
+  std::size_t first_element;
+  std::size_t element_count;
+  std::size_t first_element_span;
+  std::size_t call_index;
+};
+
+struct RewriteCall {
+  RewriteCallSyntax syntax;
+  RewriteSpan name_span;
+  RewriteSpan opening_delimiter_span;
+  RewriteSpan closing_delimiter_span;
+  RewriteSpan prefix_separator_span;
+  RewriteSpan span;
+  std::size_t first_argument;
+  std::size_t argument_count;
+  std::optional<PrimitiveId> primitive;
+};
+
+struct RewriteDiagnostic {
+  RewriteParseError error;
+  RewriteSpan primary;
+  RewriteSpan context;
+  RewriteSpan related;
+};
+
+struct RewriteProgram {
+  std::string source;
+  std::vector<RewriteNode> nodes;
+  std::vector<std::size_t> arguments;
+  std::vector<RewriteSpan> argument_spans;
+  std::vector<std::size_t> roots;
+  std::vector<RewriteCall> calls;
+  std::vector<std::uint8_t> boolean_elements;
+  std::vector<std::int64_t> integer_elements;
+  std::vector<double> double_elements;
+  std::vector<RewriteSpan> vector_element_spans;
+};
+
+struct RewriteParseResult {
+  bool ok;
+  RewriteProgram program;
+  RewriteDiagnostic diagnostic;
+};
+
+enum class RewriteContextKind {
+  bracket_call,
+  prefix_call,
+};
+
+struct RewritePendingArgument {
+  std::size_t node;
+  std::size_t next;
+};
+
+struct RewriteContext {
+  RewriteContextKind kind;
+  RewriteSpan name_span;
+  RewriteSpan opening_span;
+  RewriteSpan separator_span;
+  std::size_t first_pending_argument;
+  std::size_t last_pending_argument;
+  std::size_t argument_count;
+  std::size_t opening_token_index;
+  bool after_argument;
+};
+
+constexpr std::size_t no_index = std::numeric_limits<std::size_t>::max();
+
+RewriteSpan insertion_span(RewritePosition position) {
+  return RewriteSpan{position, position};
+}
+
+ScalarType scalar_token_type(RewriteTokenKind kind) {
+  if (kind == RewriteTokenKind::bool_literal) {
+    return ScalarType::boolean;
+  }
+  if (kind == RewriteTokenKind::int_literal) {
+    return ScalarType::integer;
+  }
+  return ScalarType::double_precision;
+}
+
+bool is_scalar_token(RewriteTokenKind kind) {
+  return kind == RewriteTokenKind::bool_literal ||
+         kind == RewriteTokenKind::int_literal ||
+         kind == RewriteTokenKind::double_literal;
+}
+
+RewriteNode scalar_node(const RewriteToken &token) {
+  return RewriteNode{RewriteNodeKind::scalar_literal,
+                     token.span,
+                     scalar_token_type(token.kind),
+                     token.boolean,
+                     token.integer,
+                     token.double_precision,
+                     0U,
+                     0U,
+                     0U,
+                     0U};
+}
+
+void set_diagnostic(RewriteParseResult &result, RewriteParseError error,
+                    RewriteSpan primary, RewriteSpan context,
+                    RewriteSpan related) {
+  result.ok = false;
+  result.diagnostic = RewriteDiagnostic{error, primary, context, related};
+}
+
+RewriteSpan delimited_context_span(const RewriteTokens &tokens,
+                                   std::size_t opening_index,
+                                   RewriteTokenKind closing_kind) {
+  const RewriteTokenKind opening_kind = tokens.tokens[opening_index].kind;
+  std::size_t depth = 0U;
+  for (std::size_t index = opening_index; index < tokens.tokens.size(); ++index) {
+    if (tokens.tokens[index].kind == opening_kind) {
+      ++depth;
+    } else if (tokens.tokens[index].kind == closing_kind) {
+      if (depth == 1U) {
+        return RewriteSpan{tokens.tokens[opening_index].span.begin,
+                           tokens.tokens[index].span.end};
+      }
+      if (depth > 1U) {
+        --depth;
+      }
+    }
+  }
+  return RewriteSpan{tokens.tokens[opening_index].span.begin, tokens.end};
+}
+
+RewriteSpan bracket_call_context_span(const RewriteTokens &tokens,
+                                      const RewriteContext &context) {
+  std::size_t depth = 0U;
+  for (std::size_t index = context.opening_token_index;
+       index < tokens.tokens.size(); ++index) {
+    if (tokens.tokens[index].kind == RewriteTokenKind::left_bracket) {
+      ++depth;
+    } else if (tokens.tokens[index].kind == RewriteTokenKind::right_bracket) {
+      if (depth == 1U) {
+        return RewriteSpan{context.name_span.begin,
+                           tokens.tokens[index].span.end};
+      }
+      if (depth > 1U) {
+        --depth;
+      }
+    }
+  }
+  return RewriteSpan{context.name_span.begin, tokens.end};
+}
+
+bool append_vector_element(RewriteProgram &program, const RewriteToken &token,
+                           ScalarType element_type) {
+  program.vector_element_spans.push_back(token.span);
+  if (element_type == ScalarType::boolean) {
+    program.boolean_elements.push_back(token.boolean ? std::uint8_t{1U}
+                                                     : std::uint8_t{0U});
+  } else if (element_type == ScalarType::integer) {
+    program.integer_elements.push_back(token.integer);
+  } else {
+    program.double_elements.push_back(token.double_precision);
+  }
+  return true;
+}
+
+std::size_t vector_payload_size(const RewriteProgram &program,
+                                ScalarType element_type) {
+  if (element_type == ScalarType::boolean) {
+    return program.boolean_elements.size();
+  }
+  if (element_type == ScalarType::integer) {
+    return program.integer_elements.size();
+  }
+  return program.double_elements.size();
+}
+
+bool parse_vector_literal(const RewriteTokens &tokens, std::size_t &token_index,
+                          RewriteParseResult &result,
+                          std::size_t &completed_node) {
+  const std::size_t opening_index = token_index;
+  const RewriteToken &opening = tokens.tokens[token_index];
+  ++token_index;
+  while (token_index < tokens.tokens.size() &&
+         (tokens.tokens[token_index].kind ==
+              RewriteTokenKind::horizontal_space ||
+          tokens.tokens[token_index].kind ==
+              RewriteTokenKind::line_terminator)) {
+    ++token_index;
+  }
+  if (token_index == tokens.tokens.size()) {
+    const RewriteSpan insertion = insertion_span(tokens.end);
+    set_diagnostic(result, RewriteParseError::missing_delimiter, insertion,
+                   RewriteSpan{opening.span.begin, tokens.end}, opening.span);
+    return false;
+  }
+  if (tokens.tokens[token_index].kind ==
+      RewriteTokenKind::right_parenthesis) {
+    const RewriteSpan complete{opening.span.begin,
+                               tokens.tokens[token_index].span.end};
+    set_diagnostic(result, RewriteParseError::bare_empty_vector, complete,
+                   complete, opening.span);
+    return false;
+  }
+  if (tokens.tokens[token_index].kind == RewriteTokenKind::right_bracket) {
+    set_diagnostic(result, RewriteParseError::mismatched_delimiter,
+                   tokens.tokens[token_index].span,
+                   RewriteSpan{opening.span.begin,
+                               tokens.tokens[token_index].span.end},
+                   opening.span);
+    return false;
+  }
+  if (!is_scalar_token(tokens.tokens[token_index].kind)) {
+    const RewriteToken &invalid = tokens.tokens[token_index];
+    RewriteParseError error = RewriteParseError::invalid_vector_element;
+    if (invalid.kind == RewriteTokenKind::malformed_literal) {
+      error = invalid.literal_error == RewriteLiteralError::range
+                  ? RewriteParseError::literal_range
+                  : RewriteParseError::malformed_literal;
+    } else if (invalid.kind == RewriteTokenKind::invalid) {
+      error = RewriteParseError::invalid_byte;
+    }
+    set_diagnostic(result, error, invalid.span,
+                   delimited_context_span(
+                       tokens, opening_index,
+                       RewriteTokenKind::right_parenthesis),
+                   opening.span);
+    return false;
+  }
+
+  const ScalarType element_type =
+      scalar_token_type(tokens.tokens[token_index].kind);
+  const std::size_t first_element =
+      vector_payload_size(result.program, element_type);
+  const std::size_t first_element_span =
+      result.program.vector_element_spans.size();
+  std::size_t element_count = 0U;
+  while (true) {
+    const RewriteToken &element = tokens.tokens[token_index];
+    if (!is_scalar_token(element.kind)) {
+      RewriteParseError error = RewriteParseError::invalid_vector_element;
+      if (element.kind == RewriteTokenKind::malformed_literal) {
+        error = element.literal_error == RewriteLiteralError::range
+                    ? RewriteParseError::literal_range
+                    : RewriteParseError::malformed_literal;
+      } else if (element.kind == RewriteTokenKind::invalid) {
+        error = RewriteParseError::invalid_byte;
+      }
+      set_diagnostic(result, error, element.span,
+                     delimited_context_span(
+                         tokens, opening_index,
+                         RewriteTokenKind::right_parenthesis),
+                     opening.span);
+      return false;
+    }
+    if (scalar_token_type(element.kind) != element_type) {
+      set_diagnostic(result, RewriteParseError::heterogeneous_vector,
+                     element.span,
+                     delimited_context_span(
+                         tokens, opening_index,
+                         RewriteTokenKind::right_parenthesis),
+                     opening.span);
+      return false;
+    }
+    append_vector_element(result.program, element, element_type);
+    ++element_count;
+    ++token_index;
+    if (token_index == tokens.tokens.size()) {
+      const RewriteSpan insertion = insertion_span(tokens.end);
+      set_diagnostic(result, RewriteParseError::missing_delimiter, insertion,
+                     RewriteSpan{opening.span.begin, tokens.end}, opening.span);
+      return false;
+    }
+    if (tokens.tokens[token_index].kind ==
+        RewriteTokenKind::right_parenthesis) {
+      const RewriteSpan complete{opening.span.begin,
+                                 tokens.tokens[token_index].span.end};
+      ++token_index;
+      result.program.nodes.push_back(
+          RewriteNode{RewriteNodeKind::vector_literal,
+                      complete,
+                      element_type,
+                      false,
+                      0,
+                      0.0,
+                      first_element,
+                      element_count,
+                      first_element_span,
+                      0U});
+      completed_node = result.program.nodes.size() - 1U;
+      return true;
+    }
+    if (tokens.tokens[token_index].kind == RewriteTokenKind::right_bracket) {
+      set_diagnostic(result, RewriteParseError::mismatched_delimiter,
+                     tokens.tokens[token_index].span,
+                     RewriteSpan{opening.span.begin,
+                                 tokens.tokens[token_index].span.end},
+                     opening.span);
+      return false;
+    }
+    if (tokens.tokens[token_index].kind !=
+            RewriteTokenKind::horizontal_space &&
+        tokens.tokens[token_index].kind !=
+            RewriteTokenKind::line_terminator) {
+      const RewriteParseError error =
+          tokens.tokens[token_index].kind == RewriteTokenKind::invalid
+              ? RewriteParseError::invalid_byte
+              : RewriteParseError::missing_separator;
+      set_diagnostic(result, error,
+                     tokens.tokens[token_index].span,
+                     delimited_context_span(
+                         tokens, opening_index,
+                         RewriteTokenKind::right_parenthesis),
+                     opening.span);
+      return false;
+    }
+    while (token_index < tokens.tokens.size() &&
+           (tokens.tokens[token_index].kind ==
+                RewriteTokenKind::horizontal_space ||
+            tokens.tokens[token_index].kind ==
+                RewriteTokenKind::line_terminator)) {
+      ++token_index;
+    }
+    if (token_index == tokens.tokens.size()) {
+      const RewriteSpan insertion = insertion_span(tokens.end);
+      set_diagnostic(result, RewriteParseError::missing_delimiter, insertion,
+                     RewriteSpan{opening.span.begin, tokens.end}, opening.span);
+      return false;
+    }
+    if (tokens.tokens[token_index].kind ==
+        RewriteTokenKind::right_parenthesis) {
+      const RewriteSpan complete{opening.span.begin,
+                                 tokens.tokens[token_index].span.end};
+      ++token_index;
+      result.program.nodes.push_back(
+          RewriteNode{RewriteNodeKind::vector_literal,
+                      complete,
+                      element_type,
+                      false,
+                      0,
+                      0.0,
+                      first_element,
+                      element_count,
+                      first_element_span,
+                      0U});
+      completed_node = result.program.nodes.size() - 1U;
+      return true;
+    }
+    if (tokens.tokens[token_index].kind == RewriteTokenKind::right_bracket) {
+      set_diagnostic(result, RewriteParseError::mismatched_delimiter,
+                     tokens.tokens[token_index].span,
+                     RewriteSpan{opening.span.begin,
+                                 tokens.tokens[token_index].span.end},
+                     opening.span);
+      return false;
+    }
+  }
+}
+
+void append_pending_argument(std::vector<RewritePendingArgument> &pending,
+                             RewriteContext &context, std::size_t node) {
+  const std::size_t pending_index = pending.size();
+  pending.push_back(RewritePendingArgument{node, no_index});
+  if (context.first_pending_argument == no_index) {
+    context.first_pending_argument = pending_index;
+  } else {
+    pending[context.last_pending_argument].next = pending_index;
+  }
+  context.last_pending_argument = pending_index;
+  ++context.argument_count;
+}
+
+std::size_t finish_call(RewriteProgram &program,
+                        const std::vector<RewritePendingArgument> &pending,
+                        const RewriteContext &context,
+                        RewriteSpan closing_span, RewriteSpan complete_span) {
+  const std::size_t first_argument = program.arguments.size();
+  std::size_t pending_index = context.first_pending_argument;
+  while (pending_index != no_index) {
+    const std::size_t node_index = pending[pending_index].node;
+    program.arguments.push_back(node_index);
+    program.argument_spans.push_back(program.nodes[node_index].span);
+    pending_index = pending[pending_index].next;
+  }
+  const std::size_t call_index = program.calls.size();
+  program.calls.push_back(RewriteCall{
+      context.kind == RewriteContextKind::bracket_call
+          ? RewriteCallSyntax::bracketed
+          : RewriteCallSyntax::prefix,
+      context.name_span,
+      context.opening_span,
+      closing_span,
+      context.separator_span,
+      complete_span,
+      first_argument,
+      context.argument_count,
+      std::nullopt});
+  program.nodes.push_back(RewriteNode{RewriteNodeKind::primitive_call,
+                                     complete_span,
+                                     ScalarType::boolean,
+                                     false,
+                                     0,
+                                     0.0,
+                                     0U,
+                                     0U,
+                                     0U,
+                                     call_index});
+  return program.nodes.size() - 1U;
+}
+
+bool token_starts_expression(RewriteTokenKind kind) {
+  return is_scalar_token(kind) || kind == RewriteTokenKind::name ||
+         kind == RewriteTokenKind::left_parenthesis ||
+         kind == RewriteTokenKind::bool_type ||
+         kind == RewriteTokenKind::int_type ||
+         kind == RewriteTokenKind::double_type ||
+         kind == RewriteTokenKind::malformed_literal ||
+         kind == RewriteTokenKind::invalid;
+}
+
+RewriteParseResult parse_rewrite(std::string_view source) {
+  RewriteParseResult result{};
+  RewriteTokens tokens = tokenize_rewrite(source);
+  result.program.source = tokens.source;
+  result.diagnostic = RewriteDiagnostic{RewriteParseError::none,
+                                        insertion_span(tokens.end),
+                                        insertion_span(tokens.end),
+                                        insertion_span(tokens.end)};
+  std::vector<RewriteContext> contexts;
+  std::vector<RewritePendingArgument> pending_arguments;
+  std::size_t token_index = 0U;
+  std::size_t completed_node = 0U;
+  bool have_expression = false;
+
+  while (true) {
+    if (have_expression) {
+      while (!contexts.empty() &&
+             contexts.back().kind == RewriteContextKind::prefix_call) {
+        const RewriteContext context = contexts.back();
+        contexts.pop_back();
+        RewriteContext completed_context = context;
+        append_pending_argument(pending_arguments, completed_context,
+                                completed_node);
+        const RewriteSpan complete{context.name_span.begin,
+                                   result.program.nodes[completed_node].span.end};
+        completed_node = finish_call(
+            result.program, pending_arguments, completed_context,
+            insertion_span(context.separator_span.end), complete);
+      }
+      if (!contexts.empty()) {
+        RewriteContext &context = contexts.back();
+        append_pending_argument(pending_arguments, context, completed_node);
+        context.after_argument = true;
+        have_expression = false;
+        continue;
+      }
+
+      result.program.roots.push_back(completed_node);
+      have_expression = false;
+      while (token_index < tokens.tokens.size() &&
+             tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::horizontal_space) {
+        ++token_index;
+      }
+      if (token_index == tokens.tokens.size()) {
+        result.ok = true;
+        return result;
+      }
+      if (tokens.tokens[token_index].kind ==
+          RewriteTokenKind::line_terminator) {
+        ++token_index;
+        continue;
+      }
+      RewriteParseError error = RewriteParseError::trailing_input;
+      if (tokens.tokens[token_index].kind == RewriteTokenKind::invalid) {
+        error = RewriteParseError::invalid_byte;
+      } else if (tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::malformed_literal) {
+        error = tokens.tokens[token_index].literal_error ==
+                        RewriteLiteralError::range
+                    ? RewriteParseError::literal_range
+                    : RewriteParseError::malformed_literal;
+      } else if (tokens.tokens[token_index].kind ==
+                     RewriteTokenKind::right_bracket ||
+                 tokens.tokens[token_index].kind ==
+                     RewriteTokenKind::right_parenthesis) {
+        error = RewriteParseError::mismatched_delimiter;
+      }
+      set_diagnostic(result, error,
+                     tokens.tokens[token_index].span,
+                     result.program.nodes[completed_node].span,
+                     result.program.nodes[completed_node].span);
+      return result;
+    }
+
+    if (!contexts.empty() &&
+        contexts.back().kind == RewriteContextKind::bracket_call) {
+      RewriteContext &context = contexts.back();
+      if (context.after_argument) {
+        if (token_index < tokens.tokens.size() &&
+            tokens.tokens[token_index].kind ==
+                RewriteTokenKind::right_bracket) {
+          const RewriteSpan closing = tokens.tokens[token_index].span;
+          ++token_index;
+          const RewriteContext completed_context = context;
+          contexts.pop_back();
+          completed_node = finish_call(
+              result.program, pending_arguments, completed_context, closing,
+              RewriteSpan{completed_context.name_span.begin, closing.end});
+          have_expression = true;
+          continue;
+        }
+        if (token_index < tokens.tokens.size() &&
+            (tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::horizontal_space ||
+             tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::line_terminator)) {
+          while (token_index < tokens.tokens.size() &&
+                 (tokens.tokens[token_index].kind ==
+                      RewriteTokenKind::horizontal_space ||
+                  tokens.tokens[token_index].kind ==
+                      RewriteTokenKind::line_terminator)) {
+            ++token_index;
+          }
+          if (token_index < tokens.tokens.size() &&
+              tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::right_bracket) {
+            continue;
+          }
+          context.after_argument = false;
+        } else if (token_index == tokens.tokens.size()) {
+          const RewriteSpan insertion = insertion_span(tokens.end);
+          set_diagnostic(
+              result, RewriteParseError::missing_delimiter, insertion,
+              bracket_call_context_span(tokens, context),
+              context.opening_span);
+          return result;
+        } else if (tokens.tokens[token_index].kind ==
+                   RewriteTokenKind::right_parenthesis) {
+          set_diagnostic(
+              result, RewriteParseError::mismatched_delimiter,
+              tokens.tokens[token_index].span,
+              bracket_call_context_span(tokens, context),
+              context.opening_span);
+          return result;
+        } else {
+          const RewriteParseError error =
+              tokens.tokens[token_index].kind == RewriteTokenKind::invalid
+                  ? RewriteParseError::invalid_byte
+                  : RewriteParseError::missing_separator;
+          set_diagnostic(
+              result, error,
+              tokens.tokens[token_index].span,
+              bracket_call_context_span(tokens, context),
+              context.opening_span);
+          return result;
+        }
+      }
+      if (token_index == tokens.tokens.size()) {
+        const RewriteSpan insertion = insertion_span(tokens.end);
+        set_diagnostic(result, RewriteParseError::missing_delimiter, insertion,
+                       bracket_call_context_span(tokens, context),
+                       context.opening_span);
+        return result;
+      }
+      if (tokens.tokens[token_index].kind ==
+          RewriteTokenKind::right_bracket) {
+        const RewriteSpan closing = tokens.tokens[token_index].span;
+        ++token_index;
+        const RewriteContext completed_context = context;
+        contexts.pop_back();
+        completed_node = finish_call(
+            result.program, pending_arguments, completed_context, closing,
+            RewriteSpan{completed_context.name_span.begin, closing.end});
+        have_expression = true;
+        continue;
+      }
+      if (tokens.tokens[token_index].kind ==
+          RewriteTokenKind::right_parenthesis) {
+        set_diagnostic(
+            result, RewriteParseError::mismatched_delimiter,
+            tokens.tokens[token_index].span,
+            bracket_call_context_span(tokens, context),
+            context.opening_span);
+        return result;
+      }
+    } else if (contexts.empty()) {
+      while (token_index < tokens.tokens.size() &&
+             (tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::horizontal_space ||
+              tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::line_terminator)) {
+        ++token_index;
+      }
+      if (token_index == tokens.tokens.size()) {
+        result.ok = true;
+        return result;
+      }
+    }
+
+    const RewriteToken &token = tokens.tokens[token_index];
+    if (is_scalar_token(token.kind)) {
+      result.program.nodes.push_back(scalar_node(token));
+      completed_node = result.program.nodes.size() - 1U;
+      ++token_index;
+      have_expression = true;
+      continue;
+    }
+    if (token.kind == RewriteTokenKind::left_parenthesis) {
+      if (!parse_vector_literal(tokens, token_index, result,
+                                completed_node)) {
+        return result;
+      }
+      have_expression = true;
+      continue;
+    }
+    if (token.kind == RewriteTokenKind::bool_type ||
+        token.kind == RewriteTokenKind::int_type ||
+        token.kind == RewriteTokenKind::double_type) {
+      if (token_index + 2U < tokens.tokens.size() &&
+          tokens.tokens[token_index + 1U].kind ==
+              RewriteTokenKind::left_parenthesis &&
+          tokens.tokens[token_index + 2U].kind ==
+              RewriteTokenKind::right_parenthesis) {
+        const ScalarType type = token.kind == RewriteTokenKind::bool_type
+                                    ? ScalarType::boolean
+                                : token.kind == RewriteTokenKind::int_type
+                                    ? ScalarType::integer
+                                    : ScalarType::double_precision;
+        const RewriteSpan complete{token.span.begin,
+                                   tokens.tokens[token_index + 2U].span.end};
+        result.program.nodes.push_back(
+            RewriteNode{RewriteNodeKind::vector_literal,
+                        complete,
+                        type,
+                        false,
+                        0,
+                        0.0,
+                        vector_payload_size(result.program, type),
+                        0U,
+                        result.program.vector_element_spans.size(),
+                        0U});
+        completed_node = result.program.nodes.size() - 1U;
+        token_index += 3U;
+        have_expression = true;
+        continue;
+      }
+      set_diagnostic(result, RewriteParseError::invalid_vector_element,
+                     token.span, token.span, token.span);
+      return result;
+    }
+    if (token.kind == RewriteTokenKind::name) {
+      if (token_index + 1U < tokens.tokens.size() &&
+          tokens.tokens[token_index + 1U].kind ==
+              RewriteTokenKind::left_bracket) {
+        const RewriteSpan opening = tokens.tokens[token_index + 1U].span;
+        contexts.push_back(RewriteContext{
+            RewriteContextKind::bracket_call,
+            token.span,
+            opening,
+            insertion_span(opening.end),
+            no_index,
+            no_index,
+            0U,
+            token_index + 1U,
+            false});
+        token_index += 2U;
+        while (token_index < tokens.tokens.size() &&
+               (tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::horizontal_space ||
+                tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::line_terminator)) {
+          ++token_index;
+        }
+        continue;
+      }
+      if (token_index + 1U < tokens.tokens.size() &&
+          tokens.tokens[token_index + 1U].kind ==
+              RewriteTokenKind::horizontal_space) {
+        if (token_index + 2U < tokens.tokens.size() &&
+            tokens.tokens[token_index + 2U].kind ==
+                RewriteTokenKind::left_bracket) {
+          set_diagnostic(result, RewriteParseError::whitespace_before_bracket,
+                         tokens.tokens[token_index + 1U].span, token.span,
+                         tokens.tokens[token_index + 2U].span);
+          return result;
+        }
+        const RewriteSpan separator = tokens.tokens[token_index + 1U].span;
+        contexts.push_back(RewriteContext{RewriteContextKind::prefix_call,
+                                          token.span,
+                                          insertion_span(separator.begin),
+                                          separator,
+                                          no_index,
+                                          no_index,
+                                          0U,
+                                          no_index,
+                                          false});
+        token_index += 2U;
+        if (token_index == tokens.tokens.size() ||
+            tokens.tokens[token_index].kind ==
+                RewriteTokenKind::line_terminator) {
+          const RewriteSpan primary =
+              token_index == tokens.tokens.size()
+                  ? insertion_span(tokens.end)
+                  : tokens.tokens[token_index].span;
+          set_diagnostic(result, RewriteParseError::expected_expression,
+                         primary,
+                         RewriteSpan{token.span.begin, primary.end},
+                         separator);
+          return result;
+        }
+        continue;
+      }
+      set_diagnostic(result,
+                     RewriteParseError::primitive_requires_application,
+                     token.span, token.span, token.span);
+      return result;
+    }
+    if (token.kind == RewriteTokenKind::malformed_literal) {
+      set_diagnostic(
+          result,
+          token.literal_error == RewriteLiteralError::range
+              ? RewriteParseError::literal_range
+              : RewriteParseError::malformed_literal,
+          token.span, token.span, token.span);
+      return result;
+    }
+    if (token.kind == RewriteTokenKind::invalid) {
+      set_diagnostic(result, RewriteParseError::invalid_byte, token.span,
+                     token.span, token.span);
+      return result;
+    }
+    if (token.kind == RewriteTokenKind::right_bracket ||
+        token.kind == RewriteTokenKind::right_parenthesis) {
+      set_diagnostic(result, RewriteParseError::mismatched_delimiter,
+                     token.span, token.span, token.span);
+      return result;
+    }
+    const RewriteParseError error =
+        token_starts_expression(token.kind)
+            ? RewriteParseError::expected_expression
+            : RewriteParseError::invalid_byte;
+    set_diagnostic(result, error, token.span, token.span, token.span);
+    return result;
+  }
+}
+
+struct RewriteResolutionResult {
+  bool ok;
+  RewriteDiagnostic diagnostic;
+};
+
+RewriteResolutionResult resolve_rewrite_primitives(RewriteProgram &program) {
+  std::vector<PrimitiveId> resolved_ids;
+  resolved_ids.reserve(program.calls.size());
+  for (const RewriteCall &call : program.calls) {
+    const std::size_t name_begin = call.name_span.begin.offset - 1U;
+    const std::size_t name_size =
+        call.name_span.end.offset - call.name_span.begin.offset;
+    const std::string_view name(program.source.data() + name_begin, name_size);
+    const PrimitiveDescriptor *descriptor = find_primitive(name);
+    if (descriptor == nullptr) {
+      return RewriteResolutionResult{
+          false,
+          RewriteDiagnostic{RewriteParseError::unknown_primitive,
+                            call.name_span, call.span, call.name_span}};
+    }
+    resolved_ids.push_back(descriptor->id);
+  }
+  for (std::size_t index = 0U; index < program.calls.size(); ++index) {
+    program.calls[index].primitive = resolved_ids[index];
+  }
+  const RewriteSpan empty = insertion_span(RewritePosition{1U, 1U, 1U});
+  return RewriteResolutionResult{
+      true,
+      RewriteDiagnostic{RewriteParseError::none, empty, empty, empty}};
+}
+
+#ifndef DOCTEST_CONFIG_DISABLE
+bool rewrite_program_invariants_hold(const RewriteProgram &program) {
+  const auto positions_equal = [](RewritePosition left,
+                                  RewritePosition right) {
+    return left.offset == right.offset && left.line == right.line &&
+           left.column == right.column;
+  };
+  const auto spans_equal = [&positions_equal](RewriteSpan left,
+                                               RewriteSpan right) {
+    return positions_equal(left.begin, right.begin) &&
+           positions_equal(left.end, right.end);
+  };
+  const auto span_is_ordered = [&program](RewriteSpan span) {
+    return span.begin.offset <= span.end.offset && span.begin.offset >= 1U &&
+           span.end.offset <= program.source.size() + 1U;
+  };
+  if (program.arguments.size() != program.argument_spans.size()) {
+    return false;
+  }
+  std::size_t expected_first_argument = 0U;
+  for (const RewriteCall &call : program.calls) {
+    if (call.first_argument != expected_first_argument ||
+        call.first_argument > program.arguments.size() ||
+        call.argument_count > program.arguments.size() - call.first_argument ||
+        !span_is_ordered(call.name_span) || !span_is_ordered(call.span)) {
+      return false;
+    }
+    expected_first_argument += call.argument_count;
+  }
+  if (expected_first_argument != program.arguments.size()) {
+    return false;
+  }
+
+  std::vector<std::uint8_t> seen_calls(program.calls.size(), std::uint8_t{0U});
+  for (std::size_t node_index = 0U; node_index < program.nodes.size();
+       ++node_index) {
+    const RewriteNode &node = program.nodes[node_index];
+    if (!span_is_ordered(node.span)) {
+      return false;
+    }
+    if (node.kind == RewriteNodeKind::vector_literal) {
+      if (node.first_element_span > program.vector_element_spans.size() ||
+          node.element_count >
+              program.vector_element_spans.size() - node.first_element_span) {
+        return false;
+      }
+      const std::size_t payload_size =
+          vector_payload_size(program, node.element_type);
+      if (node.first_element > payload_size ||
+          node.element_count > payload_size - node.first_element) {
+        return false;
+      }
+    }
+    if (node.kind != RewriteNodeKind::primitive_call) {
+      continue;
+    }
+    if (node.call_index >= program.calls.size() ||
+        seen_calls[node.call_index] != std::uint8_t{0U}) {
+      return false;
+    }
+    seen_calls[node.call_index] = std::uint8_t{1U};
+    const RewriteCall &call = program.calls[node.call_index];
+    if (!spans_equal(node.span, call.span)) {
+      return false;
+    }
+    for (std::size_t argument = 0U; argument < call.argument_count;
+         ++argument) {
+      const std::size_t arena_index = call.first_argument + argument;
+      const std::size_t argument_node = program.arguments[arena_index];
+      if (argument_node >= node_index || argument_node >= program.nodes.size() ||
+          !spans_equal(program.argument_spans[arena_index],
+                       program.nodes[argument_node].span)) {
+        return false;
+      }
+    }
+  }
+  for (const std::uint8_t seen : seen_calls) {
+    if (seen == std::uint8_t{0U}) {
+      return false;
+    }
+  }
+  std::size_t previous_root_offset = 0U;
+  for (const std::size_t root : program.roots) {
+    if (root >= program.nodes.size() ||
+        program.nodes[root].span.begin.offset < previous_root_offset) {
+      return false;
+    }
+    previous_root_offset = program.nodes[root].span.begin.offset;
+  }
+  return true;
+}
+
+bool position_is(RewritePosition position, std::size_t offset,
+                 std::size_t line, std::size_t column) {
+  return position.offset == offset && position.line == line &&
+         position.column == column;
+}
+
+bool span_is(RewriteSpan span, std::size_t begin_offset,
+             std::size_t begin_line, std::size_t begin_column,
+             std::size_t end_offset, std::size_t end_line,
+             std::size_t end_column) {
+  return position_is(span.begin, begin_offset, begin_line, begin_column) &&
+         position_is(span.end, end_offset, end_line, end_column);
+}
+#endif
+
+TEST_CASE("rewrite tokenizer uses generic categories and one-based byte spans") {
+  const RewriteTokens tokens =
+      tokenize_rewrite("true -9223372036854775808\r\nDouble()");
+
+  REQUIRE(tokens.tokens.size() == 7U);
+  CHECK(tokens.tokens[0].kind == RewriteTokenKind::bool_literal);
+  CHECK(tokens.tokens[0].boolean);
+  CHECK(span_is(tokens.tokens[0].span, 1U, 1U, 1U, 5U, 1U, 5U));
+  CHECK(tokens.tokens[1].kind == RewriteTokenKind::horizontal_space);
+  CHECK(tokens.tokens[2].kind == RewriteTokenKind::int_literal);
+  CHECK(tokens.tokens[2].integer == std::numeric_limits<std::int64_t>::min());
+  CHECK(tokens.tokens[3].kind == RewriteTokenKind::line_terminator);
+  CHECK(span_is(tokens.tokens[3].span, 26U, 1U, 26U, 28U, 2U, 1U));
+  CHECK(tokens.tokens[4].kind == RewriteTokenKind::double_type);
+  CHECK(tokens.tokens[5].kind == RewriteTokenKind::left_parenthesis);
+  CHECK(tokens.tokens[6].kind == RewriteTokenKind::right_parenthesis);
+  CHECK(position_is(tokens.end, 36U, 2U, 9U));
+}
+
+TEST_CASE("rewrite tokenizer enforces canonical and complete numeric literals") {
+  struct NumericCase {
+    std::string_view source;
+    RewriteTokenKind kind;
+    RewriteLiteralError error;
+  };
+  const NumericCase cases[] = {
+      {"9223372036854775807", RewriteTokenKind::int_literal,
+       RewriteLiteralError::none},
+      {"-9223372036854775808", RewriteTokenKind::int_literal,
+       RewriteLiteralError::none},
+      {"9223372036854775808", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::range},
+      {"-9223372036854775809", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::range},
+      {"-0", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"+1", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"00", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"01.0", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {".5", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1.", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1e", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1e+", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1_000", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"0x10", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1.0f", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::malformed},
+      {"1e9999", RewriteTokenKind::malformed_literal,
+       RewriteLiteralError::range},
+  };
+  for (const NumericCase &numeric_case : cases) {
+    INFO(std::string(numeric_case.source));
+    const RewriteTokens tokens = tokenize_rewrite(numeric_case.source);
+    REQUIRE(tokens.tokens.size() == 1U);
+    CHECK(tokens.tokens[0].kind == numeric_case.kind);
+    CHECK(tokens.tokens[0].literal_error == numeric_case.error);
+    CHECK(tokens.tokens[0].span.begin.offset == 1U);
+    CHECK(tokens.tokens[0].span.end.offset == numeric_case.source.size() + 1U);
+  }
+}
+
+TEST_CASE("rewrite tokenizer preserves binary64 boundaries and signed zero") {
+  const RewriteTokens tokens = tokenize_rewrite(
+      "0.0 -0.0 4.9406564584124654e-324 "
+      "1.7976931348623157e308 inf -inf nan 1e-9999 -1e-9999");
+  std::vector<double> values;
+  for (const RewriteToken &token : tokens.tokens) {
+    if (token.kind == RewriteTokenKind::double_literal) {
+      values.push_back(token.double_precision);
+    }
+  }
+  REQUIRE(values.size() == 9U);
+  CHECK(values[0] == 0.0);
+  CHECK_FALSE(std::signbit(values[0]));
+  CHECK(values[1] == 0.0);
+  CHECK(std::signbit(values[1]));
+  CHECK(values[2] == std::numeric_limits<double>::denorm_min());
+  CHECK(values[3] == std::numeric_limits<double>::max());
+  CHECK(values[4] == std::numeric_limits<double>::infinity());
+  CHECK(values[5] == -std::numeric_limits<double>::infinity());
+  CHECK(std::isnan(values[6]));
+  CHECK(values[7] == 0.0);
+  CHECK_FALSE(std::signbit(values[7]));
+  CHECK(values[8] == 0.0);
+  CHECK(std::signbit(values[8]));
+}
+
+TEST_CASE("rewrite tokenizer distinguishes decimal overflow from underflow") {
+  const std::string overflow = std::string(310U, '9') + ".0";
+  const RewriteTokens overflow_tokens = tokenize_rewrite(overflow);
+  REQUIRE(overflow_tokens.tokens.size() == 1U);
+  CHECK(overflow_tokens.tokens[0].kind ==
+        RewriteTokenKind::malformed_literal);
+  CHECK(overflow_tokens.tokens[0].literal_error ==
+        RewriteLiteralError::range);
+
+  const std::string_view invalid_specials[] = {
+      "+inf", "-nan", "Inf", "NAN", "nan(payload)"};
+  for (const std::string_view source : invalid_specials) {
+    INFO(std::string(source));
+    const RewriteParseResult parsed = parse_rewrite(source);
+    CHECK_FALSE(parsed.ok);
+  }
+}
+
+TEST_CASE("rewrite parser builds postorder generic calls and contiguous arenas") {
+  const RewriteParseResult parsed = parse_rewrite(
+      "true\nInt()\nadd[1 inc 2 3.0]\ninc inc 5");
+  if (!parsed.ok) {
+    CHECK(parsed.ok);
+    return;
+  }
+
+  REQUIRE(parsed.program.roots.size() == 4U);
+  REQUIRE(parsed.program.nodes.size() == 10U);
+  REQUIRE(parsed.program.calls.size() == 4U);
+  CHECK(parsed.program.roots[0] == 0U);
+  CHECK(parsed.program.roots[1] == 1U);
+  CHECK(parsed.program.roots[2] == 6U);
+  CHECK(parsed.program.roots[3] == 9U);
+
+  const RewriteNode &empty = parsed.program.nodes[1];
+  CHECK(empty.kind == RewriteNodeKind::vector_literal);
+  CHECK(empty.element_type == ScalarType::integer);
+  CHECK(empty.element_count == 0U);
+  CHECK(span_is(empty.span, 6U, 2U, 1U, 11U, 2U, 6U));
+
+  const RewriteNode &outer_bracket = parsed.program.nodes[6];
+  REQUIRE(outer_bracket.kind == RewriteNodeKind::primitive_call);
+  const RewriteCall &add = parsed.program.calls[outer_bracket.call_index];
+  CHECK(add.syntax == RewriteCallSyntax::bracketed);
+  CHECK(add.argument_count == 3U);
+  CHECK(add.first_argument == 1U);
+  CHECK(parsed.program.arguments[1] == 2U);
+  CHECK(parsed.program.arguments[2] == 4U);
+  CHECK(parsed.program.arguments[3] == 5U);
+  CHECK(span_is(add.name_span, 12U, 3U, 1U, 15U, 3U, 4U));
+  CHECK(span_is(add.opening_delimiter_span, 15U, 3U, 4U, 16U, 3U, 5U));
+  CHECK(span_is(add.closing_delimiter_span, 27U, 3U, 16U, 28U, 3U, 17U));
+  CHECK(span_is(add.span, 12U, 3U, 1U, 28U, 3U, 17U));
+  CHECK(span_is(parsed.program.argument_spans[1], 16U, 3U, 5U, 17U, 3U,
+                6U));
+  CHECK(span_is(parsed.program.argument_spans[2], 18U, 3U, 7U, 23U, 3U,
+                12U));
+  CHECK(span_is(parsed.program.argument_spans[3], 24U, 3U, 13U, 27U, 3U,
+                16U));
+
+  const RewriteCall &inner_prefix =
+      parsed.program.calls[parsed.program.nodes[8].call_index];
+  const RewriteCall &outer_prefix =
+      parsed.program.calls[parsed.program.nodes[9].call_index];
+  CHECK(inner_prefix.argument_count == 1U);
+  CHECK(outer_prefix.argument_count == 1U);
+  CHECK(parsed.program.arguments[inner_prefix.first_argument] == 7U);
+  CHECK(parsed.program.arguments[outer_prefix.first_argument] == 8U);
+  CHECK(span_is(outer_prefix.prefix_separator_span, 32U, 4U, 4U, 33U, 4U,
+                5U));
+  CHECK(span_is(outer_prefix.span, 29U, 4U, 1U, 38U, 4U, 10U));
+
+  for (std::size_t node_index = 0U;
+       node_index < parsed.program.nodes.size(); ++node_index) {
+    const RewriteNode &node = parsed.program.nodes[node_index];
+    if (node.kind == RewriteNodeKind::primitive_call) {
+      const RewriteCall &call = parsed.program.calls[node.call_index];
+      CHECK(call.first_argument + call.argument_count <=
+            parsed.program.arguments.size());
+      for (std::size_t argument = 0U; argument < call.argument_count;
+           ++argument) {
+        CHECK(parsed.program.arguments[call.first_argument + argument] <
+              node_index);
+      }
+    }
+  }
+}
+
+TEST_CASE("rewrite parser accepts all normative application and literal forms") {
+  const std::string_view valid_sources[] = {
+      "true",
+      "false",
+      "-9223372036854775808",
+      "-0.0",
+      "nan",
+      "0.0",
+      "2.5",
+      "1e3",
+      "1.25E-2",
+      "1.0e+10",
+      "(1 2 3)",
+      "(1 2 )",
+      "(\n 1\n 2\n)",
+      "(1.0 2.5 3.0)",
+      "(false true false)",
+      "(10)",
+      "Bool()",
+      "Int()",
+      "Double()",
+      "inc[5]",
+      "add[1 2]",
+      "inc[iota[3]]",
+      "add[10 (1 2 3)]",
+      "equals[true (false true)]",
+      "inc 5",
+      "inc inc 5",
+      "inc iota 3",
+      "inc (1 2 3)",
+      "add[1 2.5]",
+      "add[(1 2 3) 10]",
+      "add[Int() 0.5]",
+      "add[]",
+      "add 1",
+      "future[1 2 3 4]",
+      "iota[3]",
+      "iota[0]",
+      "iota[-3]",
+      "inc[iota[3]]",
+      "add[(1 2 3) (10 20 30)]",
+      "add[(1 2 3) 0.5]",
+      "equals[2 (1 2 3 2)]",
+      "not[(false true)]",
+      "equals[Int() 10]",
+      "divide[Int() 0]",
+      "divide[(8 9 10) (2 0 5)]",
+      "add[\n  1\n  inc 2\n]",
+  };
+  for (const std::string_view source : valid_sources) {
+    INFO(std::string(source));
+    const RewriteParseResult parsed = parse_rewrite(source);
+    CHECK(parsed.ok);
+  }
+}
+
+TEST_CASE("rewrite parser retains typed homogeneous vector payloads and spans") {
+  const RewriteParseResult parsed =
+      parse_rewrite("Bool()\nInt()\nDouble()\n(false true)\n(1 2)\n(1.0 -0.0)");
+  if (!parsed.ok) {
+    CHECK(parsed.ok);
+    return;
+  }
+  REQUIRE(parsed.program.roots.size() == 6U);
+  CHECK(parsed.program.nodes[parsed.program.roots[0]].element_type ==
+        ScalarType::boolean);
+  CHECK(parsed.program.nodes[parsed.program.roots[1]].element_type ==
+        ScalarType::integer);
+  CHECK(parsed.program.nodes[parsed.program.roots[2]].element_type ==
+        ScalarType::double_precision);
+  CHECK(parsed.program.boolean_elements.size() == 2U);
+  CHECK(parsed.program.boolean_elements[0] == std::uint8_t{0U});
+  CHECK(parsed.program.boolean_elements[1] == std::uint8_t{1U});
+  CHECK(parsed.program.integer_elements.size() == 2U);
+  CHECK(parsed.program.integer_elements[0] == 1);
+  CHECK(parsed.program.integer_elements[1] == 2);
+  CHECK(parsed.program.double_elements.size() == 2U);
+  CHECK(parsed.program.double_elements[0] == 1.0);
+  CHECK(std::signbit(parsed.program.double_elements[1]));
+  REQUIRE(parsed.program.vector_element_spans.size() == 6U);
+  CHECK(span_is(parsed.program.vector_element_spans[0], 24U, 4U, 2U, 29U,
+                4U, 7U));
+  CHECK(span_is(parsed.program.vector_element_spans[1], 30U, 4U, 8U, 34U,
+                4U, 12U));
+  const RewriteNode &double_vector =
+      parsed.program.nodes[parsed.program.roots[5]];
+  CHECK(span_is(double_vector.span, 42U, 6U, 1U, 52U, 6U, 11U));
+}
+
+TEST_CASE("rewrite parser applies logical-record and line-ending rules") {
+  const std::string_view valid_programs[] = {
+      "", " \t", "\n\n", " \t\r\n\r\n", "true", "true\n",
+      "true\r\n\r\nfalse\r\n", "add[\r\n 1\r\n 2\r\n]\r\n"};
+  for (const std::string_view source : valid_programs) {
+    INFO(std::string(source));
+    CHECK(parse_rewrite(source).ok);
+  }
+
+  const RewriteParseResult crlf = parse_rewrite("true\r\nfalse");
+  REQUIRE(crlf.ok);
+  REQUIRE(crlf.program.roots.size() == 2U);
+  CHECK(position_is(crlf.program.nodes[crlf.program.roots[1]].span.begin, 7U,
+                    2U, 1U));
+
+  const RewriteParseResult bare_cr = parse_rewrite("true\rfalse");
+  CHECK_FALSE(bare_cr.ok);
+  CHECK(bare_cr.diagnostic.error == RewriteParseError::invalid_byte);
+  CHECK(span_is(bare_cr.diagnostic.primary, 5U, 1U, 5U, 6U, 1U, 6U));
+}
+
+TEST_CASE("rewrite parser rejects normative invalid syntax at exact spans") {
+  struct InvalidCase {
+    std::string_view source;
+    RewriteParseError error;
+    std::size_t begin;
+    std::size_t end;
+  };
+  const InvalidCase cases[] = {
+      {"False", RewriteParseError::invalid_byte, 1U, 6U},
+      {"-0", RewriteParseError::malformed_literal, 1U, 3U},
+      {"1.", RewriteParseError::malformed_literal, 1U, 3U},
+      {"(1 2.0)", RewriteParseError::heterogeneous_vector, 4U, 7U},
+      {"()", RewriteParseError::bare_empty_vector, 1U, 3U},
+      {"Vector<Int>()", RewriteParseError::invalid_byte, 1U, 7U},
+      {"((1 2))", RewriteParseError::invalid_vector_element, 2U, 3U},
+      {"(inc 1)", RewriteParseError::invalid_vector_element, 2U, 5U},
+      {"add [1 2]", RewriteParseError::whitespace_before_bracket, 4U, 5U},
+      {"add[1, 2]", RewriteParseError::invalid_byte, 6U, 7U},
+      {"add[1 2", RewriteParseError::missing_delimiter, 8U, 8U},
+      {"add[(1 2] 3]", RewriteParseError::mismatched_delimiter, 9U, 10U},
+      {"add[iota[3]10]", RewriteParseError::missing_separator, 12U, 14U},
+      {"add 1 2", RewriteParseError::trailing_input, 7U, 8U},
+      {"inc 1 inc 2", RewriteParseError::trailing_input, 7U, 10U},
+      {"add[1(2)]", RewriteParseError::missing_separator, 6U, 7U},
+      {"add[1 2)", RewriteParseError::mismatched_delimiter, 8U, 9U},
+      {"(1 2", RewriteParseError::missing_delimiter, 5U, 5U},
+      {"]", RewriteParseError::mismatched_delimiter, 1U, 2U},
+      {"inc5", RewriteParseError::primitive_requires_application, 1U, 5U},
+      {"inc\n5", RewriteParseError::primitive_requires_application, 1U, 4U},
+      {"Int( )", RewriteParseError::invalid_vector_element, 1U, 4U},
+      {"(1, 2)", RewriteParseError::invalid_byte, 3U, 4U},
+      {"true false", RewriteParseError::trailing_input, 6U, 11U},
+      {"1e9999", RewriteParseError::literal_range, 1U, 7U},
+  };
+  for (const InvalidCase &invalid_case : cases) {
+    INFO(std::string(invalid_case.source));
+    const RewriteParseResult parsed = parse_rewrite(invalid_case.source);
+    REQUIRE_FALSE(parsed.ok);
+    CHECK(parsed.diagnostic.error == invalid_case.error);
+    CHECK(parsed.diagnostic.primary.begin.offset == invalid_case.begin);
+    CHECK(parsed.diagnostic.primary.end.offset == invalid_case.end);
+  }
+}
+
+TEST_CASE("rewrite syntax diagnostics retain exact positions and context") {
+  const RewriteParseResult missing_separator =
+      parse_rewrite("add[iota[3]10]");
+  REQUIRE_FALSE(missing_separator.ok);
+  CHECK(missing_separator.diagnostic.error ==
+        RewriteParseError::missing_separator);
+  CHECK(span_is(missing_separator.diagnostic.primary, 12U, 1U, 12U, 14U,
+                1U, 14U));
+  CHECK(span_is(missing_separator.diagnostic.context, 1U, 1U, 1U, 15U,
+                1U, 15U));
+  CHECK(span_is(missing_separator.diagnostic.related, 4U, 1U, 4U, 5U, 1U,
+                5U));
+
+  const RewriteParseResult missing_close =
+      parse_rewrite("\r\nadd[\r\n 1\r\n 2");
+  REQUIRE_FALSE(missing_close.ok);
+  CHECK(missing_close.diagnostic.error == RewriteParseError::missing_delimiter);
+  CHECK(span_is(missing_close.diagnostic.primary, 15U, 4U, 3U, 15U, 4U,
+                3U));
+  CHECK(span_is(missing_close.diagnostic.related, 6U, 2U, 4U, 7U, 2U,
+                5U));
+
+  const RewriteParseResult mismatch = parse_rewrite("add[\r\n(1]");
+  REQUIRE_FALSE(mismatch.ok);
+  CHECK(mismatch.diagnostic.error ==
+        RewriteParseError::mismatched_delimiter);
+  CHECK(span_is(mismatch.diagnostic.primary, 9U, 2U, 3U, 10U, 2U, 4U));
+
+  const RewriteParseResult trailing = parse_rewrite("true\r\nfalse true");
+  REQUIRE_FALSE(trailing.ok);
+  CHECK(trailing.diagnostic.error == RewriteParseError::trailing_input);
+  CHECK(span_is(trailing.diagnostic.primary, 13U, 2U, 7U, 17U, 2U, 11U));
+
+  const RewriteParseResult nested_vector = parse_rewrite("((1 2))");
+  REQUIRE_FALSE(nested_vector.ok);
+  CHECK(nested_vector.diagnostic.error ==
+        RewriteParseError::invalid_vector_element);
+  CHECK(span_is(nested_vector.diagnostic.context, 1U, 1U, 1U, 8U, 1U, 8U));
+}
+
+TEST_CASE("rewrite primitive resolution is separate and uses stable metadata") {
+  RewriteParseResult parsed = parse_rewrite(
+      "inc[1]\nadd[1 2]\nequals[true false]\nnot true\niota[3]");
+  if (!parsed.ok) {
+    CHECK(parsed.ok);
+    return;
+  }
+  REQUIRE(parsed.program.calls.size() == 5U);
+  for (const RewriteCall &call : parsed.program.calls) {
+    CHECK_FALSE(call.primitive.has_value());
+  }
+
+  const RewriteResolutionResult resolved =
+      resolve_rewrite_primitives(parsed.program);
+  CHECK(resolved.ok);
+  if (!resolved.ok) {
+    return;
+  }
+  CHECK(parsed.program.calls[0].primitive == PrimitiveId::inc);
+  CHECK(parsed.program.calls[1].primitive == PrimitiveId::add);
+  CHECK(parsed.program.calls[2].primitive == PrimitiveId::equals);
+  CHECK(parsed.program.calls[3].primitive == PrimitiveId::logical_not);
+  CHECK(parsed.program.calls[4].primitive == PrimitiveId::iota);
+  const PrimitiveDescriptor *add = find_primitive(PrimitiveId::add);
+  REQUIRE(add != nullptr);
+  CHECK(add->lifting == LiftingMode::elementwise);
+  CHECK(add->signatures[0].parameter_count == 2U);
+}
+
+TEST_CASE("rewrite parser preserves explicit arity before metadata validation") {
+  RewriteParseResult parsed =
+      parse_rewrite("add[]\nadd 1\nfuture_name[1 2 3]");
+  if (!parsed.ok) {
+    CHECK(parsed.ok);
+    return;
+  }
+  REQUIRE(parsed.program.calls.size() == 3U);
+  CHECK(parsed.program.calls[0].argument_count == 0U);
+  CHECK(parsed.program.calls[1].argument_count == 1U);
+  CHECK(parsed.program.calls[2].argument_count == 3U);
+  CHECK_FALSE(parsed.program.calls[0].primitive.has_value());
+  CHECK_FALSE(parsed.program.calls[1].primitive.has_value());
+
+  const RewriteResolutionResult resolution =
+      resolve_rewrite_primitives(parsed.program);
+  CHECK_FALSE(resolution.ok);
+  CHECK(resolution.diagnostic.error == RewriteParseError::unknown_primitive);
+  CHECK(span_is(resolution.diagnostic.primary, 13U, 3U, 1U, 24U, 3U, 12U));
+  CHECK_FALSE(parsed.program.calls[0].primitive.has_value());
+  CHECK_FALSE(parsed.program.calls[1].primitive.has_value());
+}
+
+TEST_CASE("rewrite resolution rejects the legacy primitive name at its span") {
+  RewriteParseResult parsed = parse_rewrite("ioata[3]");
+  REQUIRE(parsed.ok);
+  REQUIRE(parsed.program.calls.size() == 1U);
+  const RewriteResolutionResult resolution =
+      resolve_rewrite_primitives(parsed.program);
+  CHECK_FALSE(resolution.ok);
+  CHECK(resolution.diagnostic.error == RewriteParseError::unknown_primitive);
+  CHECK(span_is(resolution.diagnostic.primary, 1U, 1U, 1U, 6U, 1U, 6U));
+}
+
+TEST_CASE("rewrite flat program satisfies all arena and postorder invariants") {
+  const RewriteParseResult parsed = parse_rewrite(
+      "true\nadd[iota[3] inc 4 future[5 6 7]]\n(false true)\nInt()");
+  REQUIRE(parsed.ok);
+  CHECK(rewrite_program_invariants_hold(parsed.program));
+}
+
+TEST_CASE("rewrite parser handles deep valid and invalid input iteratively") {
+  constexpr std::size_t depth = 4000U;
+  std::string prefix;
+  prefix.reserve(depth * 4U + 1U);
+  for (std::size_t index = 0U; index < depth; ++index) {
+    prefix += "inc ";
+  }
+  prefix += '1';
+  const RewriteParseResult prefix_parsed = parse_rewrite(prefix);
+  REQUIRE(prefix_parsed.ok);
+  CHECK(prefix_parsed.program.nodes.size() == depth + 1U);
+  CHECK(rewrite_program_invariants_hold(prefix_parsed.program));
+
+  std::string brackets;
+  brackets.reserve(depth * 5U + 1U);
+  for (std::size_t index = 0U; index < depth; ++index) {
+    brackets += "inc[";
+  }
+  brackets += '1';
+  for (std::size_t index = 0U; index < depth; ++index) {
+    brackets += ']';
+  }
+  const RewriteParseResult bracket_parsed = parse_rewrite(brackets);
+  REQUIRE(bracket_parsed.ok);
+  CHECK(bracket_parsed.program.nodes.size() == depth + 1U);
+  CHECK(rewrite_program_invariants_hold(bracket_parsed.program));
+
+  brackets.pop_back();
+  const RewriteParseResult missing = parse_rewrite(brackets);
+  CHECK_FALSE(missing.ok);
+  CHECK(missing.diagnostic.error == RewriteParseError::missing_delimiter);
+  CHECK(missing.diagnostic.primary.begin.offset == brackets.size() + 1U);
+  CHECK(missing.diagnostic.primary.begin.offset ==
+        missing.diagnostic.primary.end.offset);
+}
+
+TEST_CASE("rewrite parser is deterministic over a fixed adversarial corpus") {
+  constexpr char alphabet[] = {'a', 'Z', '0', '9', '-', '+', '.', '_', '[',
+                               ']', '(', ')', ' ', '\t', '\n', '\r', ',',
+                               ';', '{', '}', '\0', static_cast<char>(0xC3)};
+  std::uint32_t state = 0x31B3A55DU;
+  for (std::size_t case_index = 0U; case_index < 256U; ++case_index) {
+    state = state * 1664525U + 1013904223U;
+    const std::size_t length = static_cast<std::size_t>(state % 96U);
+    std::string source;
+    source.reserve(length);
+    for (std::size_t byte = 0U; byte < length; ++byte) {
+      state = state * 1664525U + 1013904223U;
+      const std::size_t alphabet_index =
+          static_cast<std::size_t>(state) % std::size(alphabet);
+      source.push_back(alphabet[alphabet_index]);
+    }
+    const RewriteParseResult first = parse_rewrite(source);
+    const RewriteParseResult second = parse_rewrite(source);
+    CAPTURE(case_index);
+    CHECK(first.ok == second.ok);
+    CHECK(first.diagnostic.error == second.diagnostic.error);
+    CHECK(first.diagnostic.primary.begin.offset ==
+          second.diagnostic.primary.begin.offset);
+    CHECK(first.diagnostic.primary.end.offset ==
+          second.diagnostic.primary.end.offset);
+    if (first.ok) {
+      CHECK(rewrite_program_invariants_hold(first.program));
+      CHECK(rewrite_program_invariants_hold(second.program));
+    }
+  }
+}
+
+} // namespace
+} // namespace bennu
