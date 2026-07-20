@@ -31,6 +31,7 @@ enum class ErrorKind {
   empty_expression,
   arity_error,
   shape_mismatch,
+  invalid_execution_profile,
   resource_error,
   domain_error,
 };
