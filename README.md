@@ -23,13 +23,21 @@ release installation layout.
 
 The v0.1.0 release targets are:
 
-- Linux x64
+- Ubuntu 24.04 LTS x64
 - Windows 11 x64 or newer
 - macOS arm64
 
 Building Bennu from source requires a C++20 compiler, CMake 3.20 or newer, and
 Ninja. The default test configuration and generated programs also require a
 C11 compiler. Bennu does not bundle, download, or install a C compiler.
+
+The portable Linux archive's support floor is Ubuntu 24.04 LTS on x86-64 with
+glibc 2.39 or newer and a supported Linux 6.8 GA kernel or supported Ubuntu HWE
+kernel. Its enforced ELF symbol ceilings are `GLIBC_2.34` and
+`GLIBCXX_3.4.32`. The executable dynamically resolves `libstdc++.so.6`,
+`libgcc_s.so.1`, `libc.so.6`, and `libm.so.6` from the userland. Other
+distribution/library combinations may work when they provide those interfaces,
+but the release contract is tested on Ubuntu rather than on mixed userlands.
 
 Before `bennu.exe` can launch, Windows users must install the
 [Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe),
@@ -109,7 +117,7 @@ existing output when validation, emission, compilation, or publication fails.
 
 ## v0.1.0 release installation
 
-When v0.1.0 is published, choose the asset matching the target:
+For the published v0.1.0 release, choose the asset matching the target:
 
 - `bennu-v0.1.0-linux-x64.tar.gz`
 - `bennu-v0.1.0-windows-x64.zip`

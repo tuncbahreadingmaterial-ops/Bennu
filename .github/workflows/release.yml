@@ -16,7 +16,118 @@ permissions:
   contents: read
 
 jobs:
-  package:
+  package-linux:
+    name: Package Linux x64 at compatibility floor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container:
+      image: ubuntu:noble-20240423@sha256:562456a05a0dbd62a671c1854868862a4687bf979a96d48ae8e766642cd911e8
+      options: --platform linux/amd64
+
+    steps:
+      - name: Install pinned Ubuntu 24.04 build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          rm -f /etc/apt/sources.list.d/ubuntu.sources
+          cat >/etc/apt/sources.list <<'EOF'
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble main universe
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble-updates main universe
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble-security main universe
+          EOF
+          apt-get -o Acquire::https::Verify-Peer=false update
+          apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends \
+            ca-certificates=20240203
+          rm -rf /var/lib/apt/lists/*
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils=2.42-4ubuntu2 \
+            cmake=3.28.3-1build7 \
+            file=1:5.45-3build1 \
+            g++=4:13.2.0-7ubuntu1 \
+            gcc=4:13.2.0-7ubuntu1 \
+            git=1:2.43.0-1ubuntu7 \
+            gzip=1.12-1ubuntu3 \
+            libc6-dev=2.39-0ubuntu8 \
+            ninja-build=1.11.1-2 \
+            python3=3.12.3-0ubuntu1 \
+            tar=1.35+dfsg-3build1
+          useradd --create-home --uid 1001 bennu-ci
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify pinned build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          test "$(uname -m)" = x86_64
+          g++ --version | sed -n '1p'
+          cmake --version | sed -n '1p'
+          ninja --version
+          python3 --version
+          ldd --version | sed -n '1p'
+          ld --version | sed -n '1p'
+          dpkg-query -W -f='${Package}=${Version}\n' \
+            g++ gcc cmake ninja-build python3 binutils file libc6 libc6-dev libstdc++6
+
+      - name: Verify source provenance
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          main_sha=$(git rev-parse refs/remotes/origin/main)
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            test "$EVENT_SHA" = "$main_sha"
+          elif [[ "$EVENT_NAME" == push && "$EVENT_REF" == refs/tags/v0.1.0 ]]; then
+            test "$(git rev-parse 'refs/tags/v0.1.0^{commit}')" = "$EVENT_SHA"
+            git merge-base --is-ancestor "$EVENT_SHA" refs/remotes/origin/main
+          else
+            echo "unsupported release event: $EVENT_NAME $EVENT_REF" >&2
+            exit 1
+          fi
+          echo "Verified source $EVENT_SHA against live main $main_sha"
+
+      - name: Prepare unprivileged build workspace
+        run: chown -R bennu-ci:bennu-ci "$GITHUB_WORKSPACE"
+
+      - name: Configure
+        run: runuser -u bennu-ci -- cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: runuser -u bennu-ci -- cmake --build build --verbose
+
+      - name: Test
+        run: runuser -u bennu-ci -- ctest --test-dir build --output-on-failure
+
+      - name: Inspect and package Linux compatibility artifact
+        shell: bash
+        run: >-
+          runuser -u bennu-ci -- tools/release/package-linux.sh
+          build/bennu
+          LICENSE
+          bennu-v0.1.0-linux-x64.tar.gz
+
+      - name: Upload verified temporary archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bennu-v0.1.0-linux-x64.tar.gz
+          path: bennu-v0.1.0-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  package-native:
     name: Package ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -24,13 +135,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux x64
-            runner: ubuntu-24.04
-            expected_os: Linux
-            expected_arch: X64
-            platform: linux-x64
-            executable: build/bennu
-            archive: bennu-v0.1.0-linux-x64.tar.gz
           - name: Windows x64
             runner: windows-2022
             expected_os: Windows
@@ -177,10 +281,137 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  verify-linux-floor:
+    name: Verify Linux package on compatibility floor
+    needs:
+      - package-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: ubuntu:noble-20240423@sha256:562456a05a0dbd62a671c1854868862a4687bf979a96d48ae8e766642cd911e8
+      options: --platform linux/amd64
+
+    steps:
+      - name: Install pinned Ubuntu 24.04 runtime tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          rm -f /etc/apt/sources.list.d/ubuntu.sources
+          cat >/etc/apt/sources.list <<'EOF'
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble main universe
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble-updates main universe
+          deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240424T000000Z/ noble-security main universe
+          EOF
+          apt-get -o Acquire::https::Verify-Peer=false update
+          apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends \
+            ca-certificates=20240203
+          rm -rf /var/lib/apt/lists/*
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils=2.42-4ubuntu2 \
+            file=1:5.45-3build1 \
+            gcc=4:13.2.0-7ubuntu1 \
+            git=1:2.43.0-1ubuntu7 \
+            gzip=1.12-1ubuntu3 \
+            libc6-dev=2.39-0ubuntu8 \
+            python3=3.12.3-0ubuntu1 \
+            tar=1.35+dfsg-3build1
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Linux archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bennu-v0.1.0-linux-x64.tar.gz
+          path: release-assets
+
+      - name: Execute extracted package on compatibility floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          test "$(uname -m)" = x86_64
+          ldd --version | sed -n '1p'
+          cc --version | sed -n '1p'
+          dpkg-query -W -f='${Package}=${Version}\n' gcc libc6 libc6-dev
+          tools/release/verify-linux-package.sh \
+            release-assets/bennu-v0.1.0-linux-x64.tar.gz \
+            examples/level1.bennu \
+            LICENSE
+
+      - name: Verify durable Linux release asset
+        shell: bash
+        env:
+          LINUX_ASSET_URL: https://github.com/tuncbahreadingmaterial-ops/Bennu/releases/download/v0.1.0/bennu-v0.1.0-linux-x64.tar.gz
+          LINUX_ASSET_SHA256: 21f4608d1e32f83dcaf6ad121c2bac51181077330fcd8e5af31388e0504b85e6
+        run: |
+          set -euo pipefail
+          python3 - "$LINUX_ASSET_URL" "$LINUX_ASSET_SHA256" durable-linux.tar.gz <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+          import urllib.request
+
+          url, expected_hash, output_name = sys.argv[1:]
+          with urllib.request.urlopen(url) as response:
+              payload = response.read()
+          observed_hash = hashlib.sha256(payload).hexdigest()
+          if observed_hash != expected_hash:
+              raise SystemExit(
+                  f"durable Linux asset SHA256 mismatch: expected {expected_hash}, "
+                  f"observed {observed_hash}"
+              )
+          pathlib.Path(output_name).write_bytes(payload)
+          print(f"Verified durable Linux release asset SHA256: {observed_hash}")
+          PY
+          tools/release/verify-linux-package.sh \
+            durable-linux.tar.gz \
+            examples/level1.bennu \
+            LICENSE
+
+  verify-linux-current:
+    name: Verify Linux package on current userland
+    needs:
+      - package-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download Linux archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bennu-v0.1.0-linux-x64.tar.gz
+          path: release-assets
+
+      - name: Execute extracted package on current userland
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          test "$(uname -m)" = x86_64
+          ldd --version | sed -n '1p'
+          cc --version | sed -n '1p'
+          tools/release/verify-linux-package.sh \
+            release-assets/bennu-v0.1.0-linux-x64.tar.gz \
+            examples/level1.bennu \
+            LICENSE
+
   publish:
     name: Verify and publish v0.1.0
     needs:
-      - package
+      - package-linux
+      - package-native
+      - verify-linux-floor
+      - verify-linux-current
     if: success() && github.event_name == 'push' && github.ref == 'refs/tags/v0.1.0'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

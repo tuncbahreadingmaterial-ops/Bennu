@@ -36,7 +36,8 @@ require_documented_text("${readme}" "README quick start"
   "[Level 1 language and toolchain](doc/level1.md)")
 require_documented_text("${readme}" "README quick start" "`ioata n`")
 require_documented_text("${readme}" "README quick start" "`inc n`")
-require_documented_text("${readme}" "README quick start" "Linux x64")
+require_documented_text("${readme}" "README quick start"
+  "Ubuntu 24.04 LTS x64")
 require_documented_text("${readme}" "README quick start"
   "Windows 11 x64 or newer")
 require_documented_text("${readme}" "README quick start" "macOS arm64")
