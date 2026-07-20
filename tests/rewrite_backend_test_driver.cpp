@@ -23,8 +23,8 @@ bool read_file(const char *path, std::string &bytes) {
   }
 }
 
-bool write_file(const char *path, std::string_view bytes) {
-  std::FILE *file = std::fopen(path, "wb");
+bool write_file(const char *path, std::string_view bytes, const char *mode) {
+  std::FILE *file = std::fopen(path, mode);
   if (file == nullptr) {
     return false;
   }
@@ -93,7 +93,7 @@ int main(int argument_count, char **arguments) {
                                     evaluated.error.size(), stderr));
       return 4;
     }
-    return write_file(arguments[3], evaluated.output) ? 0 : 5;
+    return write_file(arguments[3], evaluated.output, "w") ? 0 : 5;
   }
   if (mode.find("build") == 0U) {
     if (argument_count != 5) {
@@ -119,5 +119,5 @@ int main(int argument_count, char **arguments) {
         std::fwrite(emitted.error.data(), 1U, emitted.error.size(), stderr));
     return 4;
   }
-  return write_file(arguments[3], emitted.source) ? 0 : 5;
+  return write_file(arguments[3], emitted.source, "wb") ? 0 : 5;
 }
