@@ -231,6 +231,25 @@ if(BUILD_TESTING)
     find_program(BENNU_BASH_EXECUTABLE bash REQUIRED)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
+      NAME release.linux_compatibility
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_compatibility_test.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/verify-linux-elf.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
+        "$<TARGET_FILE:bennu>"
+    )
+    add_test(
+      NAME release.linux_package
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+        "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        "-DBENNU_BASH_EXECUTABLE=${BENNU_BASH_EXECUTABLE}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_package_contract.cmake"
+    )
+    add_test(
       NAME release.publication_state_machine
       COMMAND
         "${Python3_EXECUTABLE}"

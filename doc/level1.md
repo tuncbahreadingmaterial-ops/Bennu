@@ -7,9 +7,18 @@ runner, deterministic C11 emitter, and external-compiler native build.
 
 ## Supported targets and prerequisites
 
-The supported v0.1.0 release targets are Linux x64, Windows 11 x64 or newer,
-and macOS arm64. Other systems may build from source but are not Level 1
-release targets.
+The supported v0.1.0 release targets are Ubuntu 24.04 LTS x64,
+Windows 11 x64 or newer, and macOS arm64. Other systems may build from source
+but are not Level 1 release targets.
+
+The portable Linux archive's support floor is the Ubuntu 24.04 LTS x86-64
+userland: glibc 2.39 or newer and a supported Linux 6.8 GA kernel or supported
+Ubuntu HWE kernel. Automated ELF inspection limits the executable to
+`GLIBC_2.34` and `GLIBCXX_3.4.32` symbol requirements and exactly the runtime
+library graph `libstdc++.so.6`, `libgcc_s.so.1`, `libc.so.6`, and `libm.so.6`.
+Those ceilings are lower than the versions supplied by Ubuntu 24.04, but the
+tested support promise is distribution-level; arbitrary older or mixed
+userlands are not release targets.
 
 A source build requires:
 
@@ -236,8 +245,7 @@ Anka program beyond this documented surface is a Bennu Level 1 program.
 
 ## v0.1.0 release assets and layout
 
-Issue #10 will publish these exact target archives after the release pipeline is
-independently accepted and the v0.1.0 release gate is authorized:
+The published v0.1.0 release contains these exact target archives:
 
 - `bennu-v0.1.0-linux-x64.tar.gz`
 - `bennu-v0.1.0-windows-x64.zip`
