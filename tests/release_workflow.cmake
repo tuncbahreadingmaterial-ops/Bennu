@@ -170,9 +170,7 @@ foreach(document IN ITEMS "${BENNU_SOURCE_DIR}/README.md"
       "libstdc++.so.6"
       "Linux 6.8 GA kernel"
       "Windows 11 x64 or newer"
-      "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
-      "14.51.36231.0 or newer"
-      "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+      "Microsoft Visual C++ 2017-2026 Redistributable (x64)"
       "only `bennu build` requires an external C11 compiler")
     string(FIND "${document_text}" "${required_document_text}" found_at)
     if(found_at EQUAL -1)
