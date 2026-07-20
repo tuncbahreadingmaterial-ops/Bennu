@@ -361,18 +361,6 @@ ValueResult apply_ioata(const Value &argument, SourceLocation location,
         "program ioata results exceed the Level 1 element limit");
     error.primitive = PrimitiveErrorContext{"ioata"};
     error.argument_position = 1;
-    const std::size_t requested =
-        static_cast<std::size_t>(argument.scalar.integer);
-    error.resource = ResourceErrorContext{
-        ResourceErrorReason::profile_limit,
-        requested,
-        std::nullopt,
-        "bootstrap-level1",
-        std::nullopt,
-        static_cast<std::size_t>(ioata_element_limit),
-        static_cast<std::size_t>(ioata_element_limit - remaining_elements),
-        requested,
-    };
     return ValueResult{
         false,
         make_int_value(0),
@@ -421,8 +409,8 @@ ProgramResult evaluate_program(const Program &program) {
     if (!result.ok) {
       return ProgramResult{false, {}, std::move(result.error)};
     }
-    remaining_ioata_elements -=
-        static_cast<std::int64_t>(value_length(result.value));
+    remaining_ioata_elements -= static_cast<std::int64_t>(
+        result.value.vector.integers.size());
     node_values.push_back(std::move(result.value));
   }
 
@@ -518,35 +506,35 @@ TEST_CASE("Level 1 primitives and value formatting remain exact") {
   CHECK(incremented.value.container == ContainerKind::scalar);
   CHECK(incremented.value.scalar.type == ScalarType::integer);
   CHECK(incremented.value.scalar.integer == std::int64_t{6});
-  CHECK(format_value(incremented.value) == "6");
+  CHECK(format_value(incremented.value).formatted == "6");
 
   REQUIRE(array.ok);
   CHECK(array.value.container == ContainerKind::vector);
   CHECK(array.value.vector.element_type == ScalarType::integer);
   CHECK(array.value.vector.integers ==
         std::vector<std::int64_t>{1, 2, 3, 4, 5});
-  CHECK(format_value(array.value) == "(1 2 3 4 5)");
+  CHECK(format_value(array.value).formatted == "(1 2 3 4 5)");
 
   REQUIRE(zero.ok);
-  CHECK(format_value(zero.value) == "()");
+  CHECK(format_value(zero.value).formatted == "()");
   REQUIRE(negative.ok);
-  CHECK(format_value(negative.value) == "()");
+  CHECK(format_value(negative.value).formatted == "()");
 }
 
 TEST_CASE("program evaluation preserves source order and accepted whitespace") {
   const ProgramResult ordered = evaluate_source("ioata 5\ninc 5");
   REQUIRE(ordered.ok);
   REQUIRE(ordered.values.size() == 2);
-  CHECK(format_value(ordered.values[0]) == "(1 2 3 4 5)");
-  CHECK(format_value(ordered.values[1]) == "6");
+  CHECK(format_value(ordered.values[0]).formatted == "(1 2 3 4 5)");
+  CHECK(format_value(ordered.values[1]).formatted == "6");
 
   const ProgramResult mixed =
       evaluate_source(" \tioata 2 \r\n\r\n\tinc 5\t\n\n-1");
   REQUIRE(mixed.ok);
   REQUIRE(mixed.values.size() == 3);
-  CHECK(format_value(mixed.values[0]) == "(1 2)");
-  CHECK(format_value(mixed.values[1]) == "6");
-  CHECK(format_value(mixed.values[2]) == "-1");
+  CHECK(format_value(mixed.values[0]).formatted == "(1 2)");
+  CHECK(format_value(mixed.values[1]).formatted == "6");
+  CHECK(format_value(mixed.values[2]).formatted == "-1");
 
   const ProgramResult empty = evaluate_source(" \t\r\n\n");
   CHECK(empty.ok);
@@ -597,7 +585,7 @@ TEST_CASE("internal flat evaluator handles nested prefix calls") {
   const ProgramResult evaluated = evaluate_program(parsed.program);
   REQUIRE(evaluated.ok);
   REQUIRE(evaluated.values.size() == 1);
-  CHECK(format_value(evaluated.values[0]) == "(1 2 3 4 5 6)");
+  CHECK(format_value(evaluated.values[0]).formatted == "(1 2 3 4 5 6)");
 }
 
 TEST_CASE("internal primitive kernels preserve semantic errors") {
@@ -651,12 +639,9 @@ TEST_CASE("ioata enforces one pre-allocation retained-element budget") {
   CHECK(rejected.error.location.column == 7);
   REQUIRE(rejected.error.primitive.has_value());
   CHECK(rejected.error.primitive->name == "ioata");
-  REQUIRE(rejected.error.resource.has_value());
-  CHECK(rejected.error.resource->reason == ResourceErrorReason::profile_limit);
-  REQUIRE(rejected.error.resource->requested_elements.has_value());
-  CHECK(*rejected.error.resource->requested_elements ==
-        static_cast<std::size_t>(ioata_element_limit + 1));
-  CHECK(rejected.error.resource->profile == "bootstrap-level1");
+  // The retained-element cap is legacy Level 1 behavior, not one of the
+  // rewrite execution profile's byte or work limits.
+  CHECK_FALSE(rejected.error.resource.has_value());
 
   const ValueResult allowed =
       apply_ioata(boundary, location, ioata_element_limit);

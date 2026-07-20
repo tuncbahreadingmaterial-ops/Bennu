@@ -72,6 +72,19 @@ struct ScalarProjectionResult {
   ValueAccessError error;
 };
 
+enum class ValueFormatError {
+  none,
+  invalid_value,
+  conversion_failure,
+};
+
+struct ValueFormattingResult {
+  bool ok;
+  std::string formatted;
+  ValueInvariant invariant;
+  ValueFormatError error;
+};
+
 Value make_bool_value(bool value);
 Value make_int_value(std::int64_t value);
 Value make_double_value(double value);
@@ -79,12 +92,13 @@ ValueConstructionResult make_bool_vector(std::vector<std::uint8_t> values);
 ValueConstructionResult make_int_vector(std::vector<std::int64_t> values);
 ValueConstructionResult make_double_vector(std::vector<double> values);
 ValueValidationResult validate_value(const Value &value);
-ScalarType value_element_type(const Value &value);
-std::size_t value_rank(const Value &value);
-std::size_t value_length(const Value &value);
+ValueValidationResult value_element_type(const Value &value,
+                                         ScalarType &element_type);
+ValueValidationResult value_rank(const Value &value, std::size_t &rank);
+ValueValidationResult value_length(const Value &value, std::size_t &length);
 ScalarProjectionResult project_scalar(const Value &value, std::size_t index);
 void destroy_value(Value &value);
-std::string format_value(const Value &value);
+ValueFormattingResult format_value(const Value &value);
 
 } // namespace bennu
 

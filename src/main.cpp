@@ -77,6 +77,18 @@ int report_stdout_failure() {
   return 1;
 }
 
+bool format_output_value(const bennu::Value &value, std::string &output) {
+  bennu::ValueFormattingResult formatted = bennu::format_value(value);
+  if (!formatted.ok) {
+    std::cerr << "error: evaluator produced an invalid value\n";
+    return false;
+  }
+  output = ">>";
+  output += formatted.formatted;
+  output += '\n';
+  return true;
+}
+
 bool is_blank_line(std::string_view line) {
   for (const char character : line) {
     if (character != ' ' && character != '\t') {
@@ -198,7 +210,10 @@ int run_file(std::string_view path) {
   }
 
   for (const bennu::Value &value : result.values) {
-    const std::string output = ">>" + bennu::format_value(value) + '\n';
+    std::string output;
+    if (!format_output_value(value, output)) {
+      return 1;
+    }
     if (!bennu_cli::write_stdout(std::cout, output)) {
       return report_stdout_failure();
     }
@@ -389,7 +404,10 @@ int run_repl() {
       write_diagnostic("<repl>", result.error);
       continue;
     }
-    const std::string output = ">>" + bennu::format_value(result.value) + '\n';
+    std::string output;
+    if (!format_output_value(result.value, output)) {
+      return 1;
+    }
     if (!bennu_cli::write_stdout(std::cout, output)) {
       return report_stdout_failure();
     }
