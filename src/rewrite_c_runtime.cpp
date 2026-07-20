@@ -312,7 +312,8 @@ static double bennu_add_double(double left, double right) {
   volatile double result = volatile_left + volatile_right;
   return bennu_normalize_double(result);
 }
-
+)bennu_c";
+  source += R"bennu_c(
 static BennuType bennu_result_type(BennuImplementation implementation) {
   if (implementation == BENNU_IMPL_EQUALS_BOOL ||
       implementation == BENNU_IMPL_EQUALS_INT ||
