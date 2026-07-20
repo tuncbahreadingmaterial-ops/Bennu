@@ -79,7 +79,15 @@ def timed_run(command: list[str], peak_memory: bool) -> tuple[subprocess.Complet
         descriptor, peak_name = tempfile.mkstemp(prefix="bennu-issue33-peak-")
         os.close(descriptor)
         peak_file = Path(peak_name)
-        invoked = ["/usr/bin/time", "-f", "%M", "-o", str(peak_file), *command]
+        invoked = [
+            "/usr/bin/time",
+            "-q",
+            "-f",
+            "%M",
+            "-o",
+            str(peak_file),
+            *command,
+        ]
     started = time.perf_counter_ns()
     completed = run(invoked)
     elapsed = time.perf_counter_ns() - started
@@ -104,6 +112,7 @@ def peak_memory_supported() -> bool:
         completed = run(
             [
                 "/usr/bin/time",
+                "-q",
                 "-f",
                 "%M",
                 "-o",
@@ -292,7 +301,7 @@ def base_metadata(args: argparse.Namespace, peak_memory: bool) -> dict[str, str]
         "cxx_compiler_id": args.cxx_compiler_id,
         "cxx_compiler_version": args.cxx_compiler_version,
         "cxx_flags": args.cxx_flags,
-        "peak_memory_method": "/usr/bin/time -f %M (maximum resident KiB)"
+        "peak_memory_method": "/usr/bin/time -q -f %M (maximum resident KiB)"
         if peak_memory
         else "unsupported on this host; CSV fields are empty",
         "aggregation": "median of each numeric metric over recorded samples; warmup excluded",

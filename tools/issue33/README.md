@@ -42,7 +42,7 @@ The opt-in targets require a Unix host and a GNU- or Clang-compatible compiler
 driver; unsupported hosts fail during opt-in configuration while ordinary
 default builds remain unaffected. The driver refuses to record a non-Release
 build. It uses Python's monotonic nanosecond timer around processes. On Linux
-with `/usr/bin/time`, maximum resident memory is captured consistently as KiB
+with `/usr/bin/time -q`, maximum resident memory is captured consistently as KiB
 for emission, C compilation, and execution. On other supported Unix hosts the
 three peak-memory fields are empty and `metadata.json` records that memory
 measurement is unsupported. The smoke verifier itself remains independent of
