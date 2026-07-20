@@ -22,12 +22,15 @@ Bennu does not bundle, download, or install a C compiler. Install a platform C
 toolchain separately and ensure its driver is available by name on `PATH`, or
 pass its executable path explicitly.
 
-The Windows archive statically links the Microsoft C and C++ runtime and does
-not require a separately installed Visual C++ Redistributable. Release
-packaging rejects `MSVCP*.dll` and `VCRUNTIME*.dll` imports and any non-system
-PE dependency absent from the archive. On all targets,
+Before `bennu.exe` can launch, install the
+[Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe),
+version 14.51.36231.0 or newer. The installed runtime must be at least as recent
+as the MSVC build tools under Microsoft's
+[official compatibility rule](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+Release packaging requires exactly `MSVCP140.dll`, `VCRUNTIME140.dll`, and
+`VCRUNTIME140_1.dll` plus Windows system or API-set imports. On all targets,
 only `bennu build` requires an external C11 compiler. `--help`, `repl`, `run`,
-and `emit-c` do not.
+and `emit-c` do not require one.
 
 From a clean checkout:
 
@@ -256,7 +259,7 @@ LICENSE
 
 Download the archive matching the operating system and CPU architecture,
 extract both files into a directory of your choice, and run `bennu` or
-`bennu.exe` from that directory. The Windows executable is self-contained with
-respect to the Microsoft C and C++ runtime. On every target, only `bennu build`
-requires an external C11 compiler; REPL, run, and emit-C neither require nor
-install one.
+`bennu.exe` from that directory. Install the documented x64 Visual C++
+Redistributable before launching the Windows executable. On every target, only
+`bennu build` requires an external C11 compiler; REPL, run, and emit-C neither
+require nor install one.

@@ -40,11 +40,11 @@ set(cmake_configuration "${BENNU_SOURCE_DIR}/CMakeLists.txt")
 file(READ "${cmake_configuration}" cmake_text)
 foreach(required_cmake_text IN ITEMS
     "CMAKE_MSVC_RUNTIME_LIBRARY"
-    "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
   string(FIND "${cmake_text}" "${required_cmake_text}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR
-      "CMake configuration is missing the static MSVC runtime policy: ${required_cmake_text}")
+      "CMake configuration is missing the dynamic MSVC runtime policy: ${required_cmake_text}")
   endif()
 endforeach()
 
@@ -64,6 +64,9 @@ foreach(required_text IN ITEMS
     "dumpbin.exe"
     "/DEPENDENTS"
     "Assert-WindowsRuntimeDependencies"
+    "MSVCP140.dll"
+    "VCRUNTIME140.dll"
+    "VCRUNTIME140_1.dll"
     "verify-clean-windows-package.ps1")
   string(FIND "${package_text}" "${required_text}" found_at)
   if(found_at EQUAL -1)
@@ -86,7 +89,9 @@ foreach(required_clean_windows_text IN ITEMS
     "build"
     "Remove-Item Env:CC"
     "no C compiler found by platform fallback"
-    "System32")
+    "System32"
+    "HKLM:\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64"
+    "14.51.36231.0")
   string(FIND "${clean_windows_text}" "${required_clean_windows_text}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR
@@ -99,7 +104,9 @@ foreach(document IN ITEMS "${BENNU_SOURCE_DIR}/README.md"
   file(READ "${document}" document_text)
   foreach(required_document_text IN ITEMS
       "Windows 11 x64 or newer"
-      "statically links the Microsoft C and C++ runtime"
+      "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+      "14.51.36231.0 or newer"
+      "https://aka.ms/vs/17/release/vc_redist.x64.exe"
       "only `bennu build` requires an external C11 compiler")
     string(FIND "${document_text}" "${required_document_text}" found_at)
     if(found_at EQUAL -1)
@@ -179,7 +186,7 @@ string(FIND "${diary_text}" "Address draft Releases by creation ID until publica
 if(draft_diary_entry_at EQUAL -1)
   message(FATAL_ERROR "decision diary is missing the Issue #20 draft endpoint decision")
 endif()
-string(FIND "${diary_text}" "Statically link the Windows release runtime" runtime_diary_entry_at)
+string(FIND "${diary_text}" "Dynamically link the Windows release runtime" runtime_diary_entry_at)
 if(runtime_diary_entry_at EQUAL -1)
   message(FATAL_ERROR "decision diary is missing the Issue #16 Windows runtime policy")
 endif()

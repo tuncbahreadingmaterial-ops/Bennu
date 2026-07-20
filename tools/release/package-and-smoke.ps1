@@ -102,11 +102,16 @@ function Assert-WindowsRuntimeDependencies {
     throw "dumpbin reported no PE dependencies for $Path"
   }
 
-  $forbidden = @($dependencies | Where-Object {
-    $_ -match '^(?i:MSVCP|VCRUNTIME).*\.dll$'
+  $expectedRuntime = @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll")
+  $missingRuntime = @($expectedRuntime | Where-Object {
+    $dependencies -notcontains $_
   })
-  if ($forbidden.Count -ne 0) {
-    throw "Packaged PE depends on undeployed Microsoft runtime DLLs: $($forbidden -join ', ')"
+  $unexpectedRuntime = @($dependencies | Where-Object {
+    $_ -match '^(?i:MSVCP|VCRUNTIME).*\.dll$' -and
+      $expectedRuntime -notcontains $_
+  })
+  if ($missingRuntime.Count -ne 0 -or $unexpectedRuntime.Count -ne 0) {
+    throw "Packaged PE runtime dependency policy mismatch. Missing: $($missingRuntime -join ', '); unexpected: $($unexpectedRuntime -join ', ')"
   }
 
   $undocumented = @($dependencies | Where-Object {

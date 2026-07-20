@@ -76,6 +76,8 @@ $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) "bennu-clean-$([guid]::N
 $sourcePath = Join-Path $workRoot "level1.bennu"
 $emittedPath = Join-Path $workRoot "level1.c"
 $nativePath = Join-Path $workRoot "level1.exe"
+$runtimeRegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+$minimumRuntimeVersion = [Version]"14.51.36231.0"
 $expectedOutput = ">>(1 2 3 4 5)`n>>6`n"
 $expectedHelp = @"
 Usage: bennu <command> [arguments]
@@ -96,6 +98,18 @@ New-Item -ItemType Directory -Path $workRoot | Out-Null
   [System.Text.UTF8Encoding]::new($false))
 
 try {
+  if (-not (Test-Path -LiteralPath $runtimeRegistryPath)) {
+    throw "Microsoft Visual C++ 2015-2022 Redistributable (x64) is not installed"
+  }
+  $runtime = Get-ItemProperty -LiteralPath $runtimeRegistryPath
+  if ($runtime.Installed -ne 1 -or -not $runtime.Version) {
+    throw "Microsoft Visual C++ 2015-2022 Redistributable (x64) is not installed"
+  }
+  $runtimeVersion = [Version]$runtime.Version.TrimStart("v")
+  if ($runtimeVersion -lt $minimumRuntimeVersion) {
+    throw "Microsoft Visual C++ runtime $runtimeVersion is older than required $minimumRuntimeVersion"
+  }
+
   $env:PATH = @(
     (Join-Path $env:SystemRoot "System32")
     $env:SystemRoot
@@ -143,6 +157,7 @@ try {
   Write-Host "Verified clean Windows package journeys"
   Write-Host "Windows version: $([Environment]::OSVersion.Version)"
   Write-Host "Architecture: $env:PROCESSOR_ARCHITECTURE"
+  Write-Host "Microsoft Visual C++ runtime: $runtimeVersion"
   Write-Host "Compiler on isolated PATH: absent"
 } finally {
   $env:PATH = $savedPath
