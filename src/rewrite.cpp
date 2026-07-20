@@ -5,6 +5,7 @@
 
 #ifndef DOCTEST_CONFIG_DISABLE
 #include <bit>
+#include <ostream>
 #endif
 #include <charconv>
 #include <cmath>
