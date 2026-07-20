@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <limits>
+#include <ostream>
 #include <utility>
 
 namespace bennu {
