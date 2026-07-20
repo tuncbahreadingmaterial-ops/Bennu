@@ -3,8 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
 #include <string>
-#include <vector>
 
 namespace bennu {
 
@@ -28,9 +29,12 @@ struct ScalarValue {
 
 struct VectorValue {
   ScalarType element_type;
-  std::vector<std::uint8_t> booleans;
-  std::vector<std::int64_t> integers;
-  std::vector<double> doubles;
+  std::unique_ptr<std::uint8_t, decltype(&std::free)> booleans;
+  std::size_t boolean_count;
+  std::unique_ptr<std::int64_t, decltype(&std::free)> integers;
+  std::size_t integer_count;
+  std::unique_ptr<double, decltype(&std::free)> doubles;
+  std::size_t double_count;
 };
 
 struct Value {
@@ -51,12 +55,6 @@ enum class ValueInvariant {
 
 struct ValueValidationResult {
   bool ok;
-  ValueInvariant invariant;
-};
-
-struct ValueConstructionResult {
-  bool ok;
-  Value value;
   ValueInvariant invariant;
 };
 
@@ -88,9 +86,6 @@ struct ValueFormattingResult {
 Value make_bool_value(bool value);
 Value make_int_value(std::int64_t value);
 Value make_double_value(double value);
-ValueConstructionResult make_bool_vector(std::vector<std::uint8_t> values);
-ValueConstructionResult make_int_vector(std::vector<std::int64_t> values);
-ValueConstructionResult make_double_vector(std::vector<double> values);
 ValueValidationResult validate_value(const Value &value);
 ValueValidationResult value_element_type(const Value &value,
                                          ScalarType &element_type);

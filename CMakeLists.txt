@@ -17,6 +17,7 @@ set(bennu_implementation_sources
   src/evaluator.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
+  src/resources.cpp
   src/value.cpp
 )
 

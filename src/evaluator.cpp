@@ -1,4 +1,5 @@
 #include "bennu/evaluator.hpp"
+#include "bennu/resources.hpp"
 
 #include "doctest/doctest.h"
 
@@ -12,7 +13,7 @@ namespace bennu {
 
 namespace {
 
-constexpr std::int64_t ioata_element_limit = 1'000'000;
+constexpr std::size_t bootstrap_vector_bytes = 8'000'000;
 
 enum class TokenKind {
   integer,
@@ -342,7 +343,7 @@ ValueResult apply_inc(const Value &argument, SourceLocation location) {
 }
 
 ValueResult apply_ioata(const Value &argument, SourceLocation location,
-                        std::int64_t remaining_elements) {
+                        EvaluationResources &resources) {
   if (argument.container != ContainerKind::scalar ||
       argument.scalar.type != ScalarType::integer) {
     Error error = make_error(ErrorKind::type_mismatch, location,
@@ -355,30 +356,37 @@ ValueResult apply_ioata(const Value &argument, SourceLocation location,
         std::move(error),
     };
   }
-  if (argument.scalar.integer > remaining_elements) {
-    Error error = make_error(
-        ErrorKind::allocation_limit_exceeded, location,
-        "program ioata results exceed the Level 1 element limit");
-    error.primitive = PrimitiveErrorContext{"ioata"};
-    error.argument_position = 1;
-    return ValueResult{
-        false,
-        make_int_value(0),
-        std::move(error),
-    };
-  }
-
-  std::vector<std::int64_t> elements;
-  if (argument.scalar.integer > 0) {
-    elements.reserve(static_cast<std::size_t>(argument.scalar.integer));
-    for (std::int64_t value = 1; value <= argument.scalar.integer; ++value) {
-      elements.push_back(value);
+  const std::uint64_t requested_element_count =
+      argument.scalar.integer > 0
+          ? static_cast<std::uint64_t>(argument.scalar.integer)
+          : 0;
+  VectorAllocationResult allocated =
+      allocate_vector(resources, ScalarType::integer, requested_element_count,
+                      0, location, "ioata");
+  if (!allocated.ok) {
+    if (allocated.error.resource.has_value() &&
+        (allocated.error.resource->reason ==
+             ResourceErrorReason::profile_limit ||
+         allocated.error.resource->reason == ResourceErrorReason::size_overflow)) {
+      Error error = make_error(
+          ErrorKind::allocation_limit_exceeded, location,
+          "program ioata results exceed the Level 1 element limit");
+      error.primitive = PrimitiveErrorContext{"ioata"};
+      error.argument_position = 1;
+      return ValueResult{false, make_int_value(0), std::move(error)};
     }
+    allocated.error.message = "unable to allocate complete vector payload";
+    allocated.error.argument_position = 1;
+    return ValueResult{false, make_int_value(0), std::move(allocated.error)};
   }
-  ValueConstructionResult constructed = make_int_vector(std::move(elements));
+  const std::size_t element_count = allocated.value.vector.integer_count;
+  for (std::size_t index = 0; index < element_count; ++index) {
+    allocated.value.vector.integers.get()[index] =
+        static_cast<std::int64_t>(index) + 1;
+  }
   return ValueResult{
       true,
-      std::move(constructed.value),
+      std::move(allocated.value),
       make_error(ErrorKind::none, SourceLocation{0, 1, 1}, ""),
   };
 }
@@ -386,7 +394,10 @@ ValueResult apply_ioata(const Value &argument, SourceLocation location,
 ProgramResult evaluate_program(const Program &program) {
   std::vector<Value> node_values;
   node_values.reserve(program.nodes.size());
-  std::int64_t remaining_ioata_elements = ioata_element_limit;
+  EvaluationResources resources = make_bounded_resources(
+      ResourceLimits{bootstrap_vector_bytes, bootstrap_vector_bytes,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt});
   for (std::size_t index = 0; index < program.nodes.size(); ++index) {
     const ExpressionNode &node = program.nodes[index];
     if (node.kind == ExpressionKind::integer) {
@@ -404,13 +415,10 @@ ProgramResult evaluate_program(const Program &program) {
       continue;
     }
 
-    ValueResult result =
-        apply_ioata(argument, node.location, remaining_ioata_elements);
+    ValueResult result = apply_ioata(argument, node.location, resources);
     if (!result.ok) {
       return ProgramResult{false, {}, std::move(result.error)};
     }
-    remaining_ioata_elements -= static_cast<std::int64_t>(
-        result.value.vector.integers.size());
     node_values.push_back(std::move(result.value));
   }
 
@@ -511,8 +519,11 @@ TEST_CASE("Level 1 primitives and value formatting remain exact") {
   REQUIRE(array.ok);
   CHECK(array.value.container == ContainerKind::vector);
   CHECK(array.value.vector.element_type == ScalarType::integer);
-  CHECK(array.value.vector.integers ==
-        std::vector<std::int64_t>{1, 2, 3, 4, 5});
+  REQUIRE(array.value.vector.integer_count == 5);
+  for (std::size_t index = 0; index < 5; ++index) {
+    CHECK(array.value.vector.integers.get()[index] ==
+          static_cast<std::int64_t>(index) + 1);
+  }
   CHECK(format_value(array.value).formatted == "(1 2 3 4 5)");
 
   REQUIRE(zero.ok);
@@ -592,12 +603,21 @@ TEST_CASE("internal primitive kernels preserve semantic errors") {
   const SourceLocation location{17, 3, 4};
   const Value maximum =
       make_int_value(std::numeric_limits<std::int64_t>::max());
-  const Value array = make_int_vector({1, 2, 3}).value;
+  EvaluationResources construction_resources =
+      make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
+  VectorAllocationResult array_result = allocate_vector(
+      construction_resources, ScalarType::integer, 3, 0, location,
+      "test-vector");
+  REQUIRE(array_result.ok);
+  Value array = std::move(array_result.value);
 
   const ValueResult overflow = apply_inc(maximum, location);
   const ValueResult wrong_inc_type = apply_inc(array, location);
-  const ValueResult wrong_ioata_type =
-      apply_ioata(array, location, ioata_element_limit);
+  EvaluationResources resources = make_bounded_resources(
+      ResourceLimits{bootstrap_vector_bytes, bootstrap_vector_bytes,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt});
+  const ValueResult wrong_ioata_type = apply_ioata(array, location, resources);
 
   CHECK_FALSE(overflow.ok);
   CHECK(overflow.error.kind == ErrorKind::integer_overflow);
@@ -626,11 +646,15 @@ TEST_CASE("internal primitive kernels preserve semantic errors") {
 
 TEST_CASE("ioata enforces one pre-allocation retained-element budget") {
   const SourceLocation location{6, 1, 7};
-  const Value request = make_int_value(ioata_element_limit + 1);
-  const Value boundary = make_int_value(ioata_element_limit);
+  constexpr std::int64_t bootstrap_element_count = 1'000'000;
+  const Value request = make_int_value(bootstrap_element_count + 1);
+  const Value boundary = make_int_value(bootstrap_element_count);
+  EvaluationResources request_resources = make_bounded_resources(
+      ResourceLimits{bootstrap_vector_bytes, bootstrap_vector_bytes,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt});
 
-  const ValueResult rejected =
-      apply_ioata(request, location, ioata_element_limit);
+  const ValueResult rejected = apply_ioata(request, location, request_resources);
   CHECK_FALSE(rejected.ok);
   CHECK(rejected.error.kind == ErrorKind::allocation_limit_exceeded);
   CHECK(rejected.value.container == ContainerKind::scalar);
@@ -643,15 +667,37 @@ TEST_CASE("ioata enforces one pre-allocation retained-element budget") {
   // rewrite execution profile's byte or work limits.
   CHECK_FALSE(rejected.error.resource.has_value());
 
-  const ValueResult allowed =
-      apply_ioata(boundary, location, ioata_element_limit);
-  REQUIRE(allowed.ok);
-  REQUIRE(allowed.value.vector.integers.size() ==
-          static_cast<std::size_t>(ioata_element_limit));
-  CHECK(allowed.value.vector.integers.back() == ioata_element_limit);
+  EvaluationResources unrepresentable_resources = make_bounded_resources(
+      ResourceLimits{bootstrap_vector_bytes, bootstrap_vector_bytes,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt});
+  const ValueResult unrepresentable = apply_ioata(
+      make_int_value(std::numeric_limits<std::int64_t>::max()), location,
+      unrepresentable_resources);
+  CHECK_FALSE(unrepresentable.ok);
+  CHECK(unrepresentable.error.kind == ErrorKind::allocation_limit_exceeded);
+  CHECK_FALSE(unrepresentable.error.resource.has_value());
+  CHECK(unrepresentable_resources.live_evaluation_bytes == 0);
+  CHECK(unrepresentable_resources.work_units == 0);
+  CHECK(unrepresentable_resources.reservation_ordinal == 0);
 
-  const ValueResult no_remaining =
-      apply_ioata(make_int_value(1), location, 0);
+  EvaluationResources boundary_resources = make_bounded_resources(
+      ResourceLimits{bootstrap_vector_bytes, bootstrap_vector_bytes,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt});
+  const ValueResult allowed =
+      apply_ioata(boundary, location, boundary_resources);
+  REQUIRE(allowed.ok);
+  REQUIRE(allowed.value.vector.integer_count ==
+          static_cast<std::size_t>(bootstrap_element_count));
+  CHECK(allowed.value.vector.integers.get()[bootstrap_element_count - 1] ==
+        bootstrap_element_count);
+
+  EvaluationResources no_remaining_resources = make_bounded_resources(
+      ResourceLimits{0, 0, std::nullopt},
+      AllocationFailureInjection{std::nullopt});
+  const ValueResult no_remaining = apply_ioata(
+      make_int_value(1), location, no_remaining_resources);
   CHECK_FALSE(no_remaining.ok);
   CHECK(no_remaining.error.kind == ErrorKind::allocation_limit_exceeded);
 }
