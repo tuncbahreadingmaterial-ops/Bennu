@@ -89,6 +89,42 @@ Error make_resource_failure(
   return error;
 }
 
+std::optional<Error>
+validate_profile_configuration(const EvaluationResources &resources,
+                               SourceLocation location,
+                               std::string_view producer_name) {
+  const bool has_configured_limit =
+      resources.limits.max_vector_bytes.has_value() ||
+      resources.limits.max_live_evaluation_bytes.has_value() ||
+      resources.limits.max_work_units.has_value();
+  std::string_view message;
+  switch (resources.profile) {
+  case ExecutionProfile::trusted_local_v1:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v1 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v1:
+    if (has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "bounded-v1 requires at least one configured resource limit";
+    break;
+  default:
+    message = "execution profile tag is unknown";
+    break;
+  }
+
+  Error error =
+      make_error(ErrorKind::invalid_execution_profile, location,
+                 std::string(message));
+  if (!producer_name.empty()) {
+    error.primitive = PrimitiveErrorContext{std::string(producer_name)};
+  }
+  return error;
+}
+
 struct AdmissionResult {
   bool ok;
   std::size_t live_after;
@@ -205,6 +241,11 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
                                        std::size_t work_units,
                                        SourceLocation location,
                                        std::string_view producer_name) {
+  std::optional<Error> profile_error =
+      validate_profile_configuration(resources, location, producer_name);
+  if (profile_error.has_value()) {
+    return allocation_failure(make_int_value(0), std::move(*profile_error));
+  }
   Value candidate = empty_vector(element_type);
   const std::optional<std::size_t> width = element_width(element_type);
   const std::size_t maximum = std::numeric_limits<std::size_t>::max();
@@ -336,6 +377,12 @@ WorkspaceReservationResult reserve_workspace(
     EvaluationResources &resources, std::size_t byte_count,
     std::size_t work_units, SourceLocation location,
     std::string_view producer_name) {
+  std::optional<Error> profile_error =
+      validate_profile_configuration(resources, location, producer_name);
+  if (profile_error.has_value()) {
+    return WorkspaceReservationResult{false, empty_workspace(),
+                                      std::move(*profile_error)};
+  }
   AdmissionResult admission =
       preflight(resources, std::nullopt, byte_count, work_units, location,
                 producer_name, std::nullopt, byte_count);
@@ -387,6 +434,11 @@ WorkChargeResult charge_work(EvaluationResources &resources,
                              std::size_t work_units,
                              SourceLocation location,
                              std::string_view producer_name) {
+  std::optional<Error> profile_error =
+      validate_profile_configuration(resources, location, producer_name);
+  if (profile_error.has_value()) {
+    return WorkChargeResult{false, std::move(*profile_error)};
+  }
   AdmissionResult admission =
       preflight(resources, std::nullopt, 0, work_units, location,
                 producer_name, std::nullopt, std::nullopt);
@@ -471,7 +523,151 @@ check_profile_refusal(const Error &error, ResourceLimitKind limit_kind,
   CHECK(*error.resource->refused_charge == refused_charge);
 }
 
+void check_invalid_profile_error(const Error &error,
+                                 std::string_view expected_message,
+                                 std::string_view producer_name) {
+  (void)error;
+  (void)expected_message;
+  (void)producer_name;
+  CHECK(error.kind == ErrorKind::invalid_execution_profile);
+  CHECK(error.location.offset == test_location.offset);
+  CHECK(error.location.line == test_location.line);
+  CHECK(error.location.column == test_location.column);
+  CHECK(std::string_view(error.message) == expected_message);
+  REQUIRE(error.primitive.has_value());
+  CHECK(error.primitive->name == producer_name);
+  CHECK_FALSE(error.resource.has_value());
+}
+
 } // namespace
+
+TEST_CASE("malformed profile configurations refuse every admission entry") {
+  const AllocationFailureInjection fail_first{std::size_t{0}};
+
+  EvaluationResources bounded_without_limits =
+      make_bounded_resources(limits(std::nullopt, std::nullopt, std::nullopt),
+                             fail_first);
+  EvaluationResources trusted_with_vector_limit =
+      make_trusted_local_resources(fail_first);
+  trusted_with_vector_limit.limits.max_vector_bytes = 0;
+  EvaluationResources trusted_with_live_limit =
+      make_trusted_local_resources(fail_first);
+  trusted_with_live_limit.limits.max_live_evaluation_bytes = 0;
+  EvaluationResources trusted_with_work_limit =
+      make_trusted_local_resources(fail_first);
+  trusted_with_work_limit.limits.max_work_units = 0;
+  EvaluationResources unknown_profile =
+      make_trusted_local_resources(fail_first);
+  unknown_profile.profile = static_cast<ExecutionProfile>(99);
+
+  const std::array<EvaluationResources, 5> malformed{{
+      bounded_without_limits,
+      trusted_with_vector_limit,
+      trusted_with_live_limit,
+      trusted_with_work_limit,
+      unknown_profile,
+  }};
+  constexpr std::array<std::string_view, 5> expected_messages{{
+      "bounded-v1 requires at least one configured resource limit",
+      "trusted-local-v1 requires every resource limit to be omitted",
+      "trusted-local-v1 requires every resource limit to be omitted",
+      "trusted-local-v1 requires every resource limit to be omitted",
+      "execution profile tag is unknown",
+  }};
+
+  for (std::size_t index = 0; index < malformed.size(); ++index) {
+    CAPTURE(index);
+
+    EvaluationResources vector_resources = malformed[index];
+    const VectorAllocationResult vector = allocate_vector(
+        vector_resources, ScalarType::boolean, 1, 0, test_location,
+        "vector-literal");
+    CHECK_FALSE(vector.ok);
+    check_invalid_profile_error(vector.error, expected_messages[index],
+                                "vector-literal");
+    CHECK(vector.value.container == ContainerKind::scalar);
+    CHECK(validate_value(vector.value).ok);
+    CHECK(vector_resources.live_evaluation_bytes == 0);
+    CHECK(vector_resources.work_units == 0);
+    CHECK(vector_resources.reservation_ordinal == 0);
+
+    EvaluationResources sizing_resources = malformed[index];
+    const VectorAllocationResult sizing = allocate_vector(
+        sizing_resources, ScalarType::integer,
+        std::numeric_limits<std::uint64_t>::max(), 0, test_location,
+        "sizing-probe");
+    CHECK_FALSE(sizing.ok);
+    check_invalid_profile_error(sizing.error, expected_messages[index],
+                                "sizing-probe");
+    CHECK(sizing.value.container == ContainerKind::scalar);
+    CHECK(validate_value(sizing.value).ok);
+    CHECK(sizing_resources.live_evaluation_bytes == 0);
+    CHECK(sizing_resources.work_units == 0);
+    CHECK(sizing_resources.reservation_ordinal == 0);
+
+    EvaluationResources workspace_resources = malformed[index];
+    const WorkspaceReservationResult workspace = reserve_workspace(
+        workspace_resources, 1, 0, test_location, "sort-workspace");
+    CHECK_FALSE(workspace.ok);
+    check_invalid_profile_error(workspace.error, expected_messages[index],
+                                "sort-workspace");
+    CHECK(workspace.reservation.storage.get() == nullptr);
+    CHECK(workspace.reservation.bytes == 0);
+    CHECK(workspace_resources.live_evaluation_bytes == 0);
+    CHECK(workspace_resources.work_units == 0);
+    CHECK(workspace_resources.reservation_ordinal == 0);
+
+    EvaluationResources work_resources = malformed[index];
+    const WorkChargeResult work =
+        charge_work(work_resources, 0, test_location, "inc");
+    CHECK_FALSE(work.ok);
+    check_invalid_profile_error(work.error, expected_messages[index], "inc");
+    CHECK(work_resources.live_evaluation_bytes == 0);
+    CHECK(work_resources.work_units == 0);
+    CHECK(work_resources.reservation_ordinal == 0);
+  }
+}
+
+TEST_CASE("neighboring valid profile configurations remain operational") {
+  EvaluationResources trusted =
+      make_trusted_local_resources(no_allocation_failure);
+  CHECK_FALSE(trusted.limits.max_vector_bytes.has_value());
+  CHECK_FALSE(trusted.limits.max_live_evaluation_bytes.has_value());
+  CHECK_FALSE(trusted.limits.max_work_units.has_value());
+  VectorAllocationResult trusted_vector = allocate_vector(
+      trusted, ScalarType::boolean, 1, 0, test_location, "vector-literal");
+  REQUIRE(trusted_vector.ok);
+  WorkspaceReservationResult trusted_workspace =
+      reserve_workspace(trusted, 1, 0, test_location, "sort-workspace");
+  REQUIRE(trusted_workspace.ok);
+  REQUIRE(charge_work(trusted, 1, test_location, "inc").ok);
+  release_vector_reservation(trusted, trusted_vector.value);
+  release_workspace(trusted, trusted_workspace.reservation);
+  CHECK(trusted.live_evaluation_bytes == 0);
+  CHECK(trusted.work_units == 1);
+
+  EvaluationResources bounded_vector = make_bounded_resources(
+      limits(1, std::nullopt, std::nullopt), no_allocation_failure);
+  VectorAllocationResult bounded_vector_result = allocate_vector(
+      bounded_vector, ScalarType::boolean, 1, 0, test_location,
+      "vector-literal");
+  REQUIRE(bounded_vector_result.ok);
+  release_vector_reservation(bounded_vector, bounded_vector_result.value);
+  CHECK(bounded_vector.live_evaluation_bytes == 0);
+
+  EvaluationResources bounded_live = make_bounded_resources(
+      limits(std::nullopt, 1, std::nullopt), no_allocation_failure);
+  WorkspaceReservationResult bounded_workspace =
+      reserve_workspace(bounded_live, 1, 0, test_location, "sort-workspace");
+  REQUIRE(bounded_workspace.ok);
+  release_workspace(bounded_live, bounded_workspace.reservation);
+  CHECK(bounded_live.live_evaluation_bytes == 0);
+
+  EvaluationResources bounded_work = make_bounded_resources(
+      limits(std::nullopt, std::nullopt, 1), no_allocation_failure);
+  REQUIRE(charge_work(bounded_work, 1, test_location, "inc").ok);
+  CHECK(bounded_work.work_units == 1);
+}
 
 TEST_CASE("vector boundary enforces zero exact and one-past profile limits") {
   EvaluationResources zero = make_bounded_resources(
