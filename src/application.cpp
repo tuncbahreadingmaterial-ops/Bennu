@@ -662,6 +662,7 @@ TEST_CASE("typed empty lifting preserves promotion shape and result element type
     CHECK(context.scalar_kernel_invocations == 0);
     CHECK(resources.work_units == 0);
     CHECK(resources.live_evaluation_bytes == 0);
+    CHECK(resources.reservation_ordinal == 0);
   }
 
   EvaluationResources resources = make_trusted_local_resources({std::nullopt});
@@ -738,6 +739,14 @@ TEST_CASE("resource preflight precedes scalar and vector domain execution") {
     if (vector_result.error.resource->limit_kind.has_value()) {
       CHECK(*vector_result.error.resource->limit_kind ==
             ResourceLimitKind::max_vector_bytes);
+    }
+  }
+  REQUIRE(vector_result.error.primitive.has_value());
+  if (vector_result.error.primitive.has_value()) {
+    CHECK(vector_result.error.primitive->name == "inc");
+    REQUIRE(vector_result.error.primitive->id.has_value());
+    if (vector_result.error.primitive->id.has_value()) {
+      CHECK(*vector_result.error.primitive->id == PrimitiveId::inc);
     }
   }
   CHECK_FALSE(vector_result.error.domain.has_value());
@@ -818,6 +827,7 @@ TEST_CASE("iota exact structural contract covers typed empties rejected lifting 
     CHECK(formatted_value(result.value) == "()");
     CHECK(context.scalar_kernel_invocations == 0);
     CHECK(resources.work_units == 0);
+    CHECK(resources.reservation_ordinal == 0);
   }
 
   {
