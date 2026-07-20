@@ -19,7 +19,7 @@ set(cc_output "${work}/CC output 文 🐍${BENNU_EXECUTABLE_SUFFIX}")
 file(REMOVE_RECURSE "${work}")
 file(MAKE_DIRECTORY "${work}" "${output_directory}" "${compiler_directory}")
 file(WRITE "${source}" "iota[5]\nadd[1 2.5]\n")
-file(WRITE "${invalid_source}" "inc 5\nwat\n")
+file(WRITE "${invalid_source}" "inc 5\nwat[1]\n")
 configure_file("${BENNU_FAKE_COMPILER}" "${fake_compiler}" COPYONLY)
 
 function(assert_no_temporary_artifacts context)
@@ -66,7 +66,7 @@ if(NOT "${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
 endif()
 file(READ "${emitted}" emitted_source)
 if(NOT emitted_source MATCHES "#include <inttypes.h>" OR
-   NOT emitted_source MATCHES "bennu_print_array")
+   NOT emitted_source MATCHES "bennu_print_value")
   message(FATAL_ERROR "Unicode emit-c produced unexpected C")
 endif()
 
@@ -79,7 +79,7 @@ string(REPLACE "\r\n" "\n" invalid_stderr "${invalid_stderr}")
 file(READ "${emitted}" preserved_emitted)
 if("${invalid_exit}" STREQUAL "0" OR NOT invalid_stdout STREQUAL "" OR
    NOT invalid_stderr STREQUAL
-       "${invalid_source}:2:1: unknown name: unknown name: wat\n" OR
+       "${invalid_source}:2:1: UnknownPrimitive: unknown primitive 'wat'\n" OR
    NOT preserved_emitted STREQUAL "sentinel bytes\n")
   message(FATAL_ERROR
     "Unicode emit-c semantic failure was not atomic\nexit: ${invalid_exit}\n"
