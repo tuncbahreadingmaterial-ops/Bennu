@@ -3,6 +3,9 @@
 
 #include "doctest/doctest.h"
 
+#ifndef DOCTEST_CONFIG_DISABLE
+#include <bit>
+#endif
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -1441,6 +1444,216 @@ bool span_is(RewriteSpan span, std::size_t begin_offset,
   return position_is(span.begin, begin_offset, begin_line, begin_column) &&
          position_is(span.end, end_offset, end_line, end_column);
 }
+
+struct RewriteValidFixture {
+  std::string_view name;
+  std::string_view source;
+  bool accepted;
+  std::string_view flat_snapshot;
+};
+
+struct RewriteInvalidFixture {
+  std::string_view name;
+  std::string_view source;
+  bool accepted;
+  RewriteParseError error;
+  RewriteSpan primary;
+};
+
+void append_size(std::string &snapshot, std::size_t value) {
+  char buffer[32];
+  const auto converted =
+      std::to_chars(std::begin(buffer), std::end(buffer), value);
+  snapshot.append(buffer, converted.ptr);
+}
+
+void append_integer(std::string &snapshot, std::int64_t value) {
+  char buffer[32];
+  const auto converted =
+      std::to_chars(std::begin(buffer), std::end(buffer), value);
+  snapshot.append(buffer, converted.ptr);
+}
+
+void append_position(std::string &snapshot, RewritePosition position) {
+  append_size(snapshot, position.offset);
+  snapshot.push_back(':');
+  append_size(snapshot, position.line);
+  snapshot.push_back(':');
+  append_size(snapshot, position.column);
+}
+
+void append_span(std::string &snapshot, RewriteSpan span) {
+  snapshot.push_back('[');
+  append_position(snapshot, span.begin);
+  snapshot.push_back(',');
+  append_position(snapshot, span.end);
+  snapshot.push_back(')');
+}
+
+void append_double(std::string &snapshot, double value) {
+  if (std::isnan(value)) {
+    snapshot.append("nan");
+    return;
+  }
+  if (std::isinf(value)) {
+    snapshot.append(std::signbit(value) ? "-inf" : "+inf");
+    return;
+  }
+  snapshot.append("bits:");
+  const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
+  char buffer[32];
+  const auto converted =
+      std::to_chars(std::begin(buffer), std::end(buffer), bits, 16);
+  snapshot.append(buffer, converted.ptr);
+}
+
+std::string_view node_kind_name(RewriteNodeKind kind) {
+  if (kind == RewriteNodeKind::scalar_literal) {
+    return "scalar_literal";
+  }
+  if (kind == RewriteNodeKind::vector_literal) {
+    return "vector_literal";
+  }
+  return "primitive_call";
+}
+
+std::string_view scalar_type_name(ScalarType type) {
+  if (type == ScalarType::boolean) {
+    return "boolean";
+  }
+  if (type == ScalarType::integer) {
+    return "integer";
+  }
+  return "double_precision";
+}
+
+std::string_view call_syntax_name(RewriteCallSyntax syntax) {
+  return syntax == RewriteCallSyntax::bracketed ? "bracketed" : "prefix";
+}
+
+std::string rewrite_flat_snapshot(const RewriteProgram &program) {
+  std::string snapshot;
+  snapshot.append("roots=[");
+  for (std::size_t index = 0U; index < program.roots.size(); ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_size(snapshot, program.roots[index]);
+  }
+  snapshot.append("];nodes=[");
+  for (std::size_t index = 0U; index < program.nodes.size(); ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    const RewriteNode &node = program.nodes[index];
+    snapshot.append("{kind=");
+    snapshot.append(node_kind_name(node.kind));
+    snapshot.append(",span=");
+    append_span(snapshot, node.span);
+    snapshot.append(",element_type=");
+    snapshot.append(scalar_type_name(node.element_type));
+    snapshot.append(",boolean=");
+    snapshot.push_back(node.boolean ? '1' : '0');
+    snapshot.append(",integer=");
+    append_integer(snapshot, node.integer);
+    snapshot.append(",double_precision=");
+    append_double(snapshot, node.double_precision);
+    snapshot.append(",first_element=");
+    append_size(snapshot, node.first_element);
+    snapshot.append(",element_count=");
+    append_size(snapshot, node.element_count);
+    snapshot.append(",first_element_span=");
+    append_size(snapshot, node.first_element_span);
+    snapshot.append(",call_index=");
+    append_size(snapshot, node.call_index);
+    snapshot.push_back('}');
+  }
+  snapshot.append("];arguments=[");
+  for (std::size_t index = 0U; index < program.arguments.size(); ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_size(snapshot, program.arguments[index]);
+  }
+  snapshot.append("];argument_spans=[");
+  for (std::size_t index = 0U; index < program.argument_spans.size(); ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_span(snapshot, program.argument_spans[index]);
+  }
+  snapshot.append("];calls=[");
+  for (std::size_t index = 0U; index < program.calls.size(); ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    const RewriteCall &call = program.calls[index];
+    snapshot.append("{syntax=");
+    snapshot.append(call_syntax_name(call.syntax));
+    snapshot.append(",name=");
+    const std::size_t name_begin = call.name_span.begin.offset - 1U;
+    const std::size_t name_size =
+        call.name_span.end.offset - call.name_span.begin.offset;
+    snapshot.append(program.source.data() + name_begin, name_size);
+    snapshot.append(",name_span=");
+    append_span(snapshot, call.name_span);
+    snapshot.append(",opening_delimiter_span=");
+    append_span(snapshot, call.opening_delimiter_span);
+    snapshot.append(",closing_delimiter_span=");
+    append_span(snapshot, call.closing_delimiter_span);
+    snapshot.append(",prefix_separator_span=");
+    append_span(snapshot, call.prefix_separator_span);
+    snapshot.append(",span=");
+    append_span(snapshot, call.span);
+    snapshot.append(",first_argument=");
+    append_size(snapshot, call.first_argument);
+    snapshot.append(",argument_count=");
+    append_size(snapshot, call.argument_count);
+    snapshot.append(",primitive=");
+    if (call.primitive.has_value()) {
+      append_size(snapshot, static_cast<std::size_t>(*call.primitive));
+    } else {
+      snapshot.append("none");
+    }
+    snapshot.push_back('}');
+  }
+  snapshot.append("];boolean_elements=[");
+  for (std::size_t index = 0U; index < program.boolean_elements.size();
+       ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_size(snapshot, program.boolean_elements[index]);
+  }
+  snapshot.append("];integer_elements=[");
+  for (std::size_t index = 0U; index < program.integer_elements.size();
+       ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_integer(snapshot, program.integer_elements[index]);
+  }
+  snapshot.append("];double_elements=[");
+  for (std::size_t index = 0U; index < program.double_elements.size();
+       ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_double(snapshot, program.double_elements[index]);
+  }
+  snapshot.append("];vector_element_spans=[");
+  for (std::size_t index = 0U; index < program.vector_element_spans.size();
+       ++index) {
+    if (index != 0U) {
+      snapshot.push_back(',');
+    }
+    append_span(snapshot, program.vector_element_spans[index]);
+  }
+  snapshot.push_back(']');
+  return snapshot;
+}
+
+#include "../tests/fixtures/rewrite_conformance_fixture.inc"
 #endif
 
 TEST_CASE("rewrite tokenizer uses generic categories and one-based byte spans") {
@@ -1647,61 +1860,32 @@ TEST_CASE("rewrite parser builds postorder generic calls and contiguous arenas")
   }
 }
 
-TEST_CASE("rewrite parser accepts all normative application and literal forms") {
-  const std::string_view valid_sources[] = {
-      "true",
-      "false",
-      "-9223372036854775808",
-      "-0.0",
-      "nan",
-      "0.0",
-      "2.5",
-      "1e3",
-      "1.25E-2",
-      "1.0e+10",
-      "(1 2 3)",
-      "(1 2 )",
-      "(\n 1\n 2\n)",
-      "(1.0 2.5 3.0)",
-      "(false true false)",
-      "(10)",
-      "Bool()",
-      "Int()",
-      "Double()",
-      "inc[5]",
-      "add[1 2]",
-      "inc[iota[3]]",
-      "add[10 (1 2 3)]",
-      "equals[true (false true)]",
-      "inc 5",
-      "inc inc 5",
-      "inc iota 3",
-      "inc (1 2 3)",
-      "add[1 2.5]",
-      "add[(1 2 3) 10]",
-      "add[Int() 0.5]",
-      "add[]",
-      "add 1",
-      "future[1 2 3 4]",
-      "iota[3]",
-      "iota[0]",
-      "iota[-3]",
-      "inc[iota[3]]",
-      "add[(1 2 3) (10 20 30)]",
-      "add[(1 2 3) 0.5]",
-      "equals[2 (1 2 3 2)]",
-      "not[(false true)]",
-      "equals[Int() 10]",
-      "divide[Int() 0]",
-      "divide[(8 9 10) (2 0 5)]",
-      "add[\n  1\n  inc 2\n]",
-  };
-  for (const std::string_view source : valid_sources) {
-    INFO(std::string(source));
-    const RewriteParseResult parsed = parse_rewrite(source);
-    CHECK(parsed.ok);
+#ifndef DOCTEST_CONFIG_DISABLE
+TEST_CASE("rewrite parser matches normative flat conformance fixtures") {
+  for (const RewriteValidFixture &fixture : rewrite_valid_fixtures) {
+    INFO(std::string(fixture.name));
+    const RewriteParseResult parsed = parse_rewrite(fixture.source);
+    REQUIRE(parsed.ok == fixture.accepted);
+    REQUIRE(parsed.program.source == fixture.source);
+    CHECK(rewrite_flat_snapshot(parsed.program) == fixture.flat_snapshot);
+  }
+
+  for (const RewriteInvalidFixture &fixture : rewrite_invalid_fixtures) {
+    INFO(std::string(fixture.name));
+    const RewriteParseResult parsed = parse_rewrite(fixture.source);
+    REQUIRE(parsed.ok == fixture.accepted);
+    CHECK(parsed.diagnostic.error == fixture.error);
+    CHECK(position_is(parsed.diagnostic.primary.begin,
+                      fixture.primary.begin.offset,
+                      fixture.primary.begin.line,
+                      fixture.primary.begin.column));
+    CHECK(position_is(parsed.diagnostic.primary.end,
+                      fixture.primary.end.offset,
+                      fixture.primary.end.line,
+                      fixture.primary.end.column));
   }
 }
+#endif
 
 TEST_CASE("rewrite parser retains typed homogeneous vector payloads and spans") {
   const RewriteParseResult parsed =
