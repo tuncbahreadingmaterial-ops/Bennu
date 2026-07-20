@@ -315,7 +315,7 @@ TEST_CASE("S16-00 matrix enumerates every initial elementwise primitive") {
   for (const PrimitiveMatrixRow &row : elementwise_matrix) {
     CAPTURE(std::string(row.name));
     const PrimitiveDescriptor &descriptor = matrix_descriptor(row.id);
-    CHECK(descriptor.name == row.name);
+    CHECK(std::string(descriptor.name) == std::string(row.name));
     CHECK(descriptor.lifting == LiftingMode::elementwise);
     REQUIRE(descriptor.signature_count > 0);
     for (std::size_t index = 0; index < descriptor.signature_count; ++index) {
