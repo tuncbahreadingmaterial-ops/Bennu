@@ -535,7 +535,7 @@ void check_invalid_profile_error(const Error &error,
   CHECK(error.location.column == test_location.column);
   CHECK(error.message == std::string(expected_message));
   REQUIRE(error.primitive.has_value());
-  CHECK(error.primitive->name == producer_name);
+  CHECK(error.primitive->name == std::string(producer_name));
   CHECK_FALSE(error.resource.has_value());
 }
 
