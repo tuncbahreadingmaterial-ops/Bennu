@@ -1,4 +1,5 @@
 #include "bennu/evaluator.hpp"
+#include "bennu/primitive.hpp"
 #include "bennu/resources.hpp"
 
 #include "doctest/doctest.h"
@@ -437,6 +438,14 @@ ProgramResult evaluate_program(const Program &program) {
 } // namespace
 
 ValueResult evaluate_expression(std::string_view source) {
+  if (!production_primitive_table_validation().ok) {
+    return ValueResult{
+        false,
+        make_int_value(0),
+        make_error(ErrorKind::invalid_primitive_table, SourceLocation{0, 1, 1},
+                   "built-in primitive descriptors are invalid"),
+    };
+  }
   const TokenizeResult tokenized = tokenize(source);
   if (!tokenized.ok) {
     return ValueResult{false, make_int_value(0), tokenized.error};
@@ -475,6 +484,14 @@ ValueResult evaluate_expression(std::string_view source) {
 }
 
 ProgramResult evaluate_source(std::string_view source) {
+  if (!production_primitive_table_validation().ok) {
+    return ProgramResult{
+        false,
+        {},
+        make_error(ErrorKind::invalid_primitive_table, SourceLocation{0, 1, 1},
+                   "built-in primitive descriptors are invalid"),
+    };
+  }
   const TokenizeResult tokenized = tokenize(source);
   if (!tokenized.ok) {
     return ProgramResult{false, {}, tokenized.error};

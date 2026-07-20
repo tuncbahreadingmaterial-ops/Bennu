@@ -17,9 +17,20 @@ set(bennu_implementation_sources
   src/evaluator.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
+  src/primitive.cpp
   src/resources.cpp
   src/value.cpp
 )
+
+if(MSVC)
+  set_source_files_properties(src/primitive.cpp PROPERTIES
+    COMPILE_OPTIONS "/fp:strict"
+  )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  set_source_files_properties(src/primitive.cpp PROPERTIES
+    COMPILE_OPTIONS "-frounding-math;-fno-fast-math"
+  )
+endif()
 
 add_executable(bennu
   ${bennu_implementation_sources}
