@@ -2516,20 +2516,24 @@ CEmissionResult emit_rewrite_c_source_impl(
           "  goto bennu_failure;\n";
     }
   }
-  for (const std::size_t root : evaluated.lowering.roots) {
-    generated += "  if (!bennu_print_value(&bennu_values[" +
-                 std::to_string(root) + "])) { goto bennu_output_failure; }\n";
+  if (!evaluated.expected_profile_refusal_node.has_value()) {
+    for (const std::size_t root : evaluated.lowering.roots) {
+      generated += "  if (!bennu_print_value(&bennu_values[" +
+                   std::to_string(root) +
+                   "])) { goto bennu_output_failure; }\n";
+    }
+    if (!evaluated.lowering.nodes.empty()) {
+      generated += "  { size_t bennu_index = 0U;\n"
+                   "    for (bennu_index = 0U; bennu_index < ";
+      append_c_unsigned(generated, evaluated.lowering.nodes.size());
+      generated +=
+          "; ++bennu_index) {\n"
+          "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
+          "    }\n"
+          "  }\n";
+    }
+    generated += "  return fflush(stdout) == 0 ? 0 : 1;\n";
   }
-  if (!evaluated.lowering.nodes.empty()) {
-    generated += "  { size_t bennu_index = 0U;\n"
-                 "    for (bennu_index = 0U; bennu_index < ";
-    append_c_unsigned(generated, evaluated.lowering.nodes.size());
-    generated += "; ++bennu_index) {\n"
-                 "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
-                 "    }\n"
-                 "  }\n";
-  }
-  generated += "  return fflush(stdout) == 0 ? 0 : 1;\n";
   if (!evaluated.lowering.nodes.empty()) {
     generated += "bennu_failure:\n"
                  "  { size_t bennu_index = 0U;\n"

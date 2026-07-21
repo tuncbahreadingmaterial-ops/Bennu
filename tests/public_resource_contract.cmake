@@ -97,6 +97,12 @@ if(NOT profile_source MATCHES "1, 1, 1, 8U, 24U, 2U" OR
   message(FATAL_ERROR
     "PUBLIC-RESOURCE-MATRIX generated configuration bytes are incomplete")
 endif()
+string(FIND "${refusal_source}" "return fflush(stdout) == 0 ? 0 : 1;"
+       refusal_success_epilogue)
+if(NOT refusal_success_epilogue EQUAL -1)
+  message(FATAL_ERROR
+    "PUBLIC-RESOURCE-MATRIX refusal artifact retained an unreachable success epilogue")
+endif()
 
 function(check_success name executable expected_stdout)
   foreach(invocation RANGE 1 2)
