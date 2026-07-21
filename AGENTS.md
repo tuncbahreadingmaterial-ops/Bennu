@@ -30,8 +30,6 @@ These rules apply to every human and agent contributor working in this repositor
 
 ### Issue branches, local-main integration, and verification
 
-For Issue #6 and later implementation work:
-
 1. Start only after the issue's product dependencies are satisfied. Confirm the working tree is clean and local `main` is current with `origin/main`.
 2. Create one dedicated branch named `issue/<number>-<short-slug>` from `main`.
 3. Keep every change for the issue on that branch. Make one or more scoped commits that reference the issue number.
