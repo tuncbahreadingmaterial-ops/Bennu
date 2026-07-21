@@ -75,10 +75,40 @@ bool emit_and_build(std::string_view source,
   return built.ok;
 }
 
+std::string refusal_evidence(const bennu::Error &error) {
+  if (!error.resource.has_value() || !error.primitive.has_value() ||
+      !error.resource->limit_kind.has_value() ||
+      !error.resource->configured_limit.has_value() ||
+      !error.resource->usage_before.has_value() ||
+      !error.resource->refused_charge.has_value()) {
+    return {};
+  }
+  const std::string_view reason =
+      error.resource->reason == bennu::ResourceErrorReason::profile_limit
+          ? "profile_limit"
+          : "unexpected";
+  const std::string_view limit =
+      *error.resource->limit_kind == bennu::ResourceLimitKind::max_work_units
+          ? "max_work_units"
+          : "unexpected";
+  return "ResourceError: reason=" + std::string(reason) +
+         " profile=" + error.resource->profile +
+         " limit=" + std::string(limit) +
+         " configured=" +
+         std::to_string(*error.resource->configured_limit) +
+         " usage-before=" + std::to_string(*error.resource->usage_before) +
+         " refused-charge=" +
+         std::to_string(*error.resource->refused_charge) +
+         " admission=" + error.primitive->name +
+         " source=" + std::to_string(error.location.offset) + ":" +
+         std::to_string(error.location.line) + ":" +
+         std::to_string(error.location.column) + "\n";
+}
+
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 12) {
+  if (argument_count != 15) {
     return 2;
   }
 
@@ -175,15 +205,19 @@ int main(int argument_count, char **arguments) {
           bennu::ResourceLimitKind::max_work_units ||
       refused.error.resource->configured_limit != std::size_t{1U} ||
       refused.error.resource->usage_before != std::size_t{1U} ||
-      refused.error.resource->refused_charge != std::size_t{1U}) {
+      refused.error.resource->refused_charge != std::size_t{1U} ||
+      refused.error.resource->profile != "bounded-v1" ||
+      !refused.error.primitive.has_value() ||
+      refused.error.primitive->name != "inc" ||
+      refused.error.location.offset != std::size_t{10U} ||
+      refused.error.location.line != std::size_t{2U} ||
+      refused.error.location.column != std::size_t{1U}) {
     destroy_program(refused);
     return 21;
   }
-  const bennu::CEmissionResult refused_emission =
-      bennu::emit_c_source(profile_source, one_past_profile);
-  if (refused_emission.ok || !refused_emission.source.empty() ||
-      !is_resource_error(refused_emission.error,
-                         bennu::ResourceErrorReason::profile_limit)) {
+  const std::string expected_refusal = refusal_evidence(refused.error);
+  if (expected_refusal.empty() ||
+      !write_file(arguments[14], expected_refusal)) {
     return 22;
   }
 
@@ -242,6 +276,8 @@ int main(int argument_count, char **arguments) {
 
   if (!emit_and_build(profile_source, exact_profile, arguments[4], arguments[5],
                       arguments[1]) ||
+      !emit_and_build(profile_source, one_past_profile, arguments[12],
+                      arguments[13], arguments[1]) ||
       !emit_and_build("iota[2]\n", fail_first, arguments[6], arguments[7],
                       arguments[1]) ||
       !emit_and_build("inc[(1 2)]\n", fail_second, arguments[8], arguments[9],

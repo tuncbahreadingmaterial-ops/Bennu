@@ -196,12 +196,16 @@ TEST_CASE("CUTOVER-07 explicit bounded profile agrees across public evaluator an
 
   const bennu::CEmissionResult refused_emission =
       bennu::emit_c_source("inc[inc[(1)]]", one_past);
-  CHECK_FALSE(refused_emission.ok);
-  CHECK(refused_emission.source.empty());
-  CHECK(refused_emission.error.kind == bennu::ErrorKind::resource_error);
-  REQUIRE(refused_emission.error.resource.has_value());
-  CHECK(refused_emission.error.resource->limit_kind ==
-        bennu::ResourceLimitKind::max_work_units);
+  REQUIRE(refused_emission.ok);
+  CHECK_FALSE(refused_emission.source.empty());
+  CHECK(refused_emission.source.find("BENNU_PROFILE_BOUNDED_V1") !=
+        std::string::npos);
+  CHECK(refused_emission.source.find("BENNU_LIMIT_MAX_WORK_UNITS") !=
+        std::string::npos);
+  CHECK(refused_emission.source.find("bennu_source_location(5U, 1U, 5U)") !=
+        std::string::npos);
+  CHECK(refused_emission.source.find("BENNU_FAILURE_INTERNAL") !=
+        std::string::npos);
 }
 
 TEST_CASE("PUBLIC-RESOURCE-01 allocation injection reaches evaluation and generated runtime") {

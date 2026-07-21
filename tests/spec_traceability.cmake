@@ -46,6 +46,30 @@ foreach(row IN LISTS rows)
     message(FATAL_ERROR
       "${requirement}: duplicate test identifier '${identifier}' in ${relative_source}")
   endif()
+  if(identifier STREQUAL "PUBLIC-RESOURCE-BOUNDED-REFUSAL")
+    foreach(required_assertion
+        "foreach(invocation RANGE 1 2)"
+        "NOT run_stdout STREQUAL \"\""
+        "NOT run_stderr STREQUAL expected_stderr"
+        "check_profile_refusal(refusal-emitted \"\${refusal_emitted}\")"
+        "check_profile_refusal(refusal-native \"\${refusal_native}\")")
+      string(FIND "${source_text}" "${required_assertion}" assertion_at)
+      if(assertion_at EQUAL -1)
+        message(FATAL_ERROR
+          "${requirement}: bounded emitted/native refusal assertion is missing: ${required_assertion}")
+      endif()
+    endforeach()
+  elseif(identifier STREQUAL "PUBLIC-RESOURCE-RESET")
+    string(FIND "${source_text}"
+      "foreach(invocation RANGE 1 2)" reset_loop_at)
+    string(FIND "${source_text}"
+      "# TEST-ID: PUBLIC-RESOURCE-RESET\ncheck_profile_refusal(refusal-emitted \"\${refusal_emitted}\")\ncheck_profile_refusal(refusal-native \"\${refusal_native}\")"
+      reset_calls_at)
+    if(reset_loop_at EQUAL -1 OR reset_calls_at EQUAL -1)
+      message(FATAL_ERROR
+        "${requirement}: bounded emitted/native two-invocation reset assertions are missing")
+    endif()
+  endif()
   math(EXPR requirement_count "${requirement_count} + 1")
 endforeach()
 

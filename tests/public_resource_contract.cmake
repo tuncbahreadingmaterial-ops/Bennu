@@ -1,6 +1,5 @@
 # TEST-ID: PUBLIC-RESOURCE-CROSS-BACKEND
 # TEST-ID: PUBLIC-RESOURCE-ALLOCATION
-# TEST-ID: PUBLIC-RESOURCE-RESET
 # TEST-ID: PUBLIC-DIRECT-SUCCESS-CORPUS
 # TEST-ID: PUBLIC-DIRECT-ERROR-MATRIX
 foreach(required BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
@@ -19,6 +18,12 @@ set(profile_emitted
   "${work_directory}/profile-emitted${BENNU_EXECUTABLE_SUFFIX}")
 set(profile_native
   "${work_directory}/profile-native${BENNU_EXECUTABLE_SUFFIX}")
+set(refusal_c "${work_directory}/profile-refusal.c")
+set(refusal_emitted
+  "${work_directory}/profile-refusal-emitted${BENNU_EXECUTABLE_SUFFIX}")
+set(refusal_native
+  "${work_directory}/profile-refusal-native${BENNU_EXECUTABLE_SUFFIX}")
+set(refusal_expected "${work_directory}/profile-refusal.expected")
 set(iota_c "${work_directory}/allocation-iota.c")
 set(iota_emitted
   "${work_directory}/allocation-iota-emitted${BENNU_EXECUTABLE_SUFFIX}")
@@ -43,6 +48,7 @@ execute_process(
           "${iota_c}" "${iota_native}"
           "${lifted_c}" "${lifted_native}"
           "${late_c}" "${late_native}"
+          "${refusal_c}" "${refusal_native}" "${refusal_expected}"
   RESULT_VARIABLE fixture_exit OUTPUT_VARIABLE fixture_stdout
   ERROR_VARIABLE fixture_stderr)
 if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
@@ -53,7 +59,7 @@ if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
     "stderr: [${fixture_stderr}]")
 endif()
 
-foreach(c_file profile iota lifted late)
+foreach(c_file profile refusal iota lifted late)
   set(source "${${c_file}_c}")
   set(executable "${${c_file}_emitted}")
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
@@ -79,10 +85,12 @@ foreach(c_file profile iota lifted late)
 endforeach()
 
 file(READ "${profile_c}" profile_source)
+file(READ "${refusal_c}" refusal_source)
 file(READ "${iota_c}" iota_source)
 file(READ "${lifted_c}" lifted_source)
 file(READ "${late_c}" late_source)
 if(NOT profile_source MATCHES "1, 1, 1, 8U, 24U, 2U" OR
+   NOT refusal_source MATCHES "1, 1, 1, 8U, 24U, 1U" OR
    NOT iota_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 0U" OR
    NOT lifted_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U" OR
    NOT late_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U")
@@ -107,6 +115,26 @@ function(check_success name executable expected_stdout)
   endforeach()
 endfunction()
 
+# TEST-ID: PUBLIC-RESOURCE-BOUNDED-REFUSAL
+function(check_profile_refusal name executable)
+  file(READ "${refusal_expected}" expected_stderr)
+  foreach(invocation RANGE 1 2)
+    execute_process(
+      COMMAND "${executable}"
+      RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
+      ERROR_VARIABLE run_stderr)
+    string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
+    string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
+    if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
+       NOT run_stderr STREQUAL expected_stderr)
+      message(FATAL_ERROR
+        "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} refusal mismatch\n"
+        "exit: ${run_exit}\nstdout: [${run_stdout}]\n"
+        "stderr: [${run_stderr}]\nexpected: [${expected_stderr}]")
+    endif()
+  endforeach()
+endfunction()
+
 function(check_allocation_failure name executable)
   foreach(invocation RANGE 1 2)
     execute_process(
@@ -127,6 +155,9 @@ endfunction()
 
 check_success(profile-emitted "${profile_emitted}" "(2)\n(2)\n")
 check_success(profile-native "${profile_native}" "(2)\n(2)\n")
+# TEST-ID: PUBLIC-RESOURCE-RESET
+check_profile_refusal(refusal-emitted "${refusal_emitted}")
+check_profile_refusal(refusal-native "${refusal_native}")
 foreach(path iota lifted late)
   check_allocation_failure("${path}-emitted" "${${path}_emitted}")
   check_allocation_failure("${path}-native" "${${path}_native}")

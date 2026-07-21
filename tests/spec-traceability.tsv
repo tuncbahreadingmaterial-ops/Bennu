@@ -24,9 +24,10 @@ BENNU-SPEC-0003 sections 14 and 15|tests/c_emission_contract.cmake|PUBLIC-SUCCES
 BENNU-SPEC-0004 sections 3 and 4|src/resources.cpp|trusted profile omits policy limits but retains mandatory safety
 BENNU-SPEC-0004 sections 5 through 7|src/resources.cpp|each profile limit honors zero one exact and one-past semantics
 BENNU-SPEC-0004 section 8|src/error.cpp|errors retain semantic context independently of presentation text
-BENNU-SPEC-0004 section 9|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-CROSS-BACKEND
-BENNU-SPEC-0004 section 9 bounded identity|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-CROSS-BACKEND
+BENNU-SPEC-0004 section 9|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-BOUNDED-REFUSAL
+BENNU-SPEC-0004 section 9 bounded identity|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-BOUNDED-REFUSAL
 BENNU-SPEC-0004 section 10|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-ALLOCATION
+BENNU-SPEC-0004 section 10.2 bounded backends|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-BOUNDED-REFUSAL
 BENNU-SPEC-0004 section 10.3|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-RESET
 WP10 public evaluator and errors|tests/public_cutover_conformance.cpp|CUTOVER-01 public evaluator accepts rewrite syntax and rejects the removed constructor spelling
 WP10 comprehensive direct evaluator corpus|tests/public_resource_contract.cmake|PUBLIC-DIRECT-SUCCESS-CORPUS
