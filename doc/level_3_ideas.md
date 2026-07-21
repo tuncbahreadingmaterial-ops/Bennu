@@ -1,4 +1,4 @@
-# Level 3 Ideas: Typed Script Arguments
+# Level 3 Ideas
 
 **Status:** Exploratory and non-normative
 
@@ -339,3 +339,219 @@ A future implementation issue should at minimum prove:
 - Should a later String design remain UTF-8 everywhere or expose platform
   decoding explicitly?
 
+## 14. Tuple values and automatic argument spreading
+
+This is a separate, exploratory Level 3 idea. It does not depend on accepting
+the typed-script-argument proposal above.
+
+### Goal and source shape
+
+Add fixed-length tuple values while making a tuple convenient to use as the
+argument sequence of a prefix call. The motivating equivalence is:
+
+```bennu
+add[1 2]
+add [1 2]
+```
+
+Both forms would call `add` with the two Int arguments `1` and `2`. Whitespace
+is meaningful here:
+
+- `add[1 2]` is the existing direct call with an explicit argument list;
+- `[1 2]` in expression position constructs a tuple; and
+- `add [1 2]` is prefix application to one tuple expression, whose outer
+  elements are automatically spread into the call.
+
+This deliberately gives useful meaning to a form that the current parser
+rejects as `whitespace_before_bracket`. It also keeps `()` available for the
+existing homogeneous vector syntax and uses Anka's bracketed tuple spelling as
+a language-design cue without requiring compatible implementation details.
+
+Tuple literals should support zero, one, or many heterogeneous expressions:
+
+```bennu
+[]
+[1]
+[1 2.5 true]
+[1 [2 3]]
+```
+
+They are immutable, fixed-arity values. Construction evaluates elements once,
+from left to right. Canonical formatting uses the same bracketed spelling and
+preserves nesting.
+
+### Proposed call rule
+
+Automatic spreading occurs only when a call is written as prefix application
+to one expression and that expression evaluates to a tuple:
+
+```text
+apply_prefix(function, value):
+  tuple value  -> call function with the tuple's outer elements
+  other value  -> call function with one argument
+```
+
+Spreading is exactly one level, never recursive. For example, applying a
+function to `[1 [2 3]]` supplies two arguments: `1` and `[2 3]`. The empty tuple
+supplies zero arguments and a singleton tuple supplies one.
+
+An explicit bracketed argument list does not implicitly spread tuple-valued
+arguments. It is the escape hatch for a future function that deliberately
+accepts a tuple:
+
+```bennu
+consume[[1 2]]  # one tuple argument
+consume [1 2]   # two automatically spread arguments
+```
+
+The language should expand the argument sequence before arity checking,
+overload selection, type conversion, shape checking, and primitive execution.
+Expansion must not depend on which overloads happen to exist; otherwise adding
+an overload could silently reinterpret an existing program.
+
+General prefix application needs its own precedence and associativity rules.
+A focused first implementation could accept only `name <tuple-expression>`
+until those rules are specified, but it should still use the same semantic
+boundary so tuple results can later be spread without special-casing literals.
+
+### Fit with the current frontend
+
+The lexer already recognizes square brackets. The rewrite parser currently
+distinguishes adjacent call brackets and explicitly diagnoses whitespace before
+a bracket. That point can become the initial grammar split:
+
+```text
+name[expressions...]  -> direct argument-list call
+name [expressions...] -> prefix call whose operand is a tuple literal
+[expressions...]      -> tuple literal expression
+```
+
+The parsed representation needs a tuple-literal node plus a contiguous element
+range in an arena, matching the current flat/data-oriented approach. A prefix
+application node should retain both the whole operand span and the individual
+tuple-element spans. After evaluating the operand once, call preparation can
+present either a one-value span or the tuple's element span to the existing
+primitive application boundary.
+
+`apply_primitive` and scalar primitive kernels should not implement spreading.
+They should continue to receive the final semantic argument span. This keeps
+direct API calls explicit and prevents tuple syntax from leaking into primitive
+behavior.
+
+Diagnostics should describe the expanded call. Thus `add []` is an arity error
+with zero supplied arguments, while `add [1 true]` is a type error on the second
+expanded argument. The primary call location can remain the function name; an
+argument-specific error should point to the responsible tuple element rather
+than only to the complete tuple.
+
+### Value, type, and ownership model
+
+The public value domain currently distinguishes scalar and homogeneous vector
+containers. First-class heterogeneous tuples require a third container kind
+and a representation for a fixed sequence of complete Bennu values, not merely
+a new scalar element type.
+
+A data-oriented representation should use an owned contiguous element buffer
+or a flat value arena with an offset and count. Construction, copying,
+validation, destruction, and formatting must operate through free functions.
+Nested tuples make release and validation recursive in meaning; an iterative
+arena walk may be preferable if the language permits deep nesting.
+
+The type representation also needs to describe ordered heterogeneous element
+types. The current `ValueType` pair of container kind and scalar element type is
+not sufficient for `[Int Double]`. Before tuple-accepting functions are added,
+primitive signatures can remain scalar/vector-only, but diagnostics and typed
+lowering still need a stable tuple type descriptor or a structural type arena.
+
+Tuple elements retain their existing value semantics. In particular:
+
+- vectors inside a tuple still own their vector storage;
+- moving elements into a tuple transfers that ownership exactly once;
+- spreading borrows the tuple's elements for the duration of the call;
+- spreading does not copy or reallocate contained vectors; and
+- destroying a tuple releases every transitive owned value exactly once.
+
+### Resources and emitted C11
+
+Tuple construction must participate in the same resource model on every
+execution surface. The design must decide whether the tuple's element table,
+transitive payloads, or both count toward maximum live bytes, and whether each
+constructed element consumes work. Limits for total elements and nesting depth
+should be explicit so validation, formatting, and cleanup cannot exhaust the
+host stack or overflow representable sizes.
+
+The first implementation should construct the tuple and then borrow its outer
+element span for spreading. An optimizer may later eliminate a tuple used only
+by an immediate prefix call, but only if evaluator and emitted-C work,
+allocation, failure precedence, and observable resource limits remain
+equivalent.
+
+Generated C11 needs the corresponding tuple container tag, element storage,
+validation, formatting, and cleanup paths. Prefix-call lowering expands the
+outer elements before invoking the existing `bennu_apply` boundary. Successful
+calls such as `add [1 2]` can therefore continue to use the existing selected
+`add` implementation and scalar kernels.
+
+### Alternatives considered
+
+Treat whitespace before `[` as an alternate spelling of the existing direct
+call. This makes the motivating example work without tuples, but `[1 2]` is not
+a first-class value and tuple-producing expressions cannot be composed.
+
+Spread tuples in every call position. This is superficially uniform, but it
+removes a clear way to pass one tuple value to a tuple-aware function and makes
+nesting harder to read.
+
+Add an explicit spread marker such as `add[...[1 2]]`. This is unambiguous and
+may remain useful for spreading one value among other explicit arguments, but
+it loses the concise prefix form requested here.
+
+Recursively flatten nested tuples. This makes argument count depend on the
+complete nested structure and prevents nested tuples from remaining meaningful
+values. One-level spreading is more predictable.
+
+### Suggested staged implementation
+
+1. Specify tuple syntax, canonical formatting, nesting, and size limits.
+2. Specify the minimal prefix-application grammar and its whitespace rule.
+3. Add tuple parse/lowering nodes and structural tuple type descriptions.
+4. Add resource-accounted tuple value construction, validation, and cleanup.
+5. Expand one tuple operand into a borrowed semantic argument span before
+   primitive validation.
+6. Add equivalent tuple storage, spreading, formatting, and cleanup to emitted
+   C11.
+7. Add general prefix-call precedence or explicit mixed-argument spreading only
+   through separate, justified follow-up work.
+
+### Initial acceptance ideas
+
+A future implementation issue should at minimum prove:
+
+- `add [1 2]` agrees with `add[1 2]` across the evaluator, CLI, emitted C, and
+  native execution;
+- `[]`, `[1]`, heterogeneous tuples, and nested tuples format canonically;
+- spreading is one level and preserves left-to-right evaluation;
+- direct argument lists preserve a tuple as one argument;
+- arity and type diagnostics report expanded arguments and precise element
+  spans;
+- tuple construction, failed calls, formatting failures, and cleanup neither
+  leak nor double-release nested vector or tuple storage;
+- configured work and live-byte limits fail at the same semantic point across
+  backends;
+- allocation failure at every tuple allocation boundary remains transactional;
+- existing adjacent calls such as `add[1 2]` retain their current behavior; and
+- the formerly invalid whitespace-before-bracket form changes only where the
+  new prefix-call grammar accepts it.
+
+### Open decisions
+
+- Is general `function expression` application introduced immediately, or is
+  the first grammar restricted to a tuple operand?
+- Can prefix application target only primitive names initially, or any future
+  callable value?
+- How are tuple types represented in public diagnostics and typed lowering?
+- What exact depth, element-count, work, and live-byte rules apply?
+- Should a later explicit spread marker support mixing tuple elements with
+  other direct arguments?
+- Are tuple destructuring and tuple-accepting primitive signatures part of the
+  same language level or separate follow-up features?
