@@ -111,11 +111,12 @@ multidimensional arrays, `length`, or `divide`.
 ## Version and release provenance
 
 The tracked root `VERSION` file is the sole product-version input. The current
-incompatible rewrite identifies itself as the non-production SemVer
-`0.2.0-dev`; `bennu --version` prints exactly `bennu 0.2.0-dev` followed by one
-newline. CMake rejects non-canonical or non-SemVer VERSION bytes and generates
-the private C++ version header, build identity, and Windows PE version resource
-from that value. VERSION does not authorize a release.
+source is the stable v0.2.0 release candidate and identifies itself as `0.2.0`;
+`bennu --version` prints exactly `bennu 0.2.0` followed by one newline. CMake
+rejects non-canonical or non-SemVer VERSION bytes and generates the private C++
+version header, build identity, and Windows PE version resource from that value.
+VERSION does not authorize a release or publication. At this stage, no v0.2.0
+tag or release has been created.
 
 The future-release workflow supports an unprivileged three-target dry run at an
 explicit source ref. Production additionally requires all of the following:

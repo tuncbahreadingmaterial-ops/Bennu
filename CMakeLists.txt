@@ -439,6 +439,12 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_source_contract.cmake"
   )
   add_test(
+    NAME release.stable_version_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/stable_version_contract.cmake"
+  )
+  add_test(
     NAME release.windows_version_resource_contract
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
