@@ -414,6 +414,10 @@ def run_gate(python, tool):
         (repository / "tracked").write_text("source\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(repository)], check=True)
         subprocess.run(
+            ["git", "-C", str(repository), "config", "core.autocrlf", "false"],
+            check=True,
+        )
+        subprocess.run(
             ["git", "-C", str(repository), "add", "VERSION", "tracked"], check=True
         )
         subprocess.run(
@@ -484,7 +488,7 @@ def run_gate(python, tool):
         require(lightweight.returncode != 0 and "annotated" in lightweight.stderr,
                 "lightweight production tag was accepted", lightweight)
 
-        (repository / "VERSION").write_text("0.2.0-dev\n", encoding="ascii")
+        (repository / "VERSION").write_bytes(b"0.2.0-dev\n")
         development = subprocess.run(command, text=True, capture_output=True, check=False)
         require(development.returncode != 0 and "stable" in development.stderr,
                 "development VERSION passed the production gate", development)
