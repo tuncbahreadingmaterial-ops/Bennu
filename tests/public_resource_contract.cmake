@@ -104,41 +104,37 @@ if(NOT refusal_success_epilogue EQUAL -1)
     "PUBLIC-RESOURCE-MATRIX refusal artifact retained an unreachable success epilogue")
 endif()
 
-function(check_success name executable expected_stdout)
-  foreach(invocation RANGE 1 2)
-    execute_process(
-      COMMAND "${executable}"
-      RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
-      ERROR_VARIABLE run_stderr)
-    string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
-    string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
-    if(NOT "${run_exit}" STREQUAL "0" OR
-       NOT run_stdout STREQUAL expected_stdout OR NOT run_stderr STREQUAL "")
-      message(FATAL_ERROR
-        "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} mismatch\n"
-        "exit: ${run_exit}\nstdout: [${run_stdout}]\nstderr: [${run_stderr}]")
-    endif()
-  endforeach()
+function(check_success name executable expected_stdout invocation)
+  execute_process(
+    COMMAND "${executable}"
+    RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
+    ERROR_VARIABLE run_stderr)
+  string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
+  string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
+  if(NOT "${run_exit}" STREQUAL "0" OR
+     NOT run_stdout STREQUAL expected_stdout OR NOT run_stderr STREQUAL "")
+    message(FATAL_ERROR
+      "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} mismatch\n"
+      "exit: ${run_exit}\nstdout: [${run_stdout}]\nstderr: [${run_stderr}]")
+  endif()
 endfunction()
 
 # TEST-ID: PUBLIC-RESOURCE-BOUNDED-REFUSAL
-function(check_profile_refusal name executable)
+function(check_profile_refusal name executable invocation)
   file(READ "${refusal_expected}" expected_stderr)
-  foreach(invocation RANGE 1 2)
-    execute_process(
-      COMMAND "${executable}"
-      RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
-      ERROR_VARIABLE run_stderr)
-    string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
-    string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
-    if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
-       NOT run_stderr STREQUAL expected_stderr)
-      message(FATAL_ERROR
-        "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} refusal mismatch\n"
-        "exit: ${run_exit}\nstdout: [${run_stdout}]\n"
-        "stderr: [${run_stderr}]\nexpected: [${expected_stderr}]")
-    endif()
-  endforeach()
+  execute_process(
+    COMMAND "${executable}"
+    RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
+    ERROR_VARIABLE run_stderr)
+  string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
+  string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
+  if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
+     NOT run_stderr STREQUAL expected_stderr)
+    message(FATAL_ERROR
+      "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} refusal mismatch\n"
+      "exit: ${run_exit}\nstdout: [${run_stdout}]\n"
+      "stderr: [${run_stderr}]\nexpected: [${expected_stderr}]")
+  endif()
 endfunction()
 
 function(check_allocation_failure name executable)
@@ -159,11 +155,17 @@ function(check_allocation_failure name executable)
   endforeach()
 endfunction()
 
-check_success(profile-emitted "${profile_emitted}" "(2)\n(2)\n")
-check_success(profile-native "${profile_native}" "(2)\n(2)\n")
 # TEST-ID: PUBLIC-RESOURCE-RESET
-check_profile_refusal(refusal-emitted "${refusal_emitted}")
-check_profile_refusal(refusal-native "${refusal_native}")
+foreach(bounded_reset_iteration RANGE 1 2)
+  check_success(profile-emitted "${profile_emitted}" "(2)\n(2)\n"
+                "${bounded_reset_iteration}")
+  check_success(profile-native "${profile_native}" "(2)\n(2)\n"
+                "${bounded_reset_iteration}")
+  check_profile_refusal(refusal-emitted "${refusal_emitted}"
+                        "${bounded_reset_iteration}")
+  check_profile_refusal(refusal-native "${refusal_native}"
+                        "${bounded_reset_iteration}")
+endforeach()
 foreach(path iota lifted late)
   check_allocation_failure("${path}-emitted" "${${path}_emitted}")
   check_allocation_failure("${path}-native" "${${path}_native}")

@@ -182,6 +182,13 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability.cmake"
   )
   add_test(
+    NAME spec.traceability_bounded_once_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability_negative.cmake"
+  )
+  add_test(
     NAME architecture.obsolete_surface
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"

@@ -48,11 +48,10 @@ foreach(row IN LISTS rows)
   endif()
   if(identifier STREQUAL "PUBLIC-RESOURCE-BOUNDED-REFUSAL")
     foreach(required_assertion
-        "foreach(invocation RANGE 1 2)"
         "NOT run_stdout STREQUAL \"\""
         "NOT run_stderr STREQUAL expected_stderr"
-        "check_profile_refusal(refusal-emitted \"\${refusal_emitted}\")"
-        "check_profile_refusal(refusal-native \"\${refusal_native}\")")
+        "check_profile_refusal(refusal-emitted \"\${refusal_emitted}\""
+        "check_profile_refusal(refusal-native \"\${refusal_native}\"")
       string(FIND "${source_text}" "${required_assertion}" assertion_at)
       if(assertion_at EQUAL -1)
         message(FATAL_ERROR
@@ -60,12 +59,19 @@ foreach(row IN LISTS rows)
       endif()
     endforeach()
   elseif(identifier STREQUAL "PUBLIC-RESOURCE-RESET")
-    string(FIND "${source_text}"
-      "foreach(invocation RANGE 1 2)" reset_loop_at)
-    string(FIND "${source_text}"
-      "# TEST-ID: PUBLIC-RESOURCE-RESET\ncheck_profile_refusal(refusal-emitted \"\${refusal_emitted}\")\ncheck_profile_refusal(refusal-native \"\${refusal_native}\")"
-      reset_calls_at)
-    if(reset_loop_at EQUAL -1 OR reset_calls_at EQUAL -1)
+    set(expected_reset_block [=[# TEST-ID: PUBLIC-RESOURCE-RESET
+foreach(bounded_reset_iteration RANGE 1 2)
+  check_success(profile-emitted "${profile_emitted}" "(2)\n(2)\n"
+                "${bounded_reset_iteration}")
+  check_success(profile-native "${profile_native}" "(2)\n(2)\n"
+                "${bounded_reset_iteration}")
+  check_profile_refusal(refusal-emitted "${refusal_emitted}"
+                        "${bounded_reset_iteration}")
+  check_profile_refusal(refusal-native "${refusal_native}"
+                        "${bounded_reset_iteration}")
+endforeach()]=])
+    string(FIND "${source_text}" "${expected_reset_block}" reset_block_at)
+    if(reset_block_at EQUAL -1)
       message(FATAL_ERROR
         "${requirement}: bounded emitted/native two-invocation reset assertions are missing")
     endif()
