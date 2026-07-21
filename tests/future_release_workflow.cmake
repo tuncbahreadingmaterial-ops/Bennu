@@ -7,6 +7,9 @@ if(NOT EXISTS "${workflow}")
   message(FATAL_ERROR "future release workflow is missing")
 endif()
 file(READ "${workflow}" text)
+file(READ
+  "${BENNU_SOURCE_DIR}/tools/release/verify-clean-windows-package.ps1"
+  windows_package_verifier)
 
 function(require_text expected description)
   string(FIND "${text}" "${expected}" found_at)
@@ -62,6 +65,14 @@ foreach(forbidden_input IN ITEMS
       "future release workflow interpolates release_tag directly into shell: ${forbidden_input}")
   endif()
 endforeach()
+
+string(FIND "${windows_package_verifier}"
+  "       bennu --version"
+  windows_help_version_line)
+if(windows_help_version_line EQUAL -1)
+  message(FATAL_ERROR
+    "clean Windows package help contract is missing bennu --version")
+endif()
 
 set(publisher "${BENNU_SOURCE_DIR}/tools/release/publish-future-release.sh")
 file(READ "${publisher}" publisher_text)

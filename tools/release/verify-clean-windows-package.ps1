@@ -97,6 +97,7 @@ $expectedRepl = if ($LanguageSurface -eq "rewrite") {
 $expectedHelp = @"
 Usage: bennu <command> [arguments]
        bennu --help
+       bennu --version
 
 Commands:
   repl    Start an interactive Bennu session
