@@ -1,0 +1,278 @@
+name: Future Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact branch, tag, or commit to build
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Publish after every verification and attestation succeeds
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Exact annotated v<VERSION> tag; required only for publication
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.identity.outputs.commit }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Resolve exact development or production identity
+        id: identity
+        shell: bash
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          version=$(python tools/release/provenance.py fragment --help >/dev/null && tr -d '\n' <VERSION)
+          if [[ "$version" == "0.1.0" ]]; then
+            echo "v0.1.0 predates this contract and bennu-v0.1.0 assets are immutable" >&2
+            exit 1
+          fi
+          if [[ "$PUBLISH" == "true" ]]; then
+            if [[ "$commit" != "$EVENT_SHA" ]]; then
+              echo "production source_ref must resolve to the attestation event SHA $EVENT_SHA" >&2
+              exit 1
+            fi
+            python tools/release/provenance.py gate \
+              --version-file VERSION \
+              --repository-dir . \
+              --source-commit "$commit" \
+              --tag "$RELEASE_TAG"
+          elif [[ -n "$RELEASE_TAG" ]]; then
+            echo "release_tag must be empty for an unprivileged dry run" >&2
+            exit 1
+          fi
+          echo "commit=$commit" >>"$GITHUB_OUTPUT"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+  package:
+    needs: prepare
+    name: Package ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            target: linux-x64
+            executable: build/bennu
+            executable_path: bennu
+            extension: .tar.gz
+          - name: Windows x64
+            runner: windows-2022
+            target: windows-x64
+            executable: build/bennu.exe
+            executable_path: bennu.exe
+            extension: .zip
+          - name: macOS arm64
+            runner: macos-15
+            target: macos-arm64
+            executable: build/bennu
+            executable_path: bennu
+            extension: .tar.gz
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Set up MSVC for Ninja
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --verbose
+
+      - name: Run target-native CLI, PE, and package inspection tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package and execute Linux archive journeys
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="bennu-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}${{ matrix.extension }}"
+          tools/release/package-linux.sh '${{ matrix.executable }}' LICENSE "$archive"
+          tools/release/verify-linux-package.sh "$archive" examples/rewrite.bennu LICENSE rewrite
+
+      - name: Package and execute Windows or macOS archive journeys
+        if: runner.os != 'Linux'
+        shell: pwsh
+        run: |
+          $archive = "bennu-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}${{ matrix.extension }}"
+          ./tools/release/package-and-smoke.ps1 `
+            -BennuExecutable '${{ matrix.executable }}' `
+            -Source examples/rewrite.bennu `
+            -LanguageSurface rewrite `
+            -License LICENSE `
+            -Platform '${{ matrix.target }}' `
+            -Archive $archive
+
+      - name: Create target-native provenance fragment from archive bytes
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          $archive = "bennu-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}${{ matrix.extension }}"
+          $arguments = @(
+            "tools/release/provenance.py", "fragment",
+            "--version-file", "VERSION",
+            "--target", '${{ matrix.target }}',
+            "--source-commit", '${{ needs.prepare.outputs.commit }}',
+            "--archive", $archive,
+            "--executable-path", '${{ matrix.executable_path }}',
+            "--repository", '${{ github.repository }}',
+            "--workflow", ".github/workflows/future-release.yml",
+            "--output", "${{ matrix.target }}.fragment.json"
+          )
+          if ($env:PUBLISH -eq "true") { $arguments += @("--tag", $env:RELEASE_TAG) }
+          python @arguments
+          if ($LASTEXITCODE -ne 0) { throw "provenance.py fragment failed" }
+
+      - name: Upload target-tested archive and fragment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: future-${{ matrix.target }}
+          path: |
+            bennu-v${{ needs.prepare.outputs.version }}-${{ matrix.target }}${{ matrix.extension }}
+            ${{ matrix.target }}.fragment.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  merge:
+    needs:
+      - prepare
+      - package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+
+      - name: Download all target-tested bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: future-*
+          path: candidates
+          merge-multiple: true
+
+      - name: Merge fragments and independently verify every archive and executable digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/release/provenance.py merge \
+            --fragment candidates/linux-x64.fragment.json \
+            --fragment candidates/macos-arm64.fragment.json \
+            --fragment candidates/windows-x64.fragment.json \
+            --asset-dir candidates \
+            --output candidates/release-manifest.json
+          python tools/release/provenance.py verify \
+            --manifest candidates/release-manifest.json \
+            --asset-dir candidates \
+            --fragment-dir candidates \
+            --expected-repository '${{ github.repository }}' \
+            --expected-workflow .github/workflows/future-release.yml \
+            --expected-source-commit '${{ needs.prepare.outputs.commit }}'
+
+      - name: Upload complete candidate set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: future-release-candidate
+          path: candidates
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    if: inputs.publish
+    needs:
+      - prepare
+      - merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Download verified candidate bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: future-release-candidate
+          path: candidates
+
+      - name: Recheck production identity and candidate bytes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python tools/release/provenance.py gate \
+            --version-file VERSION --repository-dir . \
+            --source-commit '${{ needs.prepare.outputs.commit }}' \
+            --tag "$RELEASE_TAG"
+          python tools/release/provenance.py verify \
+            --manifest candidates/release-manifest.json \
+            --asset-dir candidates --fragment-dir candidates \
+            --expected-repository '${{ github.repository }}' \
+            --expected-workflow .github/workflows/future-release.yml \
+            --expected-source-commit '${{ needs.prepare.outputs.commit }}'
+
+      - name: Attest exact archives and final manifest
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: |
+            candidates/bennu-v${{ needs.prepare.outputs.version }}-linux-x64.tar.gz
+            candidates/bennu-v${{ needs.prepare.outputs.version }}-windows-x64.zip
+            candidates/bennu-v${{ needs.prepare.outputs.version }}-macos-arm64.tar.gz
+            candidates/release-manifest.json
+
+      - name: Create draft, compare remote bytes, and publish last
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: >-
+          tools/release/publish-future-release.sh
+          candidates
+          '${{ needs.prepare.outputs.commit }}'
+          "$RELEASE_TAG"

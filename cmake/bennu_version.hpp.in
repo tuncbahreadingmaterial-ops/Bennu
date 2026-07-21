@@ -1,0 +1,9 @@
+#pragma once
+
+#include <string_view>
+
+namespace bennu_build {
+
+inline constexpr std::string_view version = "@BENNU_VERSION@";
+
+} // namespace bennu_build

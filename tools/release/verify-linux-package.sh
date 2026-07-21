@@ -85,6 +85,18 @@ if [[ -s "$stderr" ]] || ! grep -Fq 'Usage: bennu <command> [arguments]' "$stdou
   exit 1
 fi
 
+if [[ "$language_surface" == rewrite ]]; then
+  if ! "$bennu" --version >"$stdout" 2>"$stderr"; then
+    echo "error: extracted Bennu --version failed" >&2
+    exit 1
+  fi
+  if [[ -s "$stderr" || $(wc -l <"$stdout") -ne 1 ]] ||
+     ! grep -Eq '^bennu (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' "$stdout"; then
+    echo "error: extracted Bennu --version output mismatch" >&2
+    exit 1
+  fi
+fi
+
 if ! "$bennu" run "$source_file" >"$stdout" 2>"$stderr"; then
   echo "error: extracted Bennu run failed" >&2
   exit 1
@@ -168,4 +180,8 @@ if [[ -s "$stdout" ]] || ! cmp --silent "$sentinel" "$invalid_native"; then
   exit 1
 fi
 
-echo "Linux package journeys passed: --help, run, emit-c, build, and atomic failures"
+if [[ "$language_surface" == rewrite ]]; then
+  echo "Linux package journeys passed: --help, --version, run, emit-c, build, and atomic failures"
+else
+  echo "Linux package journeys passed: --help, run, emit-c, build, and atomic failures"
+fi

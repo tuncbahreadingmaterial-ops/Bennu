@@ -3,6 +3,7 @@
 #include "bennu/native_builder.hpp"
 #include "bennu/path_encoding.hpp"
 #include "cli_output.hpp"
+#include "bennu_version.hpp"
 
 #include <array>
 #include <cerrno>
@@ -424,6 +425,7 @@ int run_cli(const std::vector<std::string> &argv) {
     constexpr std::string_view help =
         "Usage: bennu <command> [arguments]\n"
         "       bennu --help\n"
+        "       bennu --version\n"
         "\n"
         "Commands:\n"
         "  repl    Start an interactive Bennu session\n"
@@ -431,6 +433,17 @@ int run_cli(const std::vector<std::string> &argv) {
         "  emit-c  Emit C source for a Bennu source file\n"
         "  build   Build a Bennu source file\n";
     if (!bennu_cli::write_stdout(std::cout, help) ||
+        !bennu_cli::flush_stdout(std::cout)) {
+      return report_stdout_failure();
+    }
+    return 0;
+  }
+
+  if (argc == 2 && argument == "--version") {
+    std::string output = "bennu ";
+    output += bennu_build::version;
+    output += '\n';
+    if (!bennu_cli::write_stdout(std::cout, output) ||
         !bennu_cli::flush_stdout(std::cout)) {
       return report_stdout_failure();
     }

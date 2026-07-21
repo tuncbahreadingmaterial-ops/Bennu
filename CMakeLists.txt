@@ -2,6 +2,25 @@ cmake_minimum_required(VERSION 3.20)
 
 project(Bennu LANGUAGES CXX)
 
+set(BENNU_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bennu_version.cmake")
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/private")
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/bennu_version.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/private/bennu_version.hpp"
+  @ONLY
+)
+
+if(WIN32)
+  enable_language(RC)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bennu-version.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/private/bennu-version.rc"
+    @ONLY
+  )
+endif()
+
 option(BENNU_BUILD_ISSUE33_BENCHMARK
   "Expose the opt-in Issue #33 C-backend prototype and benchmark targets"
   OFF
@@ -43,7 +62,16 @@ add_executable(bennu
   src/cli_output.cpp
   src/main.cpp
 )
-target_include_directories(bennu PRIVATE include src)
+if(WIN32)
+  target_sources(bennu PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/private/bennu-version.rc"
+  )
+endif()
+target_include_directories(bennu PRIVATE
+  include
+  src
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/private"
+)
 target_include_directories(bennu SYSTEM PRIVATE third_party/doctest)
 target_compile_definitions(bennu PRIVATE
   DOCTEST_CONFIG_DISABLE
@@ -57,6 +85,7 @@ set_target_properties(bennu PROPERTIES
 )
 
 string(CONCAT bennu_build_info
+  "version=${BENNU_VERSION}\n"
   "system=${CMAKE_SYSTEM_NAME}\n"
   "architecture=${CMAKE_SYSTEM_PROCESSOR}\n"
   "compiler=${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\n"
@@ -157,6 +186,7 @@ if(BENNU_BUILD_ISSUE33_BENCHMARK)
 endif()
 
 if(BUILD_TESTING)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_executable(bennu_tests
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
@@ -251,12 +281,14 @@ if(BUILD_TESTING)
         "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
         "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
         "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        "-DBENNU_VERSION=${BENNU_VERSION}"
         "-DCASE=${case_name}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_contract.cmake"
     )
   endfunction()
 
   add_cli_contract_test(help help)
+  add_cli_contract_test(version version)
   add_cli_contract_test(no_arguments no_arguments)
   add_cli_contract_test(unknown_option unknown_option)
   add_cli_contract_test(unknown_subcommand unknown_subcommand)
@@ -356,6 +388,13 @@ if(BUILD_TESTING)
   )
   if(WIN32)
     add_test(
+      NAME release.windows_version_resource
+      COMMAND pwsh -NoProfile -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_version_resource.ps1"
+        -BennuExecutable "$<TARGET_FILE:bennu>"
+        -ExpectedVersion "${BENNU_VERSION}"
+    )
+    add_test(
       NAME cli.windows_unicode_paths
       COMMAND
         "${CMAKE_COMMAND}"
@@ -391,9 +430,45 @@ if(BUILD_TESTING)
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_workflow.cmake"
   )
+  add_test(
+    NAME release.version_source_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/version_source_contract.cmake"
+  )
+  add_test(
+    NAME release.windows_version_resource_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_version_resource_contract.cmake"
+  )
+  if(WIN32)
+    set(bennu_test_release_target windows-x64)
+  elseif(APPLE)
+    set(bennu_test_release_target macos-arm64)
+  else()
+    set(bennu_test_release_target linux-x64)
+  endif()
+  add_test(
+    NAME release.provenance
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_provenance_test.py"
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/provenance.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+      "$<TARGET_FILE:bennu>"
+      "${bennu_test_release_target}"
+  )
+  add_test(
+    NAME release.future_workflow_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/future_release_workflow.cmake"
+  )
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_program(BENNU_BASH_EXECUTABLE bash REQUIRED)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(
       NAME release.linux_compatibility
       COMMAND
@@ -420,6 +495,14 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_publication_test.py"
         "${BENNU_BASH_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/publish-release.sh"
+    )
+    add_test(
+      NAME release.future_publication_state_machine
+      COMMAND
+        "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/future_release_publication_test.py"
+        "${BENNU_BASH_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/publish-future-release.sh"
     )
   endif()
 endif()

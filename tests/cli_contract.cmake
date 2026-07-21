@@ -22,6 +22,10 @@ if(NOT DEFINED BENNU_EXECUTABLE_SUFFIX)
   message(FATAL_ERROR "BENNU_EXECUTABLE_SUFFIX is required")
 endif()
 
+if(NOT DEFINED BENNU_VERSION)
+  message(FATAL_ERROR "BENNU_VERSION is required")
+endif()
+
 function(check_run_error name source line column category message_text)
   set(source_file "${CMAKE_CURRENT_BINARY_DIR}/bennu-${name}.bennu")
   file(WRITE "${source_file}" "${source}")
@@ -53,6 +57,7 @@ if(CASE STREQUAL "help")
   set(expected_exit 0)
   set(expected_stdout [=[Usage: bennu <command> [arguments]
        bennu --help
+       bennu --version
 
 Commands:
   repl    Start an interactive Bennu session
@@ -60,6 +65,11 @@ Commands:
   emit-c  Emit C source for a Bennu source file
   build   Build a Bennu source file
 ]=])
+  set(expected_stderr "")
+elseif(CASE STREQUAL "version")
+  set(arguments --version)
+  set(expected_exit 0)
+  set(expected_stdout "bennu ${BENNU_VERSION}\n")
   set(expected_stderr "")
 elseif(CASE STREQUAL "no_arguments")
   set(arguments)

@@ -46,7 +46,7 @@ endif()
 foreach(required_output IN ITEMS
     "Verified Linux archive"
     "Linux ELF compatibility policy passed"
-    "Linux package journeys passed")
+    "Linux package journeys passed: --help, --version")
   string(FIND "${package_stdout}\n${verify_stdout}" "${required_output}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR

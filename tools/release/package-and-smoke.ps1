@@ -130,6 +130,29 @@ function Assert-WindowsRuntimeDependencies {
   Write-Host "Verified packaged PE dependencies: $($dependencies -join ', ')"
 }
 
+function Assert-WindowsVersionResource {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedVersion
+  )
+
+  $info = (Get-Item -LiteralPath $Path).VersionInfo
+  $expected = @{
+    FileVersion = $ExpectedVersion
+    ProductVersion = $ExpectedVersion
+    ProductName = "Bennu"
+    FileDescription = "Bennu data-oriented programming language"
+    OriginalFilename = "bennu.exe"
+  }
+  foreach ($name in $expected.Keys) {
+    if ($info.$name -cne $expected[$name]) {
+      throw "PE $name mismatch: expected '$($expected[$name])', observed '$($info.$name)'"
+    }
+  }
+}
+
 $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
 $licensePath = (Resolve-Path -LiteralPath $License).Path
@@ -162,6 +185,18 @@ try {
   try {
     Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $bennuPath -Arguments @("run", $sourcePath)) `
       -Journey "file runner" -Expected $expectedOutput
+
+    $productVersion = $null
+    if ($LanguageSurface -eq "rewrite") {
+      $versionOutput = @(Invoke-Checked -FilePath $bennuPath -Arguments @("--version"))
+      if ($versionOutput.Count -ne 1 -or "$($versionOutput[0])" -notmatch '^bennu (.+)$') {
+        throw "Bennu --version output is not one exact product version line"
+      }
+      $productVersion = $Matches[1]
+      if ($Platform -eq "windows-x64") {
+        Assert-WindowsVersionResource -Path $bennuPath -ExpectedVersion $productVersion
+      }
+    }
 
     $generatedC = Join-Path $workRoot "${generatedStem}.c"
     $generatedExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "emitted.exe" } else { "emitted" })
@@ -226,9 +261,18 @@ try {
       Assert-UnixExecutable -Path $stagedExecutable
       Assert-UnixExecutable -Path $extractedExecutable
     }
+    if ($LanguageSurface -eq "rewrite") {
+      Assert-SmokeOutput `
+        -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("--version")) `
+        -Journey "extracted --version" `
+        -Expected "bennu $productVersion"
+    }
     Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) `
       -Journey "extracted archive" -Expected $expectedOutput
     if ($Platform -eq "windows-x64") {
+      if ($LanguageSurface -eq "rewrite") {
+        Assert-WindowsVersionResource -Path $extractedExecutable -ExpectedVersion $productVersion
+      }
       & (Join-Path $PSScriptRoot "verify-clean-windows-package.ps1") `
         -BennuExecutable $extractedExecutable `
         -Source $sourcePath `
