@@ -9,6 +9,18 @@ file(REMOVE_RECURSE "${work_root}")
 file(MAKE_DIRECTORY "${work_root}")
 set(version_parser "${BENNU_SOURCE_DIR}/cmake/bennu_version.cmake")
 
+set(gitattributes_file "${BENNU_SOURCE_DIR}/.gitattributes")
+if(NOT EXISTS "${gitattributes_file}")
+  message(FATAL_ERROR
+    ".gitattributes is required to preserve canonical VERSION bytes on Windows")
+endif()
+file(READ "${gitattributes_file}" gitattributes)
+string(FIND "${gitattributes}" "VERSION text eol=lf" version_eol_at)
+if(version_eol_at EQUAL -1)
+  message(FATAL_ERROR
+    ".gitattributes must force VERSION to LF in every worktree")
+endif()
+
 file(READ "${BENNU_SOURCE_DIR}/tests/cli_contract.cmake" cli_contract)
 string(FIND "${cli_contract}" [=[set(expected_stdout "bennu ${BENNU_VERSION}\n")]=]
   configured_cli_version_at)
