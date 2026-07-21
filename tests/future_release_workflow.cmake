@@ -82,7 +82,9 @@ foreach(forbidden IN ITEMS
     "gh release download"
     "gh release view"
     "gh release edit"
-    "gh release delete")
+    "gh release delete"
+    "--hostname uploads.github.com"
+    [=["repos/${repository}/releases/${release_id}/assets?name=${name}"]=])
   string(FIND "${publisher_text}" "${forbidden}" forbidden_at)
   if(NOT forbidden_at EQUAL -1)
     message(FATAL_ERROR "future publisher must not use draft tag lookup through: ${forbidden}")
@@ -91,7 +93,11 @@ endforeach()
 foreach(required IN ITEMS
     "gh api --method POST \"repos/\${repository}/releases\""
     "release_api_endpoint=\"repos/\${repository}/releases/\${release_id}\""
-    "repos/\${repository}/releases/\${release_id}/assets?name=\${name}"
+    [=[remote_field '.upload_url']=]
+    "https://uploads.github.com/"
+    [=["${upload_endpoint}?name=${name}"]=]
+    [=[[[ ! "$resume_release_id" =~ ^[0-9]+$ ]]]=]
+    [=[[[ "$(remote_field '.name')" == "$release_name" ]]]=]
     "repos/\${repository}/releases/assets/\${asset_id}"
     "gh api --method PATCH \"\$release_api_endpoint\""
     "-F draft=false")

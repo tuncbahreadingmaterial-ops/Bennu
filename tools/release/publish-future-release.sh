@@ -2,14 +2,15 @@
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: publish-future-release.sh <candidate-directory> <source-commit> <annotated-tag>" >&2
+if [[ $# -ne 3 && $# -ne 4 ]]; then
+  echo "usage: publish-future-release.sh <candidate-directory> <source-commit> <annotated-tag> [draft-release-id]" >&2
   exit 2
 fi
 
 candidate_directory=$(realpath "$1")
 source_commit=$2
 release_tag=$3
+resume_release_id=${4:-}
 repository=${GITHUB_REPOSITORY:-}
 if [[ -z "$repository" ]]; then
   echo "error: GITHUB_REPOSITORY is required" >&2
@@ -17,6 +18,10 @@ if [[ -z "$repository" ]]; then
 fi
 if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
   echo "error: source commit must be an exact lowercase 40-hex object ID" >&2
+  exit 1
+fi
+if [[ -n "$resume_release_id" ]] && [[ ! "$resume_release_id" =~ ^[0-9]+$ ]]; then
+  echo "error: resume draft release ID must be decimal numeric" >&2
   exit 1
 fi
 if [[ ! -f "$candidate_directory/release-manifest.json" ]]; then
@@ -62,6 +67,7 @@ if [[ ${#identity[@]} -ne 6 ]]; then
   exit 1
 fi
 version=${identity[0]}
+release_name="Bennu $version"
 manifest_commit=${identity[1]}
 manifest_tag=${identity[2]}
 if [[ "$version" == "0.1.0" || "$release_tag" == "v0.1.0" ]]; then
@@ -130,14 +136,6 @@ if [[ "$tag_target" != "$source_commit commit" ]]; then
   exit 1
 fi
 
-for release_file in "${release_files[@]}"; do
-  gh attestation verify "$release_file" \
-    --repo "$repository" \
-    --signer-workflow "$repository/.github/workflows/future-release.yml" \
-    --source-digest "$source_commit" \
-    --deny-self-hosted-runners
-done
-
 work_directory=$(mktemp -d "${RUNNER_TEMP:-/tmp}/bennu-future-publish.XXXXXX")
 creation_fields_file="$work_directory/creation-fields.txt"
 cleanup() {
@@ -147,6 +145,7 @@ trap cleanup EXIT
 
 release_id=
 release_api_endpoint=
+upload_endpoint=
 
 remote_field() {
   local expression=$1
@@ -156,25 +155,44 @@ remote_field() {
 verify_remote_metadata() {
   local expected_draft=$1
   local observed_id
+  local observed_id_type
+  local observed_upload_url
+  local expected_upload_url
 
   observed_id=$(remote_field '.id')
+  observed_id_type=$(remote_field '.id | type')
+  observed_upload_url=$(remote_field '.upload_url')
+  expected_upload_url="https://uploads.github.com/repos/${repository}/releases/${release_id}/assets{?name,label}"
   [[ "$observed_id" =~ ^[0-9]+$ ]] &&
+    [[ "$observed_id_type" == number ]] &&
     [[ "$observed_id" == "$release_id" ]] &&
     [[ "$(remote_field '.tag_name')" == "$release_tag" ]] &&
+    [[ "$(remote_field '.name')" == "$release_name" ]] &&
     [[ "$(remote_field '.target_commitish')" == "$source_commit" ]] &&
     [[ "$(remote_field '.draft')" == "$expected_draft" ]] &&
-    [[ "$(remote_field '.prerelease')" == false ]]
+    [[ "$(remote_field '.prerelease')" == false ]] &&
+    [[ "$observed_upload_url" == "$expected_upload_url" ]] &&
+    upload_endpoint=${observed_upload_url%\{?name,label\}}
+}
+
+verify_zero_remote_assets() {
+  local remote_names
+
+  remote_names=$(gh api "$release_api_endpoint" --jq '.assets[].name') || return 1
+  [[ -z "$remote_names" ]]
 }
 
 verify_remote_assets() {
   local remote_names=()
+  local remote_name_lines
   local name
   local asset_id
   local downloaded
 
-  mapfile -t remote_names < <(
-    gh api "$release_api_endpoint" --jq '.assets[].name' | LC_ALL=C sort
-  )
+  remote_name_lines=$(gh api "$release_api_endpoint" --jq '.assets[].name') || return 1
+  if [[ -n "$remote_name_lines" ]]; then
+    mapfile -t remote_names < <(printf '%s\n' "$remote_name_lines" | LC_ALL=C sort)
+  fi
   if [[ ${#remote_names[@]} -ne ${#expected_names[@]} ]]; then
     return 1
   fi
@@ -199,32 +217,58 @@ verify_remote_assets() {
   done
 }
 
-gh api --method POST "repos/${repository}/releases" \
-  -f tag_name="$release_tag" \
-  -f target_commitish="$source_commit" \
-  -f name="Bennu $version" \
-  -f body='Target-native tested packages for Linux x64, Windows x64, and macOS arm64.' \
-  -F draft=true \
-  -F prerelease=false \
-  --jq '[.id, (.id | type), .tag_name, .target_commitish, .draft, .prerelease][]' \
-  >"$creation_fields_file"
-
-mapfile -t creation_fields <"$creation_fields_file"
-if [[ ${#creation_fields[@]} -ne 6 ]] || \
-   [[ ! "${creation_fields[0]}" =~ ^[0-9]+$ ]] || \
-   [[ "${creation_fields[1]}" != number ]] || \
-   [[ "${creation_fields[2]}" != "$release_tag" ]] || \
-   [[ "${creation_fields[3]}" != "$source_commit" ]] || \
-   [[ "${creation_fields[4]}" != true ]] || \
-   [[ "${creation_fields[5]}" != false ]]; then
-  echo "error: created draft response metadata does not match; draft remains unpublished" >&2
-  exit 1
+if [[ -n "$resume_release_id" ]]; then
+  release_id=$resume_release_id
+  release_api_endpoint="repos/${repository}/releases/${release_id}"
+  if ! verify_remote_metadata true || ! verify_zero_remote_assets; then
+    echo "error: supplied resume draft ID, metadata, upload URL, or zero-asset state does not match" >&2
+    exit 1
+  fi
 fi
 
-release_id=${creation_fields[0]}
-release_api_endpoint="repos/${repository}/releases/${release_id}"
-if ! verify_remote_metadata true; then
-  echo "error: created draft metadata does not match; draft remains unpublished" >&2
+for release_file in "${release_files[@]}"; do
+  gh attestation verify "$release_file" \
+    --repo "$repository" \
+    --signer-workflow "$repository/.github/workflows/future-release.yml" \
+    --source-digest "$source_commit" \
+    --deny-self-hosted-runners
+done
+
+if [[ -z "$resume_release_id" ]]; then
+  gh api --method POST "repos/${repository}/releases" \
+    -f tag_name="$release_tag" \
+    -f target_commitish="$source_commit" \
+    -f name="$release_name" \
+    -f body='Target-native tested packages for Linux x64, Windows x64, and macOS arm64.' \
+    -F draft=true \
+    -F prerelease=false \
+    --jq '[.id, (.id | type), .tag_name, .name, .target_commitish, .draft, .prerelease, .upload_url][]' \
+    >"$creation_fields_file"
+
+  mapfile -t creation_fields <"$creation_fields_file"
+  if [[ ${#creation_fields[@]} -ne 8 ]] || \
+     [[ ! "${creation_fields[0]}" =~ ^[0-9]+$ ]] || \
+     [[ "${creation_fields[1]}" != number ]] || \
+     [[ "${creation_fields[2]}" != "$release_tag" ]] || \
+     [[ "${creation_fields[3]}" != "$release_name" ]] || \
+     [[ "${creation_fields[4]}" != "$source_commit" ]] || \
+     [[ "${creation_fields[5]}" != true ]] || \
+     [[ "${creation_fields[6]}" != false ]]; then
+    echo "error: created draft response metadata does not match; draft remains unpublished" >&2
+    exit 1
+  fi
+
+  release_id=${creation_fields[0]}
+  release_api_endpoint="repos/${repository}/releases/${release_id}"
+  expected_upload_url="https://uploads.github.com/repos/${repository}/releases/${release_id}/assets{?name,label}"
+  if [[ "${creation_fields[7]}" != "$expected_upload_url" ]]; then
+    echo "error: created draft response upload URL does not match; draft remains unpublished" >&2
+    exit 1
+  fi
+fi
+
+if ! verify_remote_metadata true || ! verify_zero_remote_assets; then
+  echo "error: draft metadata, upload URL, or zero-asset state does not match; draft remains unpublished" >&2
   exit 1
 fi
 
@@ -237,7 +281,7 @@ for name in "${expected_names[@]}"; do
   esac
   gh api --method POST \
     -H "Content-Type: $content_type" \
-    "repos/${repository}/releases/${release_id}/assets?name=${name}" \
+    "${upload_endpoint}?name=${name}" \
     --input "$candidate_directory/$name" >/dev/null
 done
 

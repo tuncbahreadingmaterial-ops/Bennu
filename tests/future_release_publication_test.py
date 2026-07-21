@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlsplit
 
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -57,9 +58,14 @@ def release_object(state, apply_remote_override=True):
     response = {
         "id": state["release_id"],
         "tag_name": state["tag"],
+        "name": state["name"],
         "target_commitish": state["target"],
         "draft": state["draft"],
         "prerelease": state["prerelease"],
+        "upload_url": (
+            "https://uploads.github.com/repos/example/Bennu/releases/"
+            f"{state['release_id']}/assets{{?name,label}}"
+        ),
         "assets": assets,
     }
     if apply_remote_override:
@@ -78,9 +84,11 @@ def emit_jq(response, expression):
     scalar_fields = {
         ".id": "id",
         ".tag_name": "tag_name",
+        ".name": "name",
         ".target_commitish": "target_commitish",
         ".draft": "draft",
         ".prerelease": "prerelease",
+        ".upload_url": "upload_url",
     }
     if expression in scalar_fields:
         value = response.get(scalar_fields[expression])
@@ -88,6 +96,9 @@ def emit_jq(response, expression):
             print(str(value).lower())
         elif value is not None:
             print(value)
+        return
+    if expression == ".id | type":
+        print("number" if isinstance(response.get("id"), int) else "string")
         return
     if expression == ".assets[].name":
         for asset in response.get("assets", []):
@@ -118,6 +129,28 @@ def emit_jq(response, expression):
             else:
                 print(value)
         return
+    if expression == (
+        '[.id, (.id | type), .tag_name, .name, .target_commitish, .draft, '
+        '.prerelease, .upload_url][]'
+    ):
+        values = [
+            response.get("id"),
+            "number" if isinstance(response.get("id"), int) else "string",
+            response.get("tag_name"),
+            response.get("name"),
+            response.get("target_commitish"),
+            response.get("draft"),
+            response.get("prerelease"),
+            response.get("upload_url"),
+        ]
+        for value in values:
+            if isinstance(value, bool):
+                print(str(value).lower())
+            elif value is None:
+                print("null")
+            else:
+                print(value)
+        return
     if expression == '.object.sha + " " + .object.type':
         print(f"{response['object']['sha']} {response['object']['type']}")
         return
@@ -128,6 +161,7 @@ def emit_jq(response, expression):
 def parse_api(arguments):
     method = "GET"
     endpoint = None
+    hostname = None
     jq_expression = None
     input_path = None
     fields = {}
@@ -138,6 +172,9 @@ def parse_api(arguments):
             method = arguments[index + 1]
             index += 2
         elif argument in ("-H", "--header"):
+            index += 2
+        elif argument == "--hostname":
+            hostname = arguments[index + 1]
             index += 2
         elif argument in ("-f", "-F"):
             key, value = arguments[index + 1].split("=", 1)
@@ -155,7 +192,20 @@ def parse_api(arguments):
         else:
             print(f"fake gh received unexpected argument {argument!r}", file=sys.stderr)
             raise SystemExit(90)
-    return method, endpoint, jq_expression, input_path, fields
+    if endpoint is None:
+        print("fake gh requires an API endpoint", file=sys.stderr)
+        raise SystemExit(90)
+    parsed = urlsplit(endpoint)
+    if parsed.scheme:
+        if parsed.scheme != "https" or not parsed.netloc:
+            print(f"fake gh rejected invalid absolute endpoint {endpoint!r}", file=sys.stderr)
+            raise SystemExit(90)
+        host = parsed.netloc
+    elif hostname is not None:
+        host = f"api.{hostname}"
+    else:
+        host = "api.github.com"
+    return method, endpoint, host, jq_expression, input_path, fields
 
 
 def fake_gh(arguments):
@@ -172,14 +222,27 @@ def fake_gh(arguments):
         print("fake gh only supports attestation verify and gh api", file=sys.stderr)
         return 90
 
-    method, endpoint, jq_expression, input_path, fields = parse_api(arguments)
+    method, endpoint, host, jq_expression, input_path, fields = parse_api(arguments)
     append_call(
         state_path,
-        {"method": method, "endpoint": endpoint, "fields": fields, "input": input_path},
+        {
+            "method": method,
+            "endpoint": endpoint,
+            "host": host,
+            "fields": fields,
+            "input": input_path,
+            "jq": jq_expression,
+        },
     )
     repository = os.environ["GITHUB_REPOSITORY"]
     published_endpoint = f"repos/{repository}/releases/tags/{TAG}"
     release_endpoint = f"repos/{repository}/releases/{state['release_id']}"
+
+    if host != "api.github.com" and not (
+        method == "POST" and host in ("uploads.github.com", "api.uploads.github.com")
+    ):
+        print(f"gh: unsupported API host {host} (HTTP 404)", file=sys.stderr)
+        return 1
 
     if method == "GET" and endpoint == published_endpoint:
         if not state["published"] or state.get("published_lookup_failure"):
@@ -202,9 +265,15 @@ def fake_gh(arguments):
         )
         return 0
 
-    if method == "GET" and endpoint == release_endpoint:
+    numeric_release_match = re.fullmatch(
+        rf"repos/{re.escape(repository)}/releases/(\d+)", endpoint
+    )
+    if method == "GET" and numeric_release_match:
         if not state["exists"]:
             print("gh: Not Found (HTTP 404)", file=sys.stderr)
+            return 1
+        if jq_expression == ".assets[].name" and state.get("asset_list_failure"):
+            print("gh: asset list failed (HTTP 500)", file=sys.stderr)
             return 1
         emit_jq(release_object(state), jq_expression)
         return 0
@@ -240,6 +309,7 @@ def fake_gh(arguments):
                 "draft": True,
                 "prerelease": False,
                 "tag": fields.get("tag_name"),
+                "name": fields.get("name"),
                 "target": fields.get("target_commitish"),
             }
         )
@@ -249,11 +319,29 @@ def fake_gh(arguments):
         emit_jq(response, jq_expression)
         return 0
 
-    upload_match = re.fullmatch(
+    relative_upload_match = re.fullmatch(
         rf"repos/{re.escape(repository)}/releases/{state['release_id']}/assets\?name=(.+)",
-        endpoint or "",
+        endpoint,
     )
-    if method == "POST" and upload_match:
+    absolute_upload_match = re.fullmatch(
+        rf"https://uploads\.github\.com/repos/{re.escape(repository)}/releases/"
+        rf"{state['release_id']}/assets\?name=(.+)",
+        endpoint,
+    )
+    if method == "POST" and relative_upload_match and host == "api.github.com":
+        print(
+            "gh: upload endpoint used api.github.com; expected uploads.github.com (HTTP 404)",
+            file=sys.stderr,
+        )
+        return 1
+    if method == "POST" and host == "api.uploads.github.com":
+        print(
+            "gh: invalid upload host api.uploads.github.com (HTTP 404)",
+            file=sys.stderr,
+        )
+        return 1
+    if method == "POST" and absolute_upload_match and host == "uploads.github.com":
+        upload_match = absolute_upload_match
         name = upload_match.group(1)
         if input_path is None:
             print("fake upload requires --input", file=sys.stderr)
@@ -306,7 +394,7 @@ def read_calls(state_path):
     ]
 
 
-def execute(bash, script, updates=None):
+def execute(bash, script, updates=None, resume_id=None):
     with tempfile.TemporaryDirectory(prefix="bennu-future-publish-") as directory:
         root = Path(directory)
         candidates = root / "candidates"
@@ -331,6 +419,7 @@ def execute(bash, script, updates=None):
             "draft": False,
             "prerelease": False,
             "tag": None,
+            "name": None,
             "target": None,
             "assets": [],
             "tag_object": "tag-object",
@@ -342,7 +431,11 @@ def execute(bash, script, updates=None):
             state.update(updates)
         if state["assets"]:
             for name in state["assets"]:
-                shutil.copyfile(candidates / name, remote / name)
+                candidate = candidates / name
+                if candidate.is_file():
+                    shutil.copyfile(candidate, remote / name)
+                else:
+                    (remote / name).write_bytes(b"unexpected remote asset\n")
         state_path = root / "state.json"
         state_path.write_text(json.dumps(state), encoding="utf-8")
         state_path.with_suffix(".calls").write_text("", encoding="utf-8")
@@ -356,8 +449,11 @@ def execute(bash, script, updates=None):
                 "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
             }
         )
+        command = [bash, script, str(candidates), COMMIT, TAG]
+        if resume_id is not None:
+            command.append(str(resume_id))
         result = subprocess.run(
-            [bash, script, str(candidates), COMMIT, TAG],
+            command,
             text=True,
             capture_output=True,
             check=False,
@@ -380,6 +476,26 @@ def mutations(case):
     return [call for call in api_calls(case) if call["method"] in ("POST", "PATCH")]
 
 
+def upload_calls(case):
+    return [
+        call
+        for call in api_calls(case)
+        if call["method"] == "POST" and "/assets?name=" in call["endpoint"]
+    ]
+
+
+def require_host_contract(case, description):
+    for call in api_calls(case):
+        expected_host = (
+            "uploads.github.com" if call in upload_calls(case) else "api.github.com"
+        )
+        require(
+            call["host"] == expected_host,
+            f"{description} used {call['host']} instead of {expected_host}: {call}",
+            case["result"],
+        )
+
+
 def require_unpublished(case, description, draft_expected=True, patch_allowed=False):
     result = case["result"]
     require(result.returncode != 0, f"{description} unexpectedly succeeded", result)
@@ -397,6 +513,13 @@ def require_unpublished(case, description, draft_expected=True, patch_allowed=Fa
 def run_success(bash, script):
     case = execute(bash, script)
     result = case["result"]
+    if result.returncode != 0:
+        require(
+            "upload endpoint used api.github.com; expected uploads.github.com (HTTP 404)"
+            in result.stderr,
+            "fresh release failed for a reason other than the upload API host",
+            result,
+        )
     require(result.returncode == 0, "fresh release path failed", result)
     require(result.stdout == "published verified non-prerelease v1.2.3 release\n",
             "success output changed", result)
@@ -414,9 +537,17 @@ def run_success(bash, script):
     first_creation_call = calls.index(api[create])
     require(len(attestations) == 4 and max(attestations) < first_creation_call,
             "all attestations must pass before draft creation", result)
-    uploads = [call for call in api if call["method"] == "POST" and "/assets?name=" in call["endpoint"]]
+    uploads = upload_calls(case)
     require([call["endpoint"].split("?name=", 1)[1] for call in uploads] == NAMES,
             "publisher did not upload exactly three archives plus manifest", result)
+    require(all(call["endpoint"].startswith("https://uploads.github.com/")
+                for call in uploads),
+            "publisher did not use absolute upload URLs", result)
+    require_host_contract(case, "fresh publication")
+    first_upload_call = calls.index(uploads[0])
+    require(calls[first_upload_call - 1].get("jq") == ".assets[].name",
+            "fresh publication did not prove zero assets immediately before upload",
+            result)
     require(any(call["endpoint"] == "repos/example/Bennu/releases/424242"
                 for call in api[create + 1:patch]),
             "draft was not re-fetched by numeric ID", result)
@@ -436,6 +567,69 @@ def run_success(bash, script):
                            if call["method"] == "GET" and "/releases/assets/" in call["endpoint"]]
     require(len(published_downloads) == 4,
             "published bytes were not all re-downloaded read-only", result)
+
+
+def resume_state(**updates):
+    state = {
+        "exists": True,
+        "published": False,
+        "draft": True,
+        "prerelease": False,
+        "tag": TAG,
+        "name": "Bennu 1.2.3",
+        "target": COMMIT,
+        "assets": [],
+    }
+    state.update(updates)
+    return state
+
+
+def run_resume_success(bash, script):
+    case = execute(bash, script, resume_state(), resume_id=424242)
+    result = case["result"]
+    require(result.returncode == 0, "zero-asset numeric resume failed", result)
+    require(case["state"]["published"], "resume did not publish the draft", result)
+    require(case["remote"] == case["local"], "resume remote bytes differ", result)
+    require_host_contract(case, "resume publication")
+
+    calls = case["calls"]
+    api = api_calls(case)
+    require(not any(call["method"] == "POST" and
+                    call["endpoint"] == "repos/example/Bennu/releases"
+                    for call in api),
+            "resume created a release", result)
+    uploads = upload_calls(case)
+    require([call["endpoint"].split("?name=", 1)[1] for call in uploads] == NAMES,
+            "resume did not upload the fixed four assets", result)
+    first_upload = calls.index(uploads[0])
+    attestations = [i for i, call in enumerate(calls)
+                    if call.get("command") == "attestation"]
+    require(len(attestations) == 4 and max(attestations) < first_upload,
+            "resume attestations did not all precede mutation", result)
+    require(calls[first_upload - 1].get("endpoint") ==
+            "repos/example/Bennu/releases/424242" and
+            calls[first_upload - 1].get("jq") == ".assets[].name",
+            "resume did not re-prove zero assets immediately before upload", result)
+    require([call["endpoint"] for call in api[:3]] == [
+                "repos/example/Bennu/releases/tags/v1.2.3",
+                "repos/example/Bennu/git/ref/tags/v1.2.3",
+                "repos/example/Bennu/git/tags/tag-object",
+            ],
+            "resume did not prove published absence and annotated-tag target first",
+            result)
+    patch_indices = [i for i, call in enumerate(api) if call["method"] == "PATCH"]
+    require(len(patch_indices) == 1, "resume did not PATCH exactly once", result)
+    patch = patch_indices[0]
+    require(api[patch]["endpoint"] == "repos/example/Bennu/releases/424242",
+            "resume did not PATCH the supplied numeric ID", result)
+    require(not any(call["method"] in ("POST", "PATCH") for call in api[patch + 1:]),
+            "resume mutated state after publication", result)
+    require(any(call["endpoint"].endswith("/releases/tags/v1.2.3")
+                for call in api[patch + 1:]),
+            "resume did not re-query the public tag endpoint", result)
+    require(len([call for call in api[patch + 1:]
+                 if call["method"] == "GET" and "/releases/assets/" in call["endpoint"]]) == 4,
+            "resume did not re-download all published assets", result)
 
 
 def run_precreation_failures(bash, script):
@@ -470,9 +664,11 @@ def run_creation_failures(bash, script):
         ("missing ID", {"id": None}),
         ("string ID", {"id": "424242"}),
         ("wrong tag", {"tag_name": "v9.9.9"}),
+        ("wrong name", {"name": "Bennu wrong"}),
         ("wrong commit", {"target_commitish": "f" * 40}),
         ("published", {"draft": False}),
         ("prerelease", {"prerelease": True}),
+        ("invalid upload URL", {"upload_url": "https://api.github.com/upload"}),
     ]
     for description, override in malformed:
         case = execute(bash, script, {"creation_override": override})
@@ -496,6 +692,7 @@ def run_draft_failures(bash, script):
         ({"asset_view": "missing"}, "missing asset"),
         ({"asset_view": "extra"}, "extra asset"),
         ({"remote_override": {"target_commitish": "f" * 40}}, "draft metadata mismatch"),
+        ({"remote_override": {"name": "Bennu wrong"}}, "draft name mismatch"),
         ({"remote_override_after_upload": {"draft": False}}, "post-upload metadata mismatch"),
     ]:
         case = execute(bash, script, updates)
@@ -505,13 +702,89 @@ def run_draft_failures(bash, script):
     require_unpublished(case, "publication PATCH failure", patch_allowed=True)
 
 
-def run_post_publish_failures(bash, script):
+def run_resume_refusals(bash, script):
+    for supplied_id, updates, description in [
+        ("not-numeric", resume_state(), "nonnumeric resume ID"),
+        (999999, resume_state(), "nonmatching numeric resume ID"),
+        (424242, resume_state(remote_override={"id": "424242"}), "string remote ID"),
+        (424242, resume_state(remote_override={"tag_name": "v9.9.9"}), "wrong tag"),
+        (424242, resume_state(remote_override={"name": "Bennu wrong"}), "wrong name"),
+        (424242, resume_state(remote_override={"target_commitish": "f" * 40}),
+         "wrong target"),
+        (424242, resume_state(remote_override={"draft": False}), "non-draft release"),
+        (424242, resume_state(remote_override={"prerelease": True}), "prerelease draft"),
+        (424242, resume_state(remote_override={"upload_url": "http://uploads.github.com/bad"}),
+         "invalid upload URL"),
+    ]:
+        case = execute(bash, script, updates, resume_id=supplied_id)
+        require(case["result"].returncode != 0,
+                f"resume metadata refusal ({description}) succeeded", case["result"])
+        require(not mutations(case),
+                f"resume metadata refusal ({description}) mutated remote state", case["result"])
+
+    for assets, description in [
+        (list(NAMES), "complete asset set"),
+        (NAMES[:1], "partial asset set"),
+        (list(NAMES) + ["unexpected.bin"], "extra asset set"),
+        (["unknown.bin"], "unknown asset"),
+    ]:
+        case = execute(
+            bash,
+            script,
+            resume_state(assets=assets),
+            resume_id=424242,
+        )
+        require(case["result"].returncode != 0,
+                f"resume accepted pre-existing {description}", case["result"])
+        require(not mutations(case),
+                f"resume mutated pre-existing {description}", case["result"])
+
+    for failure_number in range(1, 5):
+        case = execute(
+            bash,
+            script,
+            resume_state(attestation_failure_number=failure_number),
+            resume_id=424242,
+        )
+        require(case["result"].returncode != 0,
+                f"resume attestation failure {failure_number} succeeded", case["result"])
+        require(not mutations(case),
+                f"resume attestation failure {failure_number} mutated remote state",
+                case["result"])
+
+    case = execute(
+        bash,
+        script,
+        resume_state(asset_list_failure=True),
+        resume_id=424242,
+    )
+    require(case["result"].returncode != 0,
+            "resume asset-list API failure succeeded", case["result"])
+    require(not mutations(case),
+            "resume asset-list API failure mutated remote state", case["result"])
+
+
+def run_resume_mutation_failures(bash, script):
+    for updates, description, patch_allowed in [
+        ({"upload_failure_number": 2}, "resume upload failure", False),
+        ({"tamper_upload": True}, "resume uploaded-byte failure", False),
+        ({"tamper_download": True}, "resume remote-byte failure", False),
+        ({"patch_failure": True}, "resume PATCH failure", True),
+    ]:
+        state = resume_state(**updates)
+        case = execute(bash, script, state, resume_id=424242)
+        require_unpublished(case, description, patch_allowed=patch_allowed)
+
+
+def run_post_publish_failures(bash, script, resume=False):
     for updates, description in [
         ({"published_lookup_failure": True}, "published metadata lookup failure"),
         ({"published_override": {"prerelease": True}}, "published metadata mismatch"),
+        ({"published_override": {"name": "Bennu wrong"}}, "published name mismatch"),
         ({"tamper_download_after_publish": True}, "published byte mismatch"),
     ]:
-        case = execute(bash, script, updates)
+        state = resume_state(**updates) if resume else updates
+        case = execute(bash, script, state, resume_id=424242 if resume else None)
         require(case["result"].returncode != 0, f"{description} succeeded", case["result"])
         require(case["state"]["published"], f"{description} did not reach publication", case["result"])
         api = api_calls(case)
@@ -527,10 +800,14 @@ def main():
         print(f"usage: {sys.argv[0]} <bash> <publish-future-release.sh>", file=sys.stderr)
         return 2
     run_success(sys.argv[1], sys.argv[2])
+    run_resume_success(sys.argv[1], sys.argv[2])
     run_precreation_failures(sys.argv[1], sys.argv[2])
     run_creation_failures(sys.argv[1], sys.argv[2])
     run_draft_failures(sys.argv[1], sys.argv[2])
+    run_resume_refusals(sys.argv[1], sys.argv[2])
+    run_resume_mutation_failures(sys.argv[1], sys.argv[2])
     run_post_publish_failures(sys.argv[1], sys.argv[2])
+    run_post_publish_failures(sys.argv[1], sys.argv[2], resume=True)
     print("future release publication state-machine tests passed")
     return 0
 
