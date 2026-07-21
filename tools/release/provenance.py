@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from typing import NoReturn
 import zipfile
 
 
@@ -24,7 +25,7 @@ TARGETS = {"linux-x64", "windows-x64", "macos-arm64"}
 WORKFLOW_PATH = ".github/workflows/future-release.yml"
 
 
-def fail(message):
+def fail(message) -> NoReturn:
     raise ValueError(message)
 
 
@@ -162,9 +163,14 @@ def run_version(contents, executable_path, expected_version):
             )
         except (OSError, subprocess.SubprocessError) as error:
             fail(f"unable to execute packaged Bennu: {error}")
-    expected = f"bennu {expected_version}\n".encode("utf-8")
+    line_ending = b"\r\n" if executable_path.endswith(".exe") else b"\n"
+    expected = f"bennu {expected_version}".encode("utf-8") + line_ending
     if result.returncode != 0 or result.stdout != expected or result.stderr != b"":
-        fail("packaged Bennu --version does not match VERSION exactly")
+        fail(
+            "packaged Bennu --version does not match VERSION exactly: "
+            f"stdout={result.stdout!r}, stderr={result.stderr!r}, "
+            f"status={result.returncode}"
+        )
 
 
 def canonical_bytes(document):

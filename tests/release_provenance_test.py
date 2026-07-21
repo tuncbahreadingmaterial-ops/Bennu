@@ -67,6 +67,55 @@ def create_archive(root, executable, executable_path, target, version):
     return archive, staged_executable
 
 
+def run_windows_newline_fixture(python, tool, source_dir):
+    if os.name == "nt":
+        return
+
+    version = product_version(source_dir)
+    with tempfile.TemporaryDirectory(prefix="bennu-windows-newline-") as directory:
+        root = Path(directory)
+        executable = root / "native-windows-line"
+        executable.write_bytes(
+            b"#!/bin/sh\nprintf 'bennu " + version.encode("ascii") + b"\\r\\n'\n"
+        )
+        executable.chmod(0o755)
+        archive, _ = create_archive(
+            root, executable, "bennu.exe", "windows-x64", version
+        )
+        output = root / "windows-x64.fragment.json"
+        result = subprocess.run(
+            [
+                python,
+                tool,
+                "fragment",
+                "--version-file",
+                str(Path(source_dir) / "VERSION"),
+                "--target",
+                "windows-x64",
+                "--source-commit",
+                SOURCE_COMMIT,
+                "--archive",
+                str(archive),
+                "--executable-path",
+                "bennu.exe",
+                "--repository",
+                REPOSITORY,
+                "--workflow",
+                WORKFLOW,
+                "--output",
+                str(output),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        require(
+            result.returncode == 0,
+            "native Windows CRLF version line was rejected",
+            result,
+        )
+
+
 def run_fragment(python, tool, source_dir, executable, target):
     executable_path = "bennu.exe" if target.startswith("windows-") else "bennu"
     version = product_version(source_dir)
@@ -444,6 +493,7 @@ def run_gate(python, tool):
 def main():
     require(len(sys.argv) == 6,
             "usage: release_provenance_test.py <python> <tool> <source> <bennu> <target>")
+    run_windows_newline_fixture(sys.argv[1], sys.argv[2], sys.argv[3])
     run_fragment(*sys.argv[1:])
     run_gate(sys.argv[1], sys.argv[2])
 

@@ -1,4 +1,4 @@
-foreach(required BENNU_SOURCE_DIR BENNU_BINARY_DIR)
+foreach(required BENNU_SOURCE_DIR BENNU_BINARY_DIR BENNU_PYTHON_EXECUTABLE)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
   endif()
@@ -54,7 +54,20 @@ endif()
 
 function(check_version name contents expected_status)
   set(version_file "${work_root}/${name}.txt")
-  file(WRITE "${version_file}" "${contents}")
+  string(HEX "${contents}" contents_hex)
+  execute_process(
+    COMMAND "${BENNU_PYTHON_EXECUTABLE}" -c
+      "__import__('pathlib').Path(__import__('sys').argv[1]).write_bytes(bytes.fromhex(__import__('sys').argv[2]))"
+      "${version_file}" "${contents_hex}"
+    RESULT_VARIABLE write_status
+    OUTPUT_VARIABLE write_stdout
+    ERROR_VARIABLE write_stderr
+  )
+  if(NOT write_status EQUAL 0)
+    message(FATAL_ERROR
+      "${name}: unable to write exact version fixture (${write_status})\n"
+      "${write_stdout}${write_stderr}")
+  endif()
   execute_process(
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_VERSION_FILE=${version_file}"
