@@ -68,6 +68,9 @@ require_workflow_text("-Source $historicalSource `\n            -LanguageSurface
 require_workflow_text([=[examples/rewrite.bennu \
             LICENSE \
             rewrite]=] "current-main Linux rewrite smoke on the compatibility floor")
+require_workflow_text([=[git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          historical_source="$RUNNER_TEMP/v0.1.0-level1.bennu"]=]
+  "container-safe historical Git access")
 require_workflow_text("git show '0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu'" "immutable historical Linux smoke input extraction")
 require_workflow_text([=["$historical_source" \
             LICENSE \

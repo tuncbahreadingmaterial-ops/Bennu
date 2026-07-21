@@ -359,6 +359,7 @@ jobs:
           LINUX_ASSET_SHA256: 21f4608d1e32f83dcaf6ad121c2bac51181077330fcd8e5af31388e0504b85e6
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           historical_source="$RUNNER_TEMP/v0.1.0-level1.bennu"
           git show '0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu' >"$historical_source"
           python3 - "$LINUX_ASSET_URL" "$LINUX_ASSET_SHA256" durable-linux.tar.gz <<'PY'
