@@ -226,12 +226,13 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-      - name: Smoke, package, inspect, and execute extracted binary
+      - name: Smoke current-main rewrite, package, inspect, and execute extracted binary
         shell: pwsh
         run: >-
           ./tools/release/package-and-smoke.ps1
           -BennuExecutable '${{ matrix.executable }}'
-          -Source 'examples/level1.bennu'
+          -Source 'examples/rewrite.bennu'
+          -LanguageSurface 'rewrite'
           -License 'LICENSE'
           -Platform '${{ matrix.platform }}'
           -Archive '${{ matrix.archive }}'
@@ -246,6 +247,9 @@ jobs:
           $archive = Join-Path $env:RUNNER_TEMP "durable-bennu-v0.1.0-windows-x64.zip"
           $extractRoot = Join-Path $env:RUNNER_TEMP "durable-bennu-v0.1.0-windows-x64"
           $repacked = Join-Path $env:RUNNER_TEMP "durable-bennu-repacked.zip"
+          $historicalSource = Join-Path $env:RUNNER_TEMP "v0.1.0-level1.bennu"
+          git show "0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu" | Out-File -FilePath $historicalSource -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw "failed to extract immutable v0.1.0 smoke input" }
           Invoke-WebRequest -Uri $env:WINDOWS_ASSET_URL -OutFile $archive
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
           if ($hash -cne $env:WINDOWS_ASSET_SHA256) {
@@ -262,7 +266,8 @@ jobs:
 
           ./tools/release/package-and-smoke.ps1 `
             -BennuExecutable (Join-Path $extractRoot "bennu.exe") `
-            -Source 'examples/level1.bennu' `
+            -Source $historicalSource `
+            -LanguageSurface 'v0.1.0' `
             -License (Join-Path $extractRoot "LICENSE") `
             -Platform 'windows-x64' `
             -Archive $repacked
@@ -321,6 +326,8 @@ jobs:
 
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
 
       - name: Download Linux archive
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -341,8 +348,9 @@ jobs:
           dpkg-query -W -f='${Package}=${Version}\n' gcc libc6 libc6-dev
           tools/release/verify-linux-package.sh \
             release-assets/bennu-v0.1.0-linux-x64.tar.gz \
-            examples/level1.bennu \
-            LICENSE
+            examples/rewrite.bennu \
+            LICENSE \
+            rewrite
 
       - name: Verify durable Linux release asset
         shell: bash
@@ -351,6 +359,8 @@ jobs:
           LINUX_ASSET_SHA256: 21f4608d1e32f83dcaf6ad121c2bac51181077330fcd8e5af31388e0504b85e6
         run: |
           set -euo pipefail
+          historical_source="$RUNNER_TEMP/v0.1.0-level1.bennu"
+          git show '0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu' >"$historical_source"
           python3 - "$LINUX_ASSET_URL" "$LINUX_ASSET_SHA256" durable-linux.tar.gz <<'PY'
           import hashlib
           import pathlib
@@ -371,8 +381,9 @@ jobs:
           PY
           tools/release/verify-linux-package.sh \
             durable-linux.tar.gz \
-            examples/level1.bennu \
-            LICENSE
+            "$historical_source" \
+            LICENSE \
+            v0.1.0
 
   verify-linux-current:
     name: Verify Linux package on current userland
@@ -403,8 +414,9 @@ jobs:
           cc --version | sed -n '1p'
           tools/release/verify-linux-package.sh \
             release-assets/bennu-v0.1.0-linux-x64.tar.gz \
-            examples/level1.bennu \
-            LICENSE
+            examples/rewrite.bennu \
+            LICENSE \
+            rewrite
 
   publish:
     name: Verify and publish v0.1.0

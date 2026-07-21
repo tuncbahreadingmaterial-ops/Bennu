@@ -3,18 +3,31 @@ if(NOT DEFINED BENNU_SOURCE_DIR)
 endif()
 
 file(GLOB_RECURSE active_files
+  LIST_DIRECTORIES false
   "${BENNU_SOURCE_DIR}/include/*"
   "${BENNU_SOURCE_DIR}/src/*"
   "${BENNU_SOURCE_DIR}/examples/*"
-  "${BENNU_SOURCE_DIR}/tests/*")
+  "${BENNU_SOURCE_DIR}/tests/*"
+  "${BENNU_SOURCE_DIR}/.github/*")
+file(GLOB top_level_hidden_configuration
+  LIST_DIRECTORIES false
+  "${BENNU_SOURCE_DIR}/.*")
+list(APPEND active_files ${top_level_hidden_configuration})
 list(APPEND active_files "${BENNU_SOURCE_DIR}/README.md")
+list(REMOVE_DUPLICATES active_files)
 string(CONCAT obsolete_constructor "io" "ata")
 foreach(path IN LISTS active_files)
-  if(IS_DIRECTORY "${path}" OR
+  if(path STREQUAL "${BENNU_SOURCE_DIR}/.git" OR
+     IS_DIRECTORY "${path}" OR
      path MATCHES "/tests/obsolete_surface_contract\\.cmake$")
     continue()
   endif()
   file(READ "${path}" text)
+  string(REPLACE
+    "0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu"
+    ""
+    current_tree_text
+    "${text}")
   foreach(obsolete IN ITEMS
       "${obsolete_constructor}"
       "bootstrap_vector_bytes"
@@ -25,7 +38,7 @@ foreach(path IN LISTS active_files)
       "level1-example"
       "examples/level1.bennu"
       "bennu_print_array(int64_t count)")
-    string(FIND "${text}" "${obsolete}" obsolete_at)
+    string(FIND "${current_tree_text}" "${obsolete}" obsolete_at)
     if(NOT obsolete_at EQUAL -1)
       message(FATAL_ERROR "obsolete public surface '${obsolete}' remains in ${path}")
     endif()

@@ -62,6 +62,52 @@ require_workflow_text("Verify durable Windows release asset" "durable Windows as
 require_workflow_text("https://github.com/tuncbahreadingmaterial-ops/Bennu/releases/download/v0.1.0/bennu-v0.1.0-windows-x64.zip" "durable Windows asset URL")
 require_workflow_text("4b87f4af18251a6c4f19e60eb015421141bbe235354102b7f5ebd094035ebc12" "durable Windows asset SHA256")
 require_workflow_text("Get-FileHash -Algorithm SHA256" "durable Windows asset hash verification")
+require_workflow_text("-Source 'examples/rewrite.bennu'\n          -LanguageSurface 'rewrite'" "current-main native rewrite smoke")
+require_workflow_text("git show \"0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu\"" "immutable historical Windows smoke input extraction")
+require_workflow_text("-Source $historicalSource `\n            -LanguageSurface 'v0.1.0'" "durable Windows historical-language smoke")
+require_workflow_text([=[examples/rewrite.bennu \
+            LICENSE \
+            rewrite]=] "current-main Linux rewrite smoke on the compatibility floor")
+require_workflow_text("git show '0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1.bennu'" "immutable historical Linux smoke input extraction")
+require_workflow_text([=["$historical_source" \
+            LICENSE \
+            v0.1.0]=] "durable Linux historical-language smoke")
+
+string(REGEX MATCHALL
+  "0f31967e0a70b424f4201133a54ae7cd8aa5d659:examples/level1\\.bennu"
+  historical_source_references
+  "${workflow_text}")
+list(LENGTH historical_source_references historical_source_reference_count)
+if(NOT historical_source_reference_count EQUAL 2)
+  message(FATAL_ERROR
+    "release workflow must extract the immutable v0.1.0 source exactly once per durable platform smoke")
+endif()
+
+set(current_tree_workflow_text "${workflow_text}")
+string(CONCAT bootstrap_source_path "examples/level" "1.bennu")
+string(REPLACE
+  "0f31967e0a70b424f4201133a54ae7cd8aa5d659:${bootstrap_source_path}"
+  ""
+  current_tree_workflow_text
+  "${current_tree_workflow_text}")
+string(FIND
+  "${current_tree_workflow_text}"
+  "${bootstrap_source_path}"
+  unqualified_bootstrap_source_at)
+if(NOT unqualified_bootstrap_source_at EQUAL -1)
+  message(FATAL_ERROR
+    "release workflow retains an unqualified current-tree bootstrap source reference")
+endif()
+
+string(REGEX MATCHALL
+  "examples/rewrite\\.bennu"
+  current_rewrite_source_references
+  "${workflow_text}")
+list(LENGTH current_rewrite_source_references current_rewrite_source_reference_count)
+if(NOT current_rewrite_source_reference_count EQUAL 3)
+  message(FATAL_ERROR
+    "release workflow must use the current rewrite source for exactly three current-main package smokes")
+endif()
 require_workflow_text("actions/upload-artifact@" "temporary artifact upload")
 require_workflow_text("retention-days: 1" "short temporary artifact retention")
 
@@ -83,6 +129,8 @@ if(NOT EXISTS "${package_script}")
 endif()
 file(READ "${package_script}" package_text)
 foreach(required_text IN ITEMS
+    "LanguageSurface"
+    "v0.1.0"
     "emit-c"
     "Remove-Item Env:CC"
     "ZipFile"
@@ -137,6 +185,8 @@ if(NOT EXISTS "${clean_windows_script}")
 endif()
 file(READ "${clean_windows_script}" clean_windows_text)
 foreach(required_clean_windows_text IN ITEMS
+    "LanguageSurface"
+    "v0.1.0"
     "--help"
     "repl"
     "run"

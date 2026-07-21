@@ -1,7 +1,12 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [string]$BennuExecutable
+  [string]$BennuExecutable,
+  [Parameter(Mandatory = $true)]
+  [string]$Source,
+  [Parameter(Mandatory = $true)]
+  [ValidateSet("rewrite", "v0.1.0")]
+  [string]$LanguageSurface
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,13 +77,23 @@ if ($env:OS -cne "Windows_NT" -or -not [Environment]::Is64BitOperatingSystem) {
 }
 
 $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
+$inputSourcePath = (Resolve-Path -LiteralPath $Source).Path
 $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) "bennu-clean-$([guid]::NewGuid().ToString('N'))"
-$sourcePath = Join-Path $workRoot "rewrite.bennu"
-$emittedPath = Join-Path $workRoot "rewrite.c"
-$nativePath = Join-Path $workRoot "rewrite.exe"
+$sourcePath = Join-Path $workRoot "smoke.bennu"
+$emittedPath = Join-Path $workRoot "smoke.c"
+$nativePath = Join-Path $workRoot "smoke.exe"
 $runtimeRegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
 $minimumRuntimeVersion = [Version]"14.51.36231.0"
-$expectedOutput = "(1 2 3 4 5)`n3.5`n"
+$expectedOutput = if ($LanguageSurface -eq "rewrite") {
+  "6`n(8 -2 12 1)`n3.5`n(false true false true)`n(true false)`n(1 2 3 4 5)`n"
+} else {
+  ">>(1 2 3 4 5)`n>>6`n"
+}
+$expectedRepl = if ($LanguageSurface -eq "rewrite") {
+  "> 6`n> (8 -2 12 1)`n> 3.5`n> (false true false true)`n> (true false)`n> (1 2 3 4 5)`n> "
+} else {
+  "> >>(1 2 3 4 5)`n> >>6`n> "
+}
 $expectedHelp = @"
 Usage: bennu <command> [arguments]
        bennu --help
@@ -94,8 +109,8 @@ $hadCC = Test-Path Env:CC
 $savedCC = if ($hadCC) { $env:CC } else { $null }
 
 New-Item -ItemType Directory -Path $workRoot | Out-Null
-[System.IO.File]::WriteAllText($sourcePath, "iota[5]`nadd[1 2.5]`n",
-  [System.Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath $inputSourcePath -Destination $sourcePath
+$sourceText = [System.IO.File]::ReadAllText($sourcePath)
 
 try {
   if (-not (Test-Path -LiteralPath $runtimeRegistryPath)) {
@@ -128,9 +143,8 @@ try {
   Assert-Success -Result $help -ExpectedStdout $expectedHelp -Journey "--help"
 
   $repl = Invoke-Captured -FilePath $bennuPath -Arguments @("repl") `
-    -WorkingDirectory $workRoot -StandardInput "iota[5]`nadd[1 2.5]`n"
-  Assert-Success -Result $repl `
-    -ExpectedStdout "> (1 2 3 4 5)`n> 3.5`n> " -Journey "repl"
+    -WorkingDirectory $workRoot -StandardInput $sourceText
+  Assert-Success -Result $repl -ExpectedStdout $expectedRepl -Journey "repl"
 
   $run = Invoke-Captured -FilePath $bennuPath -Arguments @("run", $sourcePath) `
     -WorkingDirectory $workRoot

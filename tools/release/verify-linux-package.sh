@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: verify-linux-package.sh <archive> <source> <license>" >&2
+if [[ $# -ne 4 ]]; then
+  echo "usage: verify-linux-package.sh <archive> <source> <license> <language-surface>" >&2
   exit 2
 fi
 
@@ -11,6 +11,27 @@ script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 archive=$(realpath "$1")
 source_file=$(realpath "$2")
 license=$(realpath "$3")
+language_surface=$4
+
+case "$language_surface" in
+  rewrite)
+    expected_output=$'6\n(8 -2 12 1)\n3.5\n(false true false true)\n(true false)\n(1 2 3 4 5)\n'
+    generated_name=rewrite.c
+    invalid_source=$'iota[5]\nadd[1 true]\n'
+    expected_error=TypeError
+    ;;
+  v0.1.0)
+    expected_output=$'>>(1 2 3 4 5)\n>>6\n'
+    generated_name=v0.1.0-level1.c
+    historical_first_line=$(sed -n '1p' "$source_file")
+    invalid_source=$(printf '%s\ninc %s\n' "$historical_first_line" "$historical_first_line")
+    expected_error='type mismatch'
+    ;;
+  *)
+    echo "error: unsupported language surface: $language_surface" >&2
+    exit 2
+    ;;
+esac
 
 for required_file in "$archive" "$source_file" "$license"; do
   if [[ ! -f "$required_file" ]]; then
@@ -51,7 +72,7 @@ bennu="$extracted/bennu"
 python3 "$script_root/verify-linux-elf.py" "$bennu"
 
 expected="$work_root/expected.out"
-printf '6\n(8 -2 12 1)\n3.5\n(false true false true)\n(true false)\n(1 2 3 4 5)\n' >"$expected"
+printf '%s' "$expected_output" >"$expected"
 stdout="$work_root/stdout"
 stderr="$work_root/stderr"
 
@@ -73,7 +94,7 @@ if [[ -s "$stderr" ]] || ! cmp --silent "$expected" "$stdout"; then
   exit 1
 fi
 
-generated_c="$work_root/rewrite.c"
+generated_c="$work_root/$generated_name"
 generated="$work_root/emitted"
 if ! "$bennu" emit-c "$source_file" -o "$generated_c" >"$stdout" 2>"$stderr"; then
   echo "error: extracted Bennu emit-c failed" >&2
@@ -112,12 +133,12 @@ if [[ -s "$stderr" ]] || ! cmp --silent "$expected" "$stdout"; then
 fi
 
 invalid="$work_root/invalid.bennu"
-printf 'iota[5]\nadd[1 true]\n' >"$invalid"
+printf '%s' "$invalid_source" >"$invalid"
 if "$bennu" run "$invalid" >"$stdout" 2>"$stderr"; then
   echo "error: invalid source unexpectedly ran successfully" >&2
   exit 1
 fi
-if [[ -s "$stdout" ]] || ! grep -Fq 'TypeError' "$stderr"; then
+if [[ -s "$stdout" ]] || ! grep -Fq "$expected_error" "$stderr"; then
   echo "error: invalid run did not preserve atomic result output" >&2
   exit 1
 fi

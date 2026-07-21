@@ -33,6 +33,7 @@ execute_process(
     "${archive}"
     "${BENNU_SOURCE_DIR}/examples/rewrite.bennu"
     "${BENNU_SOURCE_DIR}/LICENSE"
+    "rewrite"
   RESULT_VARIABLE verify_status
   OUTPUT_VARIABLE verify_stdout
   ERROR_VARIABLE verify_stderr

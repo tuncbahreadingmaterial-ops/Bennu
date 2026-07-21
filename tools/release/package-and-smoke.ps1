@@ -5,6 +5,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Source,
   [Parameter(Mandatory = $true)]
+  [ValidateSet("rewrite", "v0.1.0")]
+  [string]$LanguageSurface,
+  [Parameter(Mandatory = $true)]
   [string]$License,
   [Parameter(Mandatory = $true)]
   [ValidateSet("linux-x64", "windows-x64", "macos-arm64")]
@@ -32,18 +35,19 @@ function Invoke-Checked {
   return $output
 }
 
-function Assert-RewriteOutput {
+function Assert-SmokeOutput {
   param(
     [Parameter(Mandatory = $true)]
     [object[]]$Actual,
     [Parameter(Mandatory = $true)]
-    [string]$Journey
+    [string]$Journey,
+    [Parameter(Mandatory = $true)]
+    [string]$Expected
   )
 
   $normalized = (($Actual | ForEach-Object { "$_" }) -join "`n").Replace("`r", "").TrimEnd("`n")
-  $expected = "6`n(8 -2 12 1)`n3.5`n(false true false true)`n(true false)`n(1 2 3 4 5)"
-  if ($normalized -cne $expected) {
-    throw "$Journey output mismatch. Expected '$expected', observed '$normalized'"
+  if ($normalized -cne $Expected) {
+    throw "$Journey output mismatch. Expected '$Expected', observed '$normalized'"
   }
 }
 
@@ -130,6 +134,12 @@ $bennuPath = (Resolve-Path -LiteralPath $BennuExecutable).Path
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
 $licensePath = (Resolve-Path -LiteralPath $License).Path
 $archivePath = [System.IO.Path]::GetFullPath($Archive)
+$expectedOutput = if ($LanguageSurface -eq "rewrite") {
+  "6`n(8 -2 12 1)`n3.5`n(false true false true)`n(true false)`n(1 2 3 4 5)"
+} else {
+  ">>(1 2 3 4 5)`n>>6"
+}
+$generatedStem = if ($LanguageSurface -eq "rewrite") { "rewrite" } else { "v0.1.0-level1" }
 $archiveParent = Split-Path -Parent $archivePath
 if (-not (Test-Path -LiteralPath $archiveParent -PathType Container)) {
   throw "Archive parent does not exist: $archiveParent"
@@ -150,9 +160,10 @@ New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
 try {
   Push-Location $workRoot
   try {
-    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $bennuPath -Arguments @("run", $sourcePath)) -Journey "file runner"
+    Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $bennuPath -Arguments @("run", $sourcePath)) `
+      -Journey "file runner" -Expected $expectedOutput
 
-    $generatedC = Join-Path $workRoot "rewrite.c"
+    $generatedC = Join-Path $workRoot "${generatedStem}.c"
     $generatedExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "emitted.exe" } else { "emitted" })
     Invoke-Checked -FilePath $bennuPath -Arguments @("emit-c", $sourcePath, "-o", $generatedC) | Out-Null
     if ($Platform -eq "windows-x64") {
@@ -160,7 +171,8 @@ try {
     } else {
       Invoke-Checked -FilePath "cc" -Arguments @("-std=c11", $generatedC, "-o", $generatedExecutable) | Out-Null
     }
-    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $generatedExecutable -Arguments @()) -Journey "emitted C executable"
+    Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $generatedExecutable -Arguments @()) `
+      -Journey "emitted C executable" -Expected $expectedOutput
 
     $nativeExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "native.exe" } else { "native" })
     $hadCC = Test-Path Env:CC
@@ -175,7 +187,8 @@ try {
         Remove-Item Env:CC -ErrorAction SilentlyContinue
       }
     }
-    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $nativeExecutable -Arguments @()) -Journey "fallback native build"
+    Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $nativeExecutable -Arguments @()) `
+      -Journey "fallback native build" -Expected $expectedOutput
 
     $stagedExecutable = Join-Path $stageRoot $executableName
     Copy-Item -LiteralPath $bennuPath -Destination $stagedExecutable
@@ -213,10 +226,13 @@ try {
       Assert-UnixExecutable -Path $stagedExecutable
       Assert-UnixExecutable -Path $extractedExecutable
     }
-    Assert-RewriteOutput -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) -Journey "extracted archive"
+    Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $extractedExecutable -Arguments @("run", $sourcePath)) `
+      -Journey "extracted archive" -Expected $expectedOutput
     if ($Platform -eq "windows-x64") {
       & (Join-Path $PSScriptRoot "verify-clean-windows-package.ps1") `
-        -BennuExecutable $extractedExecutable
+        -BennuExecutable $extractedExecutable `
+        -Source $sourcePath `
+        -LanguageSurface $LanguageSurface
     }
 
     $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
