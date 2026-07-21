@@ -204,6 +204,25 @@ if(BUILD_TESTING)
   )
   add_test(NAME stdout.unit COMMAND bennu_stdout_tests)
 
+  add_executable(bennu_public_resource_fixture
+    ${bennu_implementation_sources}
+    tests/public_resource_fixture.cpp
+  )
+  target_include_directories(bennu_public_resource_fixture PRIVATE include)
+  target_include_directories(bennu_public_resource_fixture SYSTEM PRIVATE
+    third_party/doctest
+  )
+  target_compile_definitions(bennu_public_resource_fixture PRIVATE
+    DOCTEST_CONFIG_DISABLE
+    DOCTEST_CONFIG_NO_EXCEPTIONS
+    DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+  )
+  set_target_properties(bennu_public_resource_fixture PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+
   add_executable(bennu_fake_c_compiler
     tests/fake_c_compiler.cpp
     src/path_encoding.cpp
@@ -263,6 +282,26 @@ if(BUILD_TESTING)
       "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
       "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_emission_contract.cmake"
+  )
+  add_test(
+    NAME cli.public_path_error_matrix
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/public_path_error_matrix.cmake"
+  )
+  add_test(
+    NAME public.api_resource_matrix
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_PUBLIC_RESOURCE_FIXTURE=$<TARGET_FILE:bennu_public_resource_fixture>"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/public_resource_contract.cmake"
   )
   add_test(
     NAME cli.emit_c_negative_atomic

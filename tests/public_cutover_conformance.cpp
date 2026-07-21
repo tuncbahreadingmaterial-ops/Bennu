@@ -203,3 +203,23 @@ TEST_CASE("CUTOVER-07 explicit bounded profile agrees across public evaluator an
   CHECK(refused_emission.error.resource->limit_kind ==
         bennu::ResourceLimitKind::max_work_units);
 }
+
+TEST_CASE("PUBLIC-RESOURCE-01 allocation injection reaches evaluation and generated runtime") {
+  const bennu::EvaluationConfiguration injected{
+      bennu::ExecutionProfile::trusted_local_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{std::size_t{0U}}};
+
+  bennu::ValueResult evaluated = bennu::evaluate_expression("iota[2]", injected);
+  REQUIRE_FALSE(evaluated.ok);
+  CHECK(evaluated.error.kind == bennu::ErrorKind::resource_error);
+  REQUIRE(evaluated.error.resource.has_value());
+  CHECK(evaluated.error.resource->reason ==
+        bennu::ResourceErrorReason::allocation_unavailable);
+
+  const bennu::CEmissionResult emitted =
+      bennu::emit_c_source("iota[2]", injected);
+  REQUIRE(emitted.ok);
+  CHECK(emitted.source.find("0U, 0U, 0U, 1, 0U, BENNU_FAILURE_NONE") !=
+        std::string::npos);
+}

@@ -1,3 +1,4 @@
+# TEST-ID: DOCS-SMOKE
 foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")

@@ -23,6 +23,7 @@ struct ProgramResult {
 struct EvaluationConfiguration {
   ExecutionProfile profile;
   ResourceLimits limits;
+  AllocationFailureInjection allocation_failure{};
 };
 
 ValueResult evaluate_expression(std::string_view source);

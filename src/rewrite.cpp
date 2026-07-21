@@ -1829,7 +1829,8 @@ CBackendConfiguration trusted_local_c_configuration() {
 EvaluationConfiguration trusted_local_evaluation_configuration() {
   return EvaluationConfiguration{
       ExecutionProfile::trusted_local_v1,
-      ResourceLimits{std::nullopt, std::nullopt, std::nullopt}};
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
 }
 
 CBackendConfiguration c_backend_configuration(
@@ -1837,7 +1838,7 @@ CBackendConfiguration c_backend_configuration(
   return CBackendConfiguration{
       configuration.profile, configuration.limits,
       AllocationFailureInjection{std::nullopt},
-      AllocationFailureInjection{std::nullopt}};
+      configuration.allocation_failure};
 }
 
 RewriteEvaluationResult evaluate_rewrite_source_impl(
@@ -4186,7 +4187,7 @@ ValueResult evaluate_expression(
     const EvaluationConfiguration &configuration) {
   const RewriteEvaluationCreationData creation{
       configuration.profile, configuration.limits,
-      AllocationFailureInjection{std::nullopt}};
+      configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
       evaluate_rewrite_source_impl(source, creation, true);
   if (!evaluated.ok) {
@@ -4219,7 +4220,7 @@ ProgramResult evaluate_source(
     const EvaluationConfiguration &configuration) {
   const RewriteEvaluationCreationData creation{
       configuration.profile, configuration.limits,
-      AllocationFailureInjection{std::nullopt}};
+      configuration.allocation_failure};
   RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);

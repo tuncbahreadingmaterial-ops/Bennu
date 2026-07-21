@@ -5,7 +5,7 @@ BENNU-SPEC-0001 sections 8 through 11|tests/application_section16_conformance.cp
 BENNU-SPEC-0001 sections 12 and 13|src/resources.cpp|profile refusal precedence is vector then live then work
 BENNU-SPEC-0001 section 15|src/rewrite.cpp|rewrite evaluator matches the tracked Section 15 and 16 corpus
 BENNU-SPEC-0001 section 16|tests/application_section16_conformance.cpp|S16-00 matrix enumerates every initial elementwise primitive
-BENNU-SPEC-0001 section 16 cross-backend|CMakeLists.txt|cli.emit_c_differential
+BENNU-SPEC-0001 section 16 cross-backend|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CROSS-PATH-BYTES
 BENNU-SPEC-0001 section 17|tests/application_section16_conformance.cpp|S16-22 every primitive is pointwise-consistent across deterministic small shapes and boundaries
 BENNU-SPEC-0001 section 18|src/rewrite.cpp|rewrite parser builds postorder generic calls and contiguous arenas
 BENNU-SPEC-0002 sections 3 and 11|src/rewrite.cpp|rewrite tokenizer uses generic categories and one-based byte spans
@@ -20,18 +20,23 @@ BENNU-SPEC-0003 sections 6 through 9|src/primitive.cpp|Double inc and add kernel
 BENNU-SPEC-0003 section 10|src/primitive.cpp|scalar projection conversion covers every type pair and Int64 bits
 BENNU-SPEC-0003 section 11|src/primitive.cpp|equals and not kernels cover Bool Int and Double domains
 BENNU-SPEC-0003 sections 12 and 13|tests/public_cutover_conformance.cpp|CUTOVER-03 public APIs preserve structured located rewrite errors
-BENNU-SPEC-0003 sections 14 and 15|CMakeLists.txt|cli.emit_c_differential
+BENNU-SPEC-0003 sections 14 and 15|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CORPUS
 BENNU-SPEC-0004 sections 3 and 4|src/resources.cpp|trusted profile omits policy limits but retains mandatory safety
 BENNU-SPEC-0004 sections 5 through 7|src/resources.cpp|each profile limit honors zero one exact and one-past semantics
 BENNU-SPEC-0004 section 8|src/error.cpp|errors retain semantic context independently of presentation text
-BENNU-SPEC-0004 section 9|CMakeLists.txt|cli.emit_c_differential
-BENNU-SPEC-0004 section 9 bounded identity|tests/public_cutover_conformance.cpp|CUTOVER-07 explicit bounded profile agrees across public evaluator and emitter
-BENNU-SPEC-0004 section 10|src/resources.cpp|allocation failure injection is ordinal and transactional
+BENNU-SPEC-0004 section 9|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-CROSS-BACKEND
+BENNU-SPEC-0004 section 9 bounded identity|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-CROSS-BACKEND
+BENNU-SPEC-0004 section 10|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-ALLOCATION
+BENNU-SPEC-0004 section 10.3|tests/public_resource_contract.cmake|PUBLIC-RESOURCE-RESET
 WP10 public evaluator and errors|tests/public_cutover_conformance.cpp|CUTOVER-01 public evaluator accepts rewrite syntax and rejects the removed constructor spelling
-WP10 transactional runner|CMakeLists.txt|add_cli_contract_test(run_batch_no_partial_output run_batch_no_partial_output)
-WP10 REPL|CMakeLists.txt|add_cli_contract_test(repl_transcript repl_transcript)
-WP10 typed C backend|tests/public_cutover_conformance.cpp|CUTOVER-05 public emitter lowers arbitrary typed vector contents
-WP10 native backend|CMakeLists.txt|cli.build_native
+WP10 comprehensive direct evaluator corpus|tests/public_resource_contract.cmake|PUBLIC-DIRECT-SUCCESS-CORPUS
+WP10 direct evaluator error categories|tests/public_resource_contract.cmake|PUBLIC-DIRECT-ERROR-MATRIX
+WP10 transactional runner and exact error categories|tests/public_path_error_matrix.cmake|PUBLIC-ERROR-CLI-MATRIX
+WP10 REPL primitives errors recovery and reset|tests/public_path_error_matrix.cmake|PUBLIC-ERROR-CLI-MATRIX
+WP10 typed C backend|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CROSS-PATH-BYTES
+WP10 native backend|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-NATIVE
+WP10 comprehensive public success corpus|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CORPUS
 WP10 trusted CLI profile|tests/public_cutover_conformance.cpp|CUTOVER-06 trusted local public evaluation omits arbitrary policy caps
-WP10 documentation|CMakeLists.txt|docs.smoke
-WP10 obsolete-surface deletion|CMakeLists.txt|architecture.obsolete_surface
+WP10 public CLI error and resource atomicity|tests/public_path_error_matrix.cmake|PUBLIC-ERROR-CLI-MATRIX
+WP10 documentation|tests/documentation_smoke.cmake|DOCS-SMOKE
+WP10 obsolete-surface deletion|tests/obsolete_surface_contract.cmake|OBSOLETE-SURFACE
