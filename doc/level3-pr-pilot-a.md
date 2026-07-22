@@ -5,7 +5,7 @@ workflow. It does not change Bennu language, runtime, CLI, backend, release, or
 product behavior.
 
 pilot: issue-41-a
-pilot_revision: 1
+pilot_revision: 2
 qa_expected: reject
 
 The rejection marker is intentional. Verity Meridian uses this revision to
