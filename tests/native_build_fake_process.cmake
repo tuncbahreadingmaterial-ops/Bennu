@@ -93,7 +93,9 @@ endif()
 file(READ "${trace}" explicit_trace)
 if(WIN32)
   if(NOT explicit_trace MATCHES "/std:c11" OR
-     NOT explicit_trace MATCHES "/Fe:.*native with spaces .*\\$\\(touch sentinel\\).*bennu-build.tmp.*program.exe")
+     NOT explicit_trace MATCHES "3:9:program.c" OR
+     NOT explicit_trace MATCHES "/Fe:program.exe" OR
+     NOT explicit_trace MATCHES "/Fo:program.exe.obj")
     message(FATAL_ERROR "MSVC fake compiler argument boundaries mismatch: ${explicit_trace}")
   endif()
 else()

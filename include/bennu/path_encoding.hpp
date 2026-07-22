@@ -18,6 +18,7 @@ struct PathToUtf8Result {
 };
 
 PathFromUtf8Result path_from_utf8(std::string_view text);
+PathFromUtf8Result path_for_io_from_utf8(std::string_view text);
 PathToUtf8Result path_to_utf8(const std::filesystem::path &path);
 
 #ifdef _WIN32

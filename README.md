@@ -222,8 +222,10 @@ macOS arm64. The Linux package compatibility floor is glibc 2.39 or newer on a
 supported Linux 6.8 GA kernel (or supported Ubuntu HWE kernel), with ELF symbol
 ceilings `GLIBC_2.34` and `GLIBCXX_3.4.32`; the executable dynamically resolves
 `libstdc++.so.6`, `libgcc_s.so.1`, `libc.so.6`, and `libm.so.6`. Windows users
-install the Microsoft Visual C++ 2017-2026 Redistributable (x64). On every
-platform, only `bennu build` requires an external C11 compiler.
+install the Microsoft Visual C++ 2017-2026 Redistributable (x64). On supported
+Windows 11 systems with long paths enabled, `run`, `emit-c`, and `build` accept
+ordinary paths beyond 260 characters; callers do not add a `\\?\` prefix. On
+every platform, only `bennu build` requires an external C11 compiler.
 
 The published `v0.1.0` archives, lightweight tag at commit
 `0f31967e0a70b424f4201133a54ae7cd8aa5d659`, release metadata, historical
