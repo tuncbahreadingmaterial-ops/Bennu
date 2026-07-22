@@ -1,6 +1,7 @@
 #include "bennu/path_encoding.hpp"
 
 #include <limits>
+#include <system_error>
 #include <utility>
 
 #ifdef _WIN32
@@ -66,6 +67,46 @@ PathFromUtf8Result path_from_utf8(std::string_view text) {
   return PathFromUtf8Result{true, std::filesystem::path(std::move(converted.text))};
 #else
   return PathFromUtf8Result{true, std::filesystem::path(std::string(text))};
+#endif
+}
+
+PathFromUtf8Result path_for_io_from_utf8(std::string_view text) {
+  PathFromUtf8Result converted = path_from_utf8(text);
+  if (!converted.ok) {
+    return converted;
+  }
+#ifdef _WIN32
+  std::filesystem::path path = std::move(converted.path);
+  path.make_preferred();
+  std::wstring native = path.native();
+  // Keep diagnostics in the caller's UTF-8 spelling while Win32 I/O receives
+  // one absolute extended-length path that does not depend on MAX_PATH.
+  if (native.starts_with(L"\\\\?\\") || native.starts_with(L"\\\\.\\")) {
+    return PathFromUtf8Result{true, std::move(path)};
+  }
+
+  if (!path.is_absolute()) {
+    std::error_code error;
+    path = std::filesystem::absolute(path, error);
+    if (error) {
+      return PathFromUtf8Result{false, {}};
+    }
+  }
+  path = path.lexically_normal();
+  path.make_preferred();
+  native = path.native();
+
+  if (native.starts_with(L"\\\\")) {
+    native = L"\\\\?\\UNC\\" + native.substr(2);
+  } else if (path.has_root_name() && path.has_root_directory()) {
+    native = L"\\\\?\\" + native;
+  } else {
+    return PathFromUtf8Result{false, {}};
+  }
+  return PathFromUtf8Result{true,
+                            std::filesystem::path(std::move(native))};
+#else
+  return converted;
 #endif
 }
 

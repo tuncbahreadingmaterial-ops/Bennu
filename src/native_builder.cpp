@@ -152,9 +152,14 @@ ProcessResult run_process(std::string_view executable,
   startup.hStdOutput = log;
   startup.hStdError = log;
   PROCESS_INFORMATION process{};
+  const wchar_t *application_name =
+      has_path_separator(executable) ||
+              executable.find(':') != std::string_view::npos
+          ? wide_executable.text.c_str()
+          : nullptr;
   const BOOL created = CreateProcessW(
-      nullptr, mutable_command.data(), nullptr, nullptr, TRUE, 0, nullptr,
-      working_directory.c_str(), &startup, &process);
+      application_name, mutable_command.data(), nullptr, nullptr, TRUE, 0,
+      nullptr, working_directory.c_str(), &startup, &process);
   const DWORD start_error = created != 0 ? ERROR_SUCCESS : GetLastError();
   CloseHandle(log);
   if (created == 0) {
@@ -394,6 +399,15 @@ NativeBuildResult failure_with_cleanup(const std::filesystem::path &temporary,
   return NativeBuildResult{false, std::move(message)};
 }
 
+std::string output_path_failure(std::string_view message,
+                                std::string_view output_path) {
+  std::string error(message);
+  error += " for '";
+  error += output_path;
+  error += '\'';
+  return error;
+}
+
 bool is_usable_native_output(const std::filesystem::path &path,
                              std::error_code &error) {
   const std::filesystem::file_status status =
@@ -498,21 +512,11 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
 
   std::error_code error;
   std::string launch_executable = selection.executable;
-  const PathFromUtf8Result selected_result =
-      path_from_utf8(selection.executable);
-  if (!selected_result.ok) {
-    return NativeBuildResult{
-        false, "compiler selected from " +
-                   std::string(compiler_configuration_name(
-                       selection.configuration)) +
-                   " ('" + selection.executable +
-                   "') has an invalid executable path"};
-  }
-  const std::filesystem::path &selected_path = selected_result.path;
-  if (has_path_separator(selection.executable) && selected_path.is_relative()) {
-    const std::filesystem::path absolute_selection =
-        std::filesystem::absolute(selected_path, error);
-    if (error) {
+  if (has_path_separator(selection.executable) ||
+      selection.executable.find(':') != std::string_view::npos) {
+    const PathFromUtf8Result selected_result =
+        path_for_io_from_utf8(selection.executable);
+    if (!selected_result.ok) {
       return NativeBuildResult{
           false, "compiler selected from " +
                      std::string(compiler_configuration_name(
@@ -520,8 +524,12 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                      " ('" + selection.executable +
                      "') has an invalid executable path"};
     }
-    PathToUtf8Result absolute_text = path_to_utf8(absolute_selection);
-    if (!absolute_text.ok) {
+    std::filesystem::path launch_path = selected_result.path;
+    if (launch_path.is_relative()) {
+      launch_path = std::filesystem::absolute(launch_path, error);
+    }
+    PathToUtf8Result launch_text = path_to_utf8(launch_path);
+    if (error || !launch_text.ok) {
       return NativeBuildResult{
           false, "compiler selected from " +
                      std::string(compiler_configuration_name(
@@ -529,8 +537,7 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                      " ('" + selection.executable +
                      "') has an invalid executable path"};
     }
-    selection.executable = std::move(absolute_text.text);
-    launch_executable = selection.executable;
+    launch_executable = std::move(launch_text.text);
   }
 #ifndef _WIN32
   if (!has_path_separator(selection.executable)) {
@@ -542,14 +549,21 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
 #endif
 
   error.clear();
-  const PathFromUtf8Result output_result = path_from_utf8(request.output_path);
+  const PathFromUtf8Result output_result =
+      path_for_io_from_utf8(request.output_path);
   if (!output_result.ok) {
-    return NativeBuildResult{false, "unable to prepare native output path"};
+    return NativeBuildResult{
+        false,
+        output_path_failure("unable to prepare native output path",
+                            request.output_path)};
   }
   std::filesystem::path output =
       std::filesystem::absolute(output_result.path, error);
   if (error || output.filename().empty()) {
-    return NativeBuildResult{false, "unable to prepare native output path"};
+    return NativeBuildResult{
+        false,
+        output_path_failure("unable to prepare native output path",
+                            request.output_path)};
   }
   const std::filesystem::path parent = output.parent_path();
   std::filesystem::path temporary_directory;
@@ -566,12 +580,19 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
       break;
     }
     if (error && error != std::errc::file_exists) {
-      return NativeBuildResult{false, "unable to create isolated build temporary directory"};
+      return NativeBuildResult{
+          false,
+          output_path_failure(
+              "unable to create isolated build temporary directory",
+              request.output_path)};
     }
     temporary_directory.clear();
   }
   if (temporary_directory.empty()) {
-    return NativeBuildResult{false, "unable to create isolated build temporary directory"};
+    return NativeBuildResult{
+        false,
+        output_path_failure("unable to create isolated build temporary directory",
+                            request.output_path)};
   }
 
   const std::filesystem::path c_source = temporary_directory / "program.c";
@@ -580,8 +601,10 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
       (native_platform() == NativePlatform::windows_msvc ? "program.exe" : "program");
   const std::filesystem::path compiler_log = temporary_directory / "compiler.log";
   if (!write_bytes(c_source, request.c_source)) {
-    return failure_with_cleanup(temporary_directory,
-                                "unable to write temporary C source");
+    return failure_with_cleanup(
+        temporary_directory,
+        output_path_failure("unable to write temporary C source",
+                            request.output_path));
   }
 
   PathToUtf8Result c_source_text = path_to_utf8(c_source);
@@ -628,8 +651,10 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
     }
   }
   if (replacement.empty()) {
-    return failure_with_cleanup(temporary_directory,
-                                "unable to stage compiled native output");
+    return failure_with_cleanup(
+        temporary_directory,
+        output_path_failure("unable to stage compiled native output",
+                            request.output_path));
   }
 
   error.clear();
@@ -637,7 +662,9 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   if (error) {
     std::error_code removal_error;
     std::filesystem::remove(replacement, removal_error);
-    std::string message = "unable to clean isolated build temporary directory";
+    std::string message = output_path_failure(
+        "unable to clean isolated build temporary directory",
+        request.output_path);
     if (removal_error) {
       message += "; unable to remove staged native output";
     }
@@ -646,7 +673,8 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   if (!replace_output(replacement, output)) {
     error.clear();
     std::filesystem::remove(replacement, error);
-    std::string message = "unable to replace native output";
+    std::string message = output_path_failure(
+        "unable to replace native output", request.output_path);
     if (error) {
       message += "; unable to remove staged native output";
     }

@@ -41,7 +41,8 @@ EnvironmentValue read_environment(const char *name) {
 #endif
 
 std::FILE *open_output(std::string_view path) {
-  const bennu::PathFromUtf8Result converted = bennu::path_from_utf8(path);
+  const bennu::PathFromUtf8Result converted =
+      bennu::path_for_io_from_utf8(path);
   if (!converted.ok) {
     return nullptr;
   }
