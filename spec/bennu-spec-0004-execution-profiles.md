@@ -14,6 +14,8 @@
 
 **Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
 
+**Structural tuples and profile v2:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
+
 **Target:** Bennu language rewrite; execution-profile policy for the evaluator,
 emitted C, and native execution paths
 
@@ -43,6 +45,11 @@ BENNU-SPEC-0001 section 12 and section 20. It defines:
   same profile and configuration; and
 - how conformance tests inject small limits and allocation failures
   deterministically without dangerous host allocations.
+
+The two `-v1` names in this document are frozen to scalar/vector execution.
+BENNU-SPEC-0006 defines the separate `trusted-local-v2` and `bounded-v2`
+identities, a canonical tuple-table unit and limit, and a complete amended
+allocation-ordinal contract. It does not silently extend either v1 identity.
 
 BENNU-SPEC-0001 continues to own validation order, the central resource
 boundary, mandatory representability and complete-allocation checks, and the
@@ -467,4 +474,6 @@ This specification does not define:
 
 Future profiles or limit kinds require a new versioned profile name and a new
 specification or amendment; the `-v1` names defined here are frozen to the
-contract in this document.
+contract in this document. BENNU-SPEC-0006 is that versioned specification for
+structural tuples and future tuple-producing fan-out. A tuple-capable backend
+must claim its exact v2 identity rather than reinterpret a v1 configuration.

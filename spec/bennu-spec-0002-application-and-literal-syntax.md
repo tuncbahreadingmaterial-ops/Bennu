@@ -8,6 +8,8 @@
 
 **Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
 
+**Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
+
 **Target:** Bennu language rewrite; scalar literals, rank-1 vector literals,
 and primitive application
 
@@ -48,6 +50,11 @@ nested vectors, boxed values, or multidimensional arrays.
 BENNU-SPEC-0005 extends the complete-program grammar with one parameter header
 and immutable scalar parameter-reference expressions. Those references are not
 variables and do not add assignment or local scope.
+
+BENNU-SPEC-0006 extends expressions with bracketed structural tuple literals
+and amends prefix call preparation. Its compatibility section identifies every
+statement below that it supersedes; all unrelated Level 2 syntax remains in
+force.
 
 ## 3. Source bytes, lines, and positions
 
@@ -128,13 +135,17 @@ add[iota[3] 10]     valid
 add[iota[3]10]      invalid: missing separator before 10
 ```
 
-Whitespace is not allowed between a primitive name and the `[` of a bracketed
-application:
+Whitespace is not part of an adjacent bracketed application:
 
 ```text
 add[1 2]            valid
-add [1 2]           invalid
+add [1 2]           not an adjacent bracketed application
 ```
+
+At this specification level the second form is invalid. BENNU-SPEC-0006
+deliberately supersedes that rejection: `[` in expression position begins a
+tuple, so the form becomes prefix application to a tuple operand. It does not
+become an alternate spelling of adjacent bracket application.
 
 Whitespace is required between a primitive name and the operand of a unary
 prefix application:
@@ -198,6 +209,10 @@ expression = scalar_literal
            | prefix_application
 ```
 
+BENNU-SPEC-0005 adds parameter references on complete-program surfaces.
+BENNU-SPEC-0006 additionally adds `tuple_literal`; its brackets are distinguished
+from an adjacent application bracket by expression position.
+
 There are no infix expressions and no grouping expression. Parentheses always
 denote a vector literal. Consequently Bennu has no operator-precedence table.
 
@@ -241,7 +256,7 @@ prefix_application = primitive_name horizontal_separator expression
 horizontal_separator = H { H }
 ```
 
-It is syntax for a call containing exactly one argument:
+It is syntax with exactly one operand:
 
 ```text
 inc 5          == inc[5]
@@ -255,10 +270,13 @@ expression. The horizontal separator cannot contain a line terminator. The
 operand itself may contain balanced delimiters that continue across later
 lines.
 
-Prefix syntax always supplies one argument regardless of the primitive's
-declared arity. Thus `add 1` parses as a one-argument call and later produces an
-`ArityError`; `add 1 2` parses `add 1` followed by invalid trailing input. A
-multi-argument call must use brackets.
+At this specification level the operand supplies one semantic argument
+regardless of the primitive's declared arity. Thus `add 1` parses as a
+one-argument call and later produces an `ArityError`; `add 1 2` parses `add 1`
+followed by invalid trailing input. BENNU-SPEC-0006 preserves the one-operand
+grammar but supersedes the one-semantic-argument rule when that operand has a
+static tuple type: its immediate elements become zero or more semantic
+arguments before ordinary call validation.
 
 ### 7.3 No implicit application or precedence
 
@@ -448,6 +466,9 @@ Bracketed applications may nest without a language-defined depth limit; active
 execution profiles may impose parser resource limits. Parentheses cannot nest
 because vector elements are scalar literals only. Empty `[]` denotes a
 zero-argument application only when preceded immediately by a primitive name.
+BENNU-SPEC-0006 adds tuple brackets in expression position, including standalone
+empty `[]`; immediately adjacent `primitive_name[]` remains a zero-argument
+application.
 
 A mismatched closing delimiter is reported at that delimiter. If end of source
 is reached with an opening delimiter unmatched, the missing-close diagnostic
@@ -547,7 +568,7 @@ and omission of the last line terminator are valid.
 | `Vector<Int>()` | Semantic notation is not source syntax. |
 | `((1 2))` | Nested/grouping parentheses are unsupported. |
 | `(inc 1)` | Applications cannot be vector elements. |
-| `add [1 2]` | Whitespace before application bracket. |
+| `add [1 2]` | Whitespace before application bracket at this language level; superseded by BENNU-SPEC-0006 as prefix application to a tuple. |
 | `add[1, 2]` | Commas are unsupported. |
 | `add[1 2` | Missing `]` at end of source. |
 | `add[(1 2] 3]` | Mismatched `]` while `)` is required. |

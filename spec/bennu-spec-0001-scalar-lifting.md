@@ -14,6 +14,8 @@
 
 **Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
 
+**Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -52,8 +54,8 @@ This specification does not define:
 - reductions, scans, filters, indexing, axes, or array views;
 - user-defined functions, closures, or partial application;
 - evaluation order for effectful expressions;
-- source constructs beyond those defined by BENNU-SPEC-0002 and
-  BENNU-SPEC-0005;
+- source constructs beyond those defined by BENNU-SPEC-0002,
+  BENNU-SPEC-0005, and BENNU-SPEC-0006;
 - scalar domains outside the initial kernels defined by BENNU-SPEC-0003,
   including integer division;
 - optimizer, allocator, or generated-C implementation strategy; or
@@ -1215,8 +1217,13 @@ binary64 arithmetic, floating equality, NaN, promotion, and domain-error
 semantics. [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md) resolves
 which execution profiles Bennu ships and their optional memory and work
 limits. [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md) resolves typed
-program parameters, argument binding, and the analysis/execution boundary. The
-following remaining decisions do not change scalar lifting itself
+program parameters, argument binding, and the analysis/execution boundary.
+[BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md) resolves
+structural tuple values and types, static one-level prefix spreading, and the
+versioned profile-v2 resource boundary. Tuple arguments do not extend scalar
+primitive lifting and are rejected unless a later specification adds a
+tuple-aware signature. The following remaining decisions do not change scalar
+lifting itself
 but must be defined before their associated primitives or product surfaces
 become conforming:
 
