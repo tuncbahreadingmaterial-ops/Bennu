@@ -5,9 +5,9 @@ Bennu language, runtime, CLI, backend, release, or workflow behavior.
 
 ```text
 pilot: issue-41-b
-pilot_revision: 1
+pilot_revision: 2
 qa_expected: accept
-baseline: 1c6c385744bf67c3cc0e838b6b82c50439723b97
+baseline: dd4389a827f762fd02076df9a3d5285cb0dbf2a6
 ```
 
 ## Concurrent isolation
@@ -23,10 +23,9 @@ pilots have separate mutable state:
 Neither pilot shares a branch, tracked mutable file, build directory, or
 untracked-artifact set with the other.
 
-## Intentional stale-base setup
+## Stale-base refresh
 
-This pull request intentionally remains open while Pilot A integrates. A later
-dedicated Issue #41 stage will use the resulting stale base to prove that
-integration is refused until the branch is refreshed and current CI and QA
-evidence is produced. This pilot-generation task does not update the branch
-after Pilot A merges.
+Pilot B remained open while Pilot A integrated, and the dedicated Issue #41
+stage refused integration against the resulting stale base. Revision 2 merges
+the integrated Pilot A `main` commit recorded above. Fresh current-head CI and
+QA evidence are required before Pilot B can integrate.
