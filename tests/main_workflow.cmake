@@ -1,4 +1,8 @@
-set(main_workflow "${BENNU_SOURCE_DIR}/.github/workflows/main.yml")
+if(DEFINED BENNU_MAIN_WORKFLOW)
+  set(main_workflow "${BENNU_MAIN_WORKFLOW}")
+else()
+  set(main_workflow "${BENNU_SOURCE_DIR}/.github/workflows/main.yml")
+endif()
 
 if(NOT EXISTS "${main_workflow}")
   message(FATAL_ERROR "Main CI workflow is missing: ${main_workflow}")
@@ -78,6 +82,40 @@ require_workflow_text([=[- name: macOS arm64
 require_workflow_count(1 "runner: ubuntu-24\\.04" "Linux x64 matrix entries")
 require_workflow_count(1 "runner: windows-2022" "Windows x64 matrix entries")
 require_workflow_count(1 "runner: macos-15" "macOS arm64 matrix entries")
+require_workflow_text(
+  "uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0"
+  "the reviewed Node-24-native actions/checkout v5.1.0 full-SHA pin")
+require_workflow_text([=[- name: Set up MSVC for Ninja
+        if: runner.os == 'Windows'
+        uses: mlocati/setup-msvc@ade6aff3df872d66c12a63dcacdddf0041cb2693 # v1.3.1
+        with:
+          architecture: x64]=]
+  "the reviewed Node-24-native setup-msvc v1.3.1 full-SHA pin")
+require_workflow_count(2 "uses:" "active action references")
+require_workflow_count(
+  1
+  "uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+  "actions/checkout v5.1.0 full-SHA pins")
+require_workflow_count(
+  1
+  "uses: mlocati/setup-msvc@ade6aff3df872d66c12a63dcacdddf0041cb2693"
+  "setup-msvc v1.3.1 full-SHA pins")
+
+foreach(forbidden_action IN ITEMS
+    "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+    "ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756"
+    "actions/checkout@v5"
+    "actions/checkout@v5.1.0"
+    "mlocati/setup-msvc@v1"
+    "mlocati/setup-msvc@1.3.1"
+    "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION")
+  string(FIND "${workflow_text}" "${forbidden_action}" forbidden_action_at)
+  if(NOT forbidden_action_at EQUAL -1)
+    message(FATAL_ERROR
+      "Main CI contains a forbidden obsolete, mutable, or suppressing action reference: ${forbidden_action}")
+  endif()
+endforeach()
+
 require_workflow_text(
   "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release"
   "the Release configuration")
