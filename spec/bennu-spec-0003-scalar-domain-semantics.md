@@ -8,6 +8,8 @@
 
 **Source syntax:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
 
+**Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
+
 **Target:** Bennu language rewrite; initial Bool, Int, and Double scalar kernels
 
 **Compatibility:** These semantics deliberately replace, rather than extend,

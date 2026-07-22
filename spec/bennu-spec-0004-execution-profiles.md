@@ -12,6 +12,8 @@
 
 **Scalar domains:** [BENNU-SPEC-0003](bennu-spec-0003-scalar-domain-semantics.md)
 
+**Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
+
 **Target:** Bennu language rewrite; execution-profile policy for the evaluator,
 emitted C, and native execution paths
 
@@ -245,6 +247,11 @@ an arithmetic overflow while sizing a request is `size_overflow`, not
 A complete Bennu program executed by the file runner, an emitted-C executable,
 or a native-built executable runs in exactly one resource context created at
 program start and discarded at program end.
+
+For a parameterized program, BENNU-SPEC-0005's argument-count check and typed
+validation or text decoding occur before this context is created. In this
+section, program start means the beginning of execution after successful
+argument binding; binding itself creates no profile charge.
 
 ### 6.2 Independent contexts per submission and invocation
 
