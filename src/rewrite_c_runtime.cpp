@@ -40,7 +40,8 @@ typedef enum BennuFailure {
   BENNU_FAILURE_PROFILE = 2,
   BENNU_FAILURE_ALLOCATION = 3,
   BENNU_FAILURE_DOMAIN = 4,
-  BENNU_FAILURE_INTERNAL = 5
+  BENNU_FAILURE_SHAPE = 5,
+  BENNU_FAILURE_INTERNAL = 6
 } BennuFailure;
 
 typedef enum BennuProfile {
@@ -478,6 +479,11 @@ static int bennu_apply(BennuResources *resources,
     }
     return 1;
   }
+  if (argument_count == 2U && left->container == BENNU_VECTOR &&
+      right->container == BENNU_VECTOR && left->count != right->count) {
+    bennu_set_failure(resources, BENNU_FAILURE_SHAPE);
+    return 0;
+  }
   if (left->container == BENNU_VECTOR) {
     vector_result = 1;
     count = left->count;
@@ -725,6 +731,8 @@ static int bennu_report_failure(const BennuResources *resources) {
     message = "ResourceError: allocation_unavailable\n";
   } else if (resources->failure == BENNU_FAILURE_DOMAIN) {
     message = "DomainError: integer_overflow\n";
+  } else if (resources->failure == BENNU_FAILURE_SHAPE) {
+    message = "ShapeMismatch\n";
   }
   return fputs(message, stderr) == EOF ? 0 : 1;
 }

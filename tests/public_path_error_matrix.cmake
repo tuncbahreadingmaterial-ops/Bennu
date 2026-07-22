@@ -1,4 +1,5 @@
 # TEST-ID: PUBLIC-ERROR-CLI-MATRIX
+# TEST-ID: PARG-012-VALUE-INDEPENDENT-EMISSION
 foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
@@ -72,6 +73,74 @@ function(check_public_failure case_name source_text line column category message
   endif()
 endfunction()
 
+function(check_public_dynamic_failure case_name source_text line column
+         category message_text artifact_stderr)
+  set(source_file "${work_directory}/${case_name}.bennu")
+  set(c_output "${work_directory}/${case_name}.c")
+  set(native_output
+    "${work_directory}/${case_name}-native${BENNU_EXECUTABLE_SUFFIX}")
+  set(expected
+    "${source_file}:${line}:${column}: ${category}: ${message_text}\n")
+  file(WRITE "${source_file}" "${source_text}\n")
+
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" run "${source_file}"
+    RESULT_VARIABLE runner_exit OUTPUT_VARIABLE runner_stdout
+    ERROR_VARIABLE runner_stderr)
+  string(REPLACE "\r\n" "\n" runner_stdout "${runner_stdout}")
+  string(REPLACE "\r\n" "\n" runner_stderr "${runner_stderr}")
+  if("${runner_exit}" STREQUAL "0" OR NOT runner_stdout STREQUAL "" OR
+     NOT runner_stderr STREQUAL expected)
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} runner failure mismatch\n"
+      "exit: ${runner_exit}\nstdout: [${runner_stdout}]\n"
+      "expected stderr: [${expected}]\nactual stderr: [${runner_stderr}]")
+  endif()
+
+  file(WRITE "${c_output}" "sentinel C bytes\n")
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_file}" -o "${c_output}"
+    RESULT_VARIABLE emit_exit OUTPUT_VARIABLE emit_stdout
+    ERROR_VARIABLE emit_stderr)
+  file(READ "${c_output}" emitted_c)
+  file(GLOB c_orphans "${c_output}.tmp*")
+  if(NOT "${emit_exit}" STREQUAL "0" OR NOT emit_stdout STREQUAL "" OR
+     NOT emit_stderr STREQUAL "" OR emitted_c STREQUAL "sentinel C bytes\n" OR
+     c_orphans)
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} emit-c rejected a dynamic failure\n"
+      "exit: ${emit_exit}\nstdout: [${emit_stdout}]\n"
+      "stderr: [${emit_stderr}]\norphans: [${c_orphans}]")
+  endif()
+
+  file(WRITE "${native_output}" "sentinel native bytes\n")
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" build "${source_file}" -o "${native_output}"
+            --cc "${BENNU_C_COMPILER}"
+    RESULT_VARIABLE build_exit OUTPUT_VARIABLE build_stdout
+    ERROR_VARIABLE build_stderr)
+  if(NOT "${build_exit}" STREQUAL "0" OR NOT build_stdout STREQUAL "" OR
+     NOT build_stderr STREQUAL "")
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} build rejected a dynamic failure\n"
+      "exit: ${build_exit}\nstdout: [${build_stdout}]\n"
+      "stderr: [${build_stderr}]")
+  endif()
+  execute_process(
+    COMMAND "${native_output}"
+    RESULT_VARIABLE native_exit OUTPUT_VARIABLE native_stdout
+    ERROR_VARIABLE native_stderr)
+  string(REPLACE "\r\n" "\n" native_stdout "${native_stdout}")
+  string(REPLACE "\r\n" "\n" native_stderr "${native_stderr}")
+  if("${native_exit}" STREQUAL "0" OR NOT native_stdout STREQUAL "" OR
+     NOT native_stderr STREQUAL artifact_stderr)
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} native runtime mismatch\n"
+      "exit: ${native_exit}\nstdout: [${native_stdout}]\n"
+      "expected stderr: [${artifact_stderr}]\nactual stderr: [${native_stderr}]")
+  endif()
+endfunction()
+
 check_public_failure(invalid_byte "é" 1 1 "InvalidByte"
   "invalid source byte")
 check_public_failure(malformed_literal "12x" 1 1 "MalformedLiteral"
@@ -88,10 +157,15 @@ check_public_failure(type "add[1 true]" 1 7 "TypeError"
   "add arguments do not match an accepted signature; first unsupported argument is 2")
 check_public_failure(shape "add[(1 2) (3)]" 1 11 "ShapeMismatch"
   "add argument 2 expected shape [2], got [1]")
-check_public_failure(domain "inc 9223372036854775807" 1 1 "DomainError"
-  "inc failed: integer_overflow")
-check_public_failure(resource "iota[2305843009213693952]" 1 1 "ResourceError"
-  "iota resource request failed: size_overflow")
+check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
+  "DomainError" "inc failed: integer_overflow"
+  "DomainError: integer_overflow\n")
+check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
+  "ResourceError" "iota resource request failed: size_overflow"
+  "ResourceError: size_overflow\n")
+check_public_dynamic_failure(dynamic_shape "add[iota[2] iota[3]]" 1 13
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]"
+  "ShapeMismatch\n")
 check_public_failure(late_transaction "inc 5\nwat[1]" 2 1 "UnknownPrimitive"
   "unknown primitive 'wat'")
 

@@ -65,8 +65,7 @@ if(EXISTS "${output_file}")
   message(FATAL_ERROR "invalid source left a new output file")
 endif()
 
-foreach(source_with_error "${invalid_source}" "${overflow_source}"
-                          "${shape_source}")
+foreach(source_with_error "${invalid_source}" "${shape_source}")
   file(WRITE "${output_file}" "sentinel bytes\n")
   execute_process(
     COMMAND "${BENNU_EXECUTABLE}" emit-c "${source_with_error}" -o "${output_file}"
@@ -85,6 +84,24 @@ foreach(source_with_error "${invalid_source}" "${overflow_source}"
       "output: [${preserved_output}]\norphans: [${orphan_outputs}]")
   endif()
 endforeach()
+
+file(WRITE "${output_file}" "sentinel bytes\n")
+execute_process(
+  COMMAND "${BENNU_EXECUTABLE}" emit-c "${overflow_source}" -o "${output_file}"
+  RESULT_VARIABLE overflow_exit
+  OUTPUT_VARIABLE overflow_stdout
+  ERROR_VARIABLE overflow_stderr
+)
+file(READ "${output_file}" overflow_output)
+file(GLOB overflow_orphans "${output_file}.tmp*")
+if(NOT "${overflow_exit}" STREQUAL "0" OR NOT overflow_stdout STREQUAL "" OR
+   NOT overflow_stderr STREQUAL "" OR
+   overflow_output STREQUAL "sentinel bytes\n" OR overflow_orphans)
+  message(FATAL_ERROR
+    "value-dependent overflow was rejected during emission\n"
+    "exit: ${overflow_exit}\nstdout: [${overflow_stdout}]\n"
+    "stderr: [${overflow_stderr}]\norphans: [${overflow_orphans}]")
+endif()
 
 expect_failure(output_is_directory
   "${work_directory}:1:1: file error: unable to write output\n"
