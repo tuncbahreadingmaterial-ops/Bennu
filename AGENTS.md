@@ -25,12 +25,14 @@ These rules apply to every human and agent contributor working in this repositor
 - Keep changes inside the active issue's scope. Create a linked follow-up issue for genuinely new work.
 - Add or update automated tests for behavior changes, and run the relevant build and tests before declaring work complete.
 - Do not claim performance improvements without comparable before-and-after measurements.
-- Record material design and implementation decisions as they are made in [`doc/decision-diary.md`](doc/decision-diary.md). Each entry must include the date, related GitHub issue, context, decision, alternatives considered, rationale, consequences or follow-up, and validation or evidence.
-- Keep the decision diary append-only. Correct an earlier entry with a new entry rather than silently rewriting history.
+- Record material design and implementation decisions in the active GitHub issue's one stable file under [`doc/decisions/`](doc/decisions/README.md). Use lowercase ASCII `issue-<number>-<stable-kebab-slug>.md`; the issue number is authoritative, and the slug and path never change after creation.
+- Each decision section must include the date, context, decision, alternatives considered, rationale, consequences or follow-up, validation or evidence, and any superseded file and heading.
+- Keep each issue record append-only. Multiple decisions and corrections for the same issue append new sections to its existing file. Cross-issue supersession appends only to the later issue's file and does not modify the superseded record.
+- Routine issue work must not edit `doc/decisions/README.md`, `doc/decisions/TEMPLATE.md`, the `doc/decision-diary.md` compatibility pointer, `doc/decisions/legacy-decision-diary.md`, or another issue's record.
 
 ### Historical Level 1 and Level 2 integration workflow
 
-Level 1 and Level 2 used dedicated issue branches followed by serialized local merges into `main`, push-to-`main` CI, and independent verification after integration. Pull requests and GitHub review were deliberately excluded during those levels. That history remains recorded in this agreement and the decision diary, but Issue #41 supersedes those integration instructions for Level 3; they are not an active alternative to the protected workflow below.
+Level 1 and Level 2 used dedicated issue branches followed by serialized local merges into `main`, push-to-`main` CI, and independent verification after integration. Pull requests and GitHub review were deliberately excluded during those levels. That history remains recorded in this agreement and the [legacy decision diary](doc/decisions/legacy-decision-diary.md), but Issue #41 supersedes those integration instructions for Level 3; they are not an active alternative to the protected workflow below.
 
 ### Level 3 protected pull-request workflow
 
@@ -49,14 +51,14 @@ Independent implementation roots and PR-QA stages may run concurrently. Integrat
 
 1. Start only after the issue's product dependencies are accepted. Re-read the live issue and comments, fetch the remote, and fail closed unless the dedicated worktree is clean and its `issue/<number>-<short-slug>` branch starts from the current accepted `origin/main`.
 2. Use one isolated worktree, branch, build directory, and untracked-artifact set per issue. Never implement in another worker's worktree or share mutable build output across stages.
-3. Keep the change within one issue and one pull request. Make scoped commits that reference the issue, update the append-only decision diary when required, and avoid unrelated cleanup.
+3. Keep the change within one issue and one pull request. Make scoped commits that reference the issue, append material decisions only to that issue's record under `doc/decisions/`, and avoid unrelated cleanup.
 4. Run the required clean Release build, full CTest suite, issue-specific user journeys, strict/configuration checks, and diff hygiene before handoff.
 5. Push the issue branch and open or update one pull request against `main`. Link it with `Refs #N`, never `Closes #N`, `Fixes #N`, or an equivalent auto-close keyword. Map every acceptance criterion to exact tests or evidence and record the changed files, material decisions, risks, validation commands/results, and exact head SHA.
 6. Wait for all required pull-request checks on the exact current revision, including the Linux x64, Windows x64, macOS arm64 matrix and aggregate `PR Gate`. Complete only the implementation-stage card with the pull request URL and exact evidence. Coder does not approve, merge, close the issue, or claim product acceptance.
 
 #### PR-QA stage — Chef / Verity Meridian
 
-1. Work from a separate clean worktree. Read the live issue, pull request metadata and discussion, commits, complete diff, changed-file scope, and decision diary; never modify Coder's worktree.
+1. Work from a separate clean worktree. Read the live issue, pull request metadata and discussion, commits, complete diff, changed-file scope, and that issue's decision record; verify its append-only history and never modify Coder's worktree.
 2. Check out and record the exact pull-request head and merge-ref SHAs. Independently run the required Release build, full CTest suite, acceptance journeys, and relevant adjacent, error, resource, generated, and native paths.
 3. Confirm every required CI result belongs to the exact current revision and verify the source of the App-owned `Verity Meridian / QA accepted` check. Record durable findings and structured `accepted: true` or `accepted: false` evidence tied to that SHA.
 4. On rejection, leave the pull request and issue open, emit a failed QA signal, create a focused Coder correction stage on the same pull-request branch, and parent-gate a fresh Chef re-verification stage on that correction. Terminalize the rejected QA attempt only with `accepted: false` and both retry task IDs. A later successful verifier alone may release integration.

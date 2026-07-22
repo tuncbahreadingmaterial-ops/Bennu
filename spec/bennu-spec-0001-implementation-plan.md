@@ -112,8 +112,9 @@ integrate through the shared local `main` checkout at a time. Verification must
 not overlap a Coder integration in the same checkout.
 
 Every material syntax, semantic, representation, ownership, error, parsing,
-backend, test-policy, resource, and benchmark decision must append an entry to
-`doc/decision-diary.md`.
+backend, test-policy, resource, and benchmark decision must append a section to
+that work's issue-owned record under `doc/decisions/`, following
+`doc/decisions/README.md`.
 
 ## 4. Starting point and transition strategy
 
@@ -265,7 +266,7 @@ Create focused documentation issues for:
 - The shipped CLI profile has a documented choice, including an explicit
   choice to omit optional caps if that is selected.
 - No implementation issue relies on an unresolved section 20 decision.
-- Every decision is appended to the decision diary.
+- Every decision is appended to that issue's record under `doc/decisions/`.
 
 ### Validation
 
@@ -630,8 +631,8 @@ Record:
   formatting.
 - The strategy has an explicit resource/error boundary and does not reconstruct
   vectors from count.
-- Alternatives, measurements, rationale, and consequences are appended to the
-  decision diary.
+- Alternatives, measurements, rationale, and consequences are appended to that
+  issue's record under `doc/decisions/`.
 - No discarded prototype becomes an unsupported permanent backend path.
 
 ## 15. WP9 — Typed C emitter and native backend
