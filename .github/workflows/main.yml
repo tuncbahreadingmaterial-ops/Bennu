@@ -1,19 +1,27 @@
 name: Main CI
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
   workflow_dispatch:
 
-permissions:
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
 
 jobs:
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -86,3 +94,16 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  pr-gate:
+    name: PR Gate
+    if: ${{ always() }}
+    needs: build-and-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require successful matrix and contract validation
+        shell: bash
+        env:
+          MATRIX_RESULT: ${{ needs.build-and-test.result }}
+        run: test "$MATRIX_RESULT" = "success"
