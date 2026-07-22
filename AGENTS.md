@@ -28,17 +28,46 @@ These rules apply to every human and agent contributor working in this repositor
 - Record material design and implementation decisions as they are made in [`doc/decision-diary.md`](doc/decision-diary.md). Each entry must include the date, related GitHub issue, context, decision, alternatives considered, rationale, consequences or follow-up, and validation or evidence.
 - Keep the decision diary append-only. Correct an earlier entry with a new entry rather than silently rewriting history.
 
-### Issue branches, local-main integration, and verification
+### Historical Level 1 and Level 2 integration workflow
 
-1. Start only after the issue's product dependencies are satisfied. Confirm the working tree is clean and local `main` is current with `origin/main`.
-2. Create one dedicated branch named `issue/<number>-<short-slug>` from `main`.
-3. Keep every change for the issue on that branch. Make one or more scoped commits that reference the issue number.
-4. On the issue branch, run the issue's required build, tests, runtime checks, and diff-hygiene checks.
-5. After validation passes, merge the issue branch into local `main` and push the resulting `main` to `origin`.
-6. Wait for all required CI on the integrated `main` SHA. Do not open a GitHub pull request and do not request or perform GitHub code review; Bennu uses neither.
-7. Leave the GitHub issue open. Comment on it with the branch name, issue commit SHA or SHAs, resulting merged `main` SHA, exact changed files, push result, exact validation evidence, and required CI URLs and results.
-8. Independently inspect the merged range and acceptance criteria, rerun relevant validation, exercise required runtime behavior and adjacent or error cases, and confirm required CI. On success, comment with exact evidence and close the issue. On failure, keep or reopen the issue, record the unmet criteria and evidence, and make corrections on a dedicated issue branch using the same validation, integration, and handoff rules.
+Level 1 and Level 2 used dedicated issue branches followed by serialized local merges into `main`, push-to-`main` CI, and independent verification after integration. Pull requests and GitHub review were deliberately excluded during those levels. That history remains recorded in this agreement and the decision diary, but Issue #41 supersedes those integration instructions for Level 3; they are not an active alternative to the protected workflow below.
 
-If integration is unsafe because the working tree is dirty, the remote has unexpectedly diverged, the merge conflicts, validation or CI fails, or unrelated changes are present, stop and record the evidence instead of forcing integration or claiming completion.
+### Level 3 protected pull-request workflow
+
+Use this success path for every independently executable Level 3 issue:
+
+```text
+Implement #N (Coder, isolated worktree)
+  -> PR QA #N (Chef, independent clean worktree)
+    -> Integrate and post-merge verify #N (Chef, protected main)
+      -> Accept-route #N (success-only dependency gate)
+```
+
+Independent implementation roots and PR-QA stages may run concurrently. Integration into `main` is serialized. Work that genuinely depends on another issue waits for its predecessor's successful accept-route, not merely for an implementation card, open pull request, green CI, or merge.
+
+#### Implementation stage — Coder
+
+1. Start only after the issue's product dependencies are accepted. Re-read the live issue and comments, fetch the remote, and fail closed unless the dedicated worktree is clean and its `issue/<number>-<short-slug>` branch starts from the current accepted `origin/main`.
+2. Use one isolated worktree, branch, build directory, and untracked-artifact set per issue. Never implement in another worker's worktree or share mutable build output across stages.
+3. Keep the change within one issue and one pull request. Make scoped commits that reference the issue, update the append-only decision diary when required, and avoid unrelated cleanup.
+4. Run the required clean Release build, full CTest suite, issue-specific user journeys, strict/configuration checks, and diff hygiene before handoff.
+5. Push the issue branch and open or update one pull request against `main`. Link it with `Refs #N`, never `Closes #N`, `Fixes #N`, or an equivalent auto-close keyword. Map every acceptance criterion to exact tests or evidence and record the changed files, material decisions, risks, validation commands/results, and exact head SHA.
+6. Wait for all required pull-request checks on the exact current revision, including the Linux x64, Windows x64, macOS arm64 matrix and aggregate `PR Gate`. Complete only the implementation-stage card with the pull request URL and exact evidence. Coder does not approve, merge, close the issue, or claim product acceptance.
+
+#### PR-QA stage — Chef / Verity Meridian
+
+1. Work from a separate clean worktree. Read the live issue, pull request metadata and discussion, commits, complete diff, changed-file scope, and decision diary; never modify Coder's worktree.
+2. Check out and record the exact pull-request head and merge-ref SHAs. Independently run the required Release build, full CTest suite, acceptance journeys, and relevant adjacent, error, resource, generated, and native paths.
+3. Confirm every required CI result belongs to the exact current revision and verify the source of the App-owned `Verity Meridian / QA accepted` check. Record durable findings and structured `accepted: true` or `accepted: false` evidence tied to that SHA.
+4. On rejection, leave the pull request and issue open, emit a failed QA signal, create a focused Coder correction stage on the same pull-request branch, and parent-gate a fresh Chef re-verification stage on that correction. Terminalize the rejected QA attempt only with `accepted: false` and both retry task IDs. A later successful verifier alone may release integration.
+
+#### Integration, post-merge verification, and acceptance — Chef
+
+1. Before integration, prove the pull-request head still equals the independently accepted QA SHA, all required checks are current and green, blocking discussion is resolved, and the branch is up to date with `main`. If `main` moved materially or any evidence is absent, failed, stale, or mismatched, refuse integration and route branch update, fresh CI, and re-verification.
+2. Squash merge only through an exact-head guard such as `gh pr merge --match-head-commit <accepted-sha> --squash`. Direct pushes, merge commits, rebases, stale acceptance, and unguarded merges are not valid Level 3 integration paths.
+3. Wait for the complete push-to-`main` Main CI matrix and `PR Gate` on the exact resulting `main` SHA, then rerun focused acceptance from a clean checkout of that SHA. Pre-merge CI does not replace post-merge verification.
+4. Keep the GitHub issue open through merge. Only after merged-`main` CI and independent focused acceptance succeed may Chef comment the exact evidence, close the issue, record `accepted: true`, and complete the success-only accept-route that releases dependent work.
+
+If any stage sees a dirty or unexpected worktree, remote divergence, conflict, unrelated diff, failed validation, missing authority, or mismatched SHA, stop and record the evidence instead of stashing, resetting, bypassing protection, or claiming completion.
 
 Material decisions include syntax and semantics, data layout, ownership, dependencies, error representation, parsing or execution strategy, testing and benchmark policy, and the selection or rejection of alternative approaches. Routine keystrokes and mechanically implied edits do not need entries.

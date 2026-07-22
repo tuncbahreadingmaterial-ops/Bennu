@@ -424,6 +424,13 @@ if(BUILD_TESTING)
     )
   endif()
   add_test(
+    NAME workflow.main_contract
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/main_workflow.cmake"
+  )
+  add_test(
     NAME release.workflow_contract
     COMMAND
       "${CMAKE_COMMAND}"
