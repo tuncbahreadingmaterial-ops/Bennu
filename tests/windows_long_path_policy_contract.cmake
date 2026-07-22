@@ -48,7 +48,11 @@ require_text(implementation_text "path.make_preferred()"
 require_text(native_builder_text "path_to_compiler_argument"
   "ordinary MSVC path argument boundary")
 require_text(native_builder_text "\"/Fo:\""
-  "absolute MSVC object path without a process working-directory dependency")
+  "MSVC object containment in the isolated working directory")
+require_text(native_builder_text "c_source.filename()"
+  "relative MSVC source path inside the isolated working directory")
+require_text(native_builder_text "ordinary_working_directory"
+  "ordinary long process working-directory boundary")
 require_text(native_test_text "ordinary space éß 文 🐍"
   "lossless target-native long-path corpus")
 require_text(native_test_text "set(bennu"

@@ -70,6 +70,24 @@ bool has_path_separator(std::string_view executable) {
          executable.find('\\') != std::string_view::npos;
 }
 
+PathToUtf8Result
+path_to_ordinary_utf8(const std::filesystem::path &path) {
+  PathToUtf8Result result = path_to_utf8(path);
+#ifdef _WIN32
+  if (!result.ok) {
+    return result;
+  }
+  constexpr std::string_view extended_unc_prefix = "\\\\?\\UNC\\";
+  constexpr std::string_view extended_prefix = "\\\\?\\";
+  if (result.text.starts_with(extended_unc_prefix)) {
+    result.text = "\\\\" + result.text.substr(extended_unc_prefix.size());
+  } else if (result.text.starts_with(extended_prefix)) {
+    result.text.erase(0, extended_prefix.size());
+  }
+#endif
+  return result;
+}
+
 #ifdef _WIN32
 bool executable_exists(std::string_view executable) {
   const WideStringResult name = utf8_to_wide(executable);
@@ -157,12 +175,20 @@ ProcessResult run_process(std::string_view executable,
               executable.find(':') != std::string_view::npos
           ? wide_executable.text.c_str()
           : nullptr;
-  // Every compiler input/output is absolute. Avoid lpCurrentDirectory because
-  // CreateProcessW still rejects extended-length directory names there.
-  (void)working_directory;
+  const PathToUtf8Result ordinary_working_directory =
+      path_to_ordinary_utf8(working_directory);
+  const WideStringResult wide_working_directory =
+      ordinary_working_directory.ok
+          ? utf8_to_wide(ordinary_working_directory.text)
+          : WideStringResult{false, {}};
+  if (!wide_working_directory.ok) {
+    CloseHandle(log);
+    return ProcessResult{false, false, 0,
+                         static_cast<int>(ERROR_NO_UNICODE_TRANSLATION), {}};
+  }
   const BOOL created = CreateProcessW(
       application_name, mutable_command.data(), nullptr, nullptr, TRUE, 0,
-      nullptr, nullptr, &startup, &process);
+      nullptr, wide_working_directory.text.c_str(), &startup, &process);
   const DWORD start_error = created != 0 ? ERROR_SUCCESS : GetLastError();
   CloseHandle(log);
   if (created == 0) {
@@ -357,22 +383,8 @@ NativePlatform compiler_platform(NativePlatform host,
 PathToUtf8Result
 path_to_compiler_argument(const std::filesystem::path &path,
                           NativePlatform style) {
-  PathToUtf8Result result = path_to_utf8(path);
-#ifdef _WIN32
-  if (!result.ok || style != NativePlatform::windows_msvc) {
-    return result;
-  }
-  constexpr std::string_view extended_unc_prefix = "\\\\?\\UNC\\";
-  constexpr std::string_view extended_prefix = "\\\\?\\";
-  if (result.text.starts_with(extended_unc_prefix)) {
-    result.text = "\\\\" + result.text.substr(extended_unc_prefix.size());
-  } else if (result.text.starts_with(extended_prefix)) {
-    result.text.erase(0, extended_prefix.size());
-  }
-#else
-  (void)style;
-#endif
-  return result;
+  return style == NativePlatform::windows_msvc ? path_to_ordinary_utf8(path)
+                                                : path_to_utf8(path);
 }
 
 bool replace_output(const std::filesystem::path &temporary,
@@ -634,10 +646,16 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
 
   const NativePlatform compiler_style =
       compiler_platform(native_platform(), selection.executable);
+  const std::filesystem::path compiler_source =
+      compiler_style == NativePlatform::windows_msvc ? c_source.filename()
+                                                      : c_source;
+  const std::filesystem::path compiler_output =
+      compiler_style == NativePlatform::windows_msvc ? staging_output.filename()
+                                                      : staging_output;
   PathToUtf8Result c_source_text =
-      path_to_compiler_argument(c_source, compiler_style);
+      path_to_compiler_argument(compiler_source, compiler_style);
   PathToUtf8Result staging_output_text =
-      path_to_compiler_argument(staging_output, compiler_style);
+      path_to_compiler_argument(compiler_output, compiler_style);
   if (!c_source_text.ok || !staging_output_text.ok) {
     return failure_with_cleanup(temporary_directory,
                                 "unable to encode compiler paths as UTF-8");
