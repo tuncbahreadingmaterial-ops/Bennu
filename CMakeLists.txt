@@ -14,6 +14,8 @@ configure_file(
 
 if(WIN32)
   enable_language(RC)
+  set(BENNU_MANIFEST_RESOURCE_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bennu.exe.manifest")
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/bennu-version.rc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/private/bennu-version.rc"
@@ -66,6 +68,9 @@ if(WIN32)
   target_sources(bennu PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated/private/bennu-version.rc"
   )
+endif()
+if(MSVC)
+  target_link_options(bennu PRIVATE "/MANIFEST:NO")
 endif()
 target_include_directories(bennu PRIVATE
   include
@@ -403,6 +408,16 @@ if(BUILD_TESTING)
         "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_unicode_paths.cmake"
     )
+    add_test(
+      NAME cli.windows_long_paths
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+        "-DBENNU_FAKE_COMPILER=$<TARGET_FILE:bennu_fake_c_compiler>"
+        "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_long_paths.cmake"
+    )
   endif()
   add_test(
     NAME cli.source_output_alias
@@ -456,6 +471,12 @@ if(BUILD_TESTING)
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_version_resource_contract.cmake"
+  )
+  add_test(
+    NAME release.windows_long_path_policy_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_long_path_policy_contract.cmake"
   )
   if(WIN32)
     set(bennu_test_release_target windows-x64)

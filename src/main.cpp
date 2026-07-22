@@ -102,7 +102,8 @@ struct FileReadResult {
 };
 
 FileReadResult read_source_file(std::string_view path) {
-  const bennu::PathFromUtf8Result converted = bennu::path_from_utf8(path);
+  const bennu::PathFromUtf8Result converted =
+      bennu::path_for_io_from_utf8(path);
   if (!converted.ok) {
     return FileReadResult{false, {}};
   }
@@ -141,9 +142,9 @@ SourceOutputIdentity
 check_source_output_identity(std::string_view source_path,
                              std::string_view output_path) {
   const bennu::PathFromUtf8Result source_result =
-      bennu::path_from_utf8(source_path);
+      bennu::path_for_io_from_utf8(source_path);
   const bennu::PathFromUtf8Result output_result =
-      bennu::path_from_utf8(output_path);
+      bennu::path_for_io_from_utf8(output_path);
   if (!source_result.ok || !output_result.ok) {
     return SourceOutputIdentity{false, false};
   }
@@ -258,7 +259,8 @@ bool replace_file(const std::filesystem::path &temporary,
 }
 
 bool write_file_atomically(std::string_view path, std::string_view contents) {
-  const bennu::PathFromUtf8Result converted = bennu::path_from_utf8(path);
+  const bennu::PathFromUtf8Result converted =
+      bennu::path_for_io_from_utf8(path);
   if (!converted.ok) {
     return false;
   }
