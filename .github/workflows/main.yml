@@ -41,13 +41,13 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Set up MSVC for Ninja
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        uses: mlocati/setup-msvc@ade6aff3df872d66c12a63dcacdddf0041cb2693 # v1.3.1
         with:
-          arch: x64
+          architecture: x64
 
       - name: Verify runner identity
         shell: pwsh
