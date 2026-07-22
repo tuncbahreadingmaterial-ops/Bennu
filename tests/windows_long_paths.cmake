@@ -330,7 +330,12 @@ foreach(command IN ITEMS emit-c build)
 endforeach()
 
 set(hard_link "${long_parent}/hard link alias éß 文 🐍.bennu")
-file(CREATE_LINK "${source}" "${hard_link}" RESULT hard_link_result)
+file(TO_NATIVE_PATH "${source}" source_native)
+file(TO_NATIVE_PATH "${hard_link}" hard_link_native)
+set(source_extended "\\\\?\\${source_native}")
+set(hard_link_extended "\\\\?\\${hard_link_native}")
+file(CREATE_LINK "${source_extended}" "${hard_link_extended}"
+  RESULT hard_link_result)
 if(NOT hard_link_result STREQUAL "0")
   message(FATAL_ERROR "unable to create long hard-link alias: ${hard_link_result}")
 endif()
