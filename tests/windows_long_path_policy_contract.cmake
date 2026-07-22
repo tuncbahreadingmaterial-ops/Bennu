@@ -15,7 +15,7 @@ file(READ "${BENNU_SOURCE_DIR}/src/path_encoding.cpp" implementation_text)
 file(READ "${BENNU_SOURCE_DIR}/src/native_builder.cpp" native_builder_text)
 file(READ "${BENNU_SOURCE_DIR}/tests/windows_long_paths.cmake" native_test_text)
 file(READ "${BENNU_SOURCE_DIR}/README.md" readme_text)
-file(READ "${BENNU_SOURCE_DIR}/doc/decision-diary.md" diary_text)
+file(READ "${BENNU_SOURCE_DIR}/doc/decisions/legacy-decision-diary.md" diary_text)
 
 function(require_text variable expected description)
   string(FIND "${${variable}}" "${expected}" found_at)

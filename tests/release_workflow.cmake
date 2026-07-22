@@ -292,7 +292,7 @@ foreach(required_test_text IN ITEMS
   endif()
 endforeach()
 
-set(decision_diary "${BENNU_SOURCE_DIR}/doc/decision-diary.md")
+set(decision_diary "${BENNU_SOURCE_DIR}/doc/decisions/legacy-decision-diary.md")
 file(READ "${decision_diary}" diary_text)
 string(FIND "${diary_text}" "Gate v0.1.0 publication behind target-native verified archives" diary_entry_at)
 if(diary_entry_at EQUAL -1)
