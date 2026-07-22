@@ -12,7 +12,11 @@ The parameter and runtime-argument proposal in sections 1 through 13 is now
 resolved normatively by
 [BENNU-SPEC-0005](../spec/bennu-spec-0005-program-parameters.md). This document
 remains a non-normative design record; its open-decision wording does not
-override that specification. The separate tuple proposal remains exploratory.
+override that specification. The tuple proposal in section 14 is now resolved
+normatively by
+[BENNU-SPEC-0006](../spec/bennu-spec-0006-structural-tuples-and-profile-v2.md);
+its exploratory alternatives and open-decision wording likewise do not override
+the accepted contract.
 
 ## 1. Goal
 
