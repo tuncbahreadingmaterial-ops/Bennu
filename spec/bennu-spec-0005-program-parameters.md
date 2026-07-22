@@ -12,6 +12,8 @@
 
 **Execution profiles:** [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md)
 
+**Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
+
 **Target:** Bennu programs, the public evaluator, the file runner, emitted C11,
 and native executables
 
@@ -352,6 +354,13 @@ The phases are program-wide, not a complete per-root pipeline. For example:
 
 Once all static phases succeed, section 11's runtime source order replaces this
 category precedence for dynamic failures.
+
+BENNU-SPEC-0006 preserves phases 1 through 3 and the program-wide
+arity-before-type-before-shape category precedence, but makes candidate
+discovery dependency-aware for tuple-spreading calls. An outer prefix arity
+cannot be formed until its operand has a valid static structural type. Its
+section 8.4 is the exact amendment for tuple-capable programs; the examples
+above remain unchanged when no tuple-producing expression occurs.
 
 ### 6.3 Static and dynamic shape classes
 
