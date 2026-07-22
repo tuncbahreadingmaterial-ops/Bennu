@@ -61,6 +61,8 @@ set(native_output
   "${long_parent}/native output éß 文 🐍${BENNU_EXECUTABLE_SUFFIX}")
 set(real_native_output
   "${long_parent}/real native output éß 文 🐍${BENNU_EXECUTABLE_SUFFIX}")
+set(short_native_copy
+  "${work}/real native verification${BENNU_EXECUTABLE_SUFFIX}")
 set(cc_output
   "${long_parent}/CC output éß 文 🐍${BENNU_EXECUTABLE_SUFFIX}")
 set(compiler "${long_parent}/selected compiler éß 文 🐍/cl.exe")
@@ -190,8 +192,9 @@ if(NOT "${real_build_exit}" STREQUAL "0" OR
     "extracted real-compiler long-path build failed\nexit: ${real_build_exit}\n"
     "stdout: [${real_build_stdout}]\nstderr: [${real_build_stderr}]")
 endif()
+file(COPY_FILE "${real_native_output}" "${short_native_copy}" ONLY_IF_DIFFERENT)
 execute_process(
-  COMMAND "${real_native_output}"
+  COMMAND "${short_native_copy}"
   RESULT_VARIABLE real_run_exit OUTPUT_VARIABLE real_run_stdout
   ERROR_VARIABLE real_run_stderr)
 normalize_newlines(real_run_stdout)

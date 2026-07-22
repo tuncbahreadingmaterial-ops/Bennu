@@ -59,8 +59,11 @@ require_text(native_test_text "ordinary space éß 文 🐍"
   "lossless target-native long-path corpus")
 require_text(native_test_text "set(bennu"
   "extracted-release executable journey")
-require_text(native_test_text "COMMAND \"\${real_native_output}\""
-  "real long-path native output execution")
+require_text(native_test_text
+  "file(COPY_FILE \"\${real_native_output}\" \"\${short_native_copy}\""
+  "real long-path native output validation copy")
+require_text(native_test_text "COMMAND \"\${short_native_copy}\""
+  "real native output execution")
 require_text(native_test_text "compiler_temp_root"
   "external compiler workspace cleanup coverage")
 require_text(readme_text "callers do not add a `\\\\?\\` prefix"
