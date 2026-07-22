@@ -51,14 +51,18 @@ require_text(native_builder_text "\"/Fo:\""
   "MSVC object containment in the isolated working directory")
 require_text(native_builder_text "c_source.filename()"
   "relative MSVC source path inside the isolated working directory")
-require_text(native_builder_text "ordinary_working_directory"
-  "ordinary long process working-directory boundary")
+require_text(native_builder_text "create_compiler_workspace"
+  "short external compiler workspace")
+require_text(native_builder_text "std::filesystem::copy_file(compiler_output, staging_output"
+  "long-path publication staging after external compilation")
 require_text(native_test_text "ordinary space éß 文 🐍"
   "lossless target-native long-path corpus")
 require_text(native_test_text "set(bennu"
   "extracted-release executable journey")
 require_text(native_test_text "COMMAND \"\${real_native_output}\""
   "real long-path native output execution")
+require_text(native_test_text "compiler_temp_root"
+  "external compiler workspace cleanup coverage")
 require_text(readme_text "callers do not add a `\\\\?\\` prefix"
   "ordinary Windows long-path user contract")
 require_text(diary_text

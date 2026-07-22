@@ -88,6 +88,49 @@ path_to_ordinary_utf8(const std::filesystem::path &path) {
   return result;
 }
 
+struct CompilerWorkspaceResult {
+  bool ok;
+  std::filesystem::path path;
+};
+
+#ifdef _WIN32
+CompilerWorkspaceResult create_compiler_workspace() {
+  std::error_code error;
+  std::filesystem::path root = std::filesystem::temp_directory_path(error);
+  if (error) {
+    return CompilerWorkspaceResult{false, {}};
+  }
+
+  constexpr std::size_t workspace_name_reserve = 64;
+  if (root.native().size() + workspace_name_reserve >= MAX_PATH) {
+    std::wstring short_root(MAX_PATH, L'\0');
+    const DWORD size = GetShortPathNameW(root.c_str(), short_root.data(),
+                                         static_cast<DWORD>(short_root.size()));
+    if (size == 0 || static_cast<std::size_t>(size) >= short_root.size()) {
+      return CompilerWorkspaceResult{false, {}};
+    }
+    short_root.resize(size);
+    root = std::filesystem::path(std::move(short_root));
+  }
+
+  const std::wstring stem =
+      L"bennu-build-" + std::to_wstring(GetCurrentProcessId()) + L'-' +
+      std::to_wstring(GetTickCount64()) + L'-';
+  for (std::size_t attempt = 0; attempt < 100; ++attempt) {
+    const std::filesystem::path candidate =
+        root / (stem + std::to_wstring(attempt));
+    error.clear();
+    if (std::filesystem::create_directory(candidate, error)) {
+      return CompilerWorkspaceResult{true, candidate};
+    }
+    if (error && error != std::errc::file_exists) {
+      return CompilerWorkspaceResult{false, {}};
+    }
+  }
+  return CompilerWorkspaceResult{false, {}};
+}
+#endif
+
 #ifdef _WIN32
 bool executable_exists(std::string_view executable) {
   const WideStringResult name = utf8_to_wide(executable);
@@ -425,11 +468,17 @@ bool reserve_replacement_path(const std::filesystem::path &path) {
   return true;
 }
 
-NativeBuildResult failure_with_cleanup(const std::filesystem::path &temporary,
-                                       std::string message) {
+NativeBuildResult
+failure_with_cleanup(const std::filesystem::path &temporary,
+                     const std::filesystem::path &compiler_workspace,
+                     std::string message) {
   std::error_code cleanup_error;
-  std::filesystem::remove_all(temporary, cleanup_error);
-  if (cleanup_error) {
+  if (compiler_workspace != temporary) {
+    std::filesystem::remove_all(compiler_workspace, cleanup_error);
+  }
+  std::error_code temporary_cleanup_error;
+  std::filesystem::remove_all(temporary, temporary_cleanup_error);
+  if (cleanup_error || temporary_cleanup_error) {
     message += "; unable to clean isolated build temporary directory";
   }
   return NativeBuildResult{false, std::move(message)};
@@ -632,14 +681,29 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
                             request.output_path)};
   }
 
-  const std::filesystem::path c_source = temporary_directory / "program.c";
+  std::filesystem::path compiler_workspace = temporary_directory;
+#ifdef _WIN32
+  const CompilerWorkspaceResult workspace_result = create_compiler_workspace();
+  if (!workspace_result.ok) {
+    return failure_with_cleanup(
+        temporary_directory, temporary_directory,
+        output_path_failure("unable to create compiler temporary directory",
+                            request.output_path));
+  }
+  compiler_workspace = workspace_result.path;
+#endif
+
+  const std::filesystem::path c_source = compiler_workspace / "program.c";
   const std::filesystem::path staging_output =
       temporary_directory /
+      (native_platform() == NativePlatform::windows_msvc ? "program.exe" : "program");
+  const std::filesystem::path compiler_output =
+      compiler_workspace /
       (native_platform() == NativePlatform::windows_msvc ? "program.exe" : "program");
   const std::filesystem::path compiler_log = temporary_directory / "compiler.log";
   if (!write_bytes(c_source, request.c_source)) {
     return failure_with_cleanup(
-        temporary_directory,
+        temporary_directory, compiler_workspace,
         output_path_failure("unable to write temporary C source",
                             request.output_path));
   }
@@ -649,34 +713,47 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   const std::filesystem::path compiler_source =
       compiler_style == NativePlatform::windows_msvc ? c_source.filename()
                                                       : c_source;
-  const std::filesystem::path compiler_output =
-      compiler_style == NativePlatform::windows_msvc ? staging_output.filename()
-                                                      : staging_output;
+  const std::filesystem::path compiler_output_argument =
+      compiler_style == NativePlatform::windows_msvc ? compiler_output.filename()
+                                                      : compiler_output;
   PathToUtf8Result c_source_text =
       path_to_compiler_argument(compiler_source, compiler_style);
   PathToUtf8Result staging_output_text =
-      path_to_compiler_argument(compiler_output, compiler_style);
+      path_to_compiler_argument(compiler_output_argument, compiler_style);
   if (!c_source_text.ok || !staging_output_text.ok) {
-    return failure_with_cleanup(temporary_directory,
+    return failure_with_cleanup(temporary_directory, compiler_workspace,
                                 "unable to encode compiler paths as UTF-8");
   }
   const std::vector<std::string> arguments = make_c_compiler_arguments(
       native_platform(), selection.executable, c_source_text.text,
       staging_output_text.text);
   const ProcessResult process = run_process(launch_executable, arguments,
-                                            temporary_directory, compiler_log);
+                                            compiler_workspace, compiler_log);
   if (!process.started || process.terminated || process.exit_code != 0) {
     const std::string failure = process_failure(selection, process);
-    return failure_with_cleanup(temporary_directory, failure);
+    return failure_with_cleanup(temporary_directory, compiler_workspace,
+                                failure);
   }
   error.clear();
-  if (!is_usable_native_output(staging_output, error)) {
+  if (!is_usable_native_output(compiler_output, error)) {
     return failure_with_cleanup(
-        temporary_directory,
+        temporary_directory, compiler_workspace,
         "compiler selected from " +
             std::string(compiler_configuration_name(selection.configuration)) +
             " ('" + selection.executable +
             "') reported success without producing usable native output");
+  }
+
+  if (compiler_output != staging_output) {
+    error.clear();
+    std::filesystem::copy_file(compiler_output, staging_output,
+                               std::filesystem::copy_options::none, error);
+    if (error) {
+      return failure_with_cleanup(
+          temporary_directory, compiler_workspace,
+          output_path_failure("unable to stage compiled native output",
+                              request.output_path));
+    }
   }
 
   std::filesystem::path replacement;
@@ -699,14 +776,18 @@ NativeBuildResult build_native(const NativeBuildRequest &request) {
   }
   if (replacement.empty()) {
     return failure_with_cleanup(
-        temporary_directory,
+        temporary_directory, compiler_workspace,
         output_path_failure("unable to stage compiled native output",
                             request.output_path));
   }
 
   error.clear();
-  std::filesystem::remove_all(temporary_directory, error);
-  if (error) {
+  if (compiler_workspace != temporary_directory) {
+    std::filesystem::remove_all(compiler_workspace, error);
+  }
+  std::error_code temporary_cleanup_error;
+  std::filesystem::remove_all(temporary_directory, temporary_cleanup_error);
+  if (error || temporary_cleanup_error) {
     std::error_code removal_error;
     std::filesystem::remove(replacement, removal_error);
     std::string message = output_path_failure(

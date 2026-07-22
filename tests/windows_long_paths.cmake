@@ -13,8 +13,9 @@ set(work "${CMAKE_CURRENT_BINARY_DIR}/windows long path extracted release")
 set(stage "${work}/stage")
 set(extracted "${work}/extracted")
 set(archive "${work}/bennu-windows-x64.zip")
+set(compiler_temp_root "${work}/compiler temp")
 file(REMOVE_RECURSE "${work}")
-file(MAKE_DIRECTORY "${stage}" "${extracted}")
+file(MAKE_DIRECTORY "${stage}" "${extracted}" "${compiler_temp_root}")
 
 get_filename_component(executable_name "${BENNU_EXECUTABLE}" NAME)
 configure_file("${BENNU_EXECUTABLE}" "${stage}/${executable_name}" COPYONLY)
@@ -94,6 +95,8 @@ function(assert_no_temporary_artifacts context)
     "${long_parent}/*.tmp" "${long_parent}/*.tmp.*"
     "${long_parent}/*.bennu-build.tmp*"
     "${long_parent}/*.bennu-native.tmp*")
+  file(GLOB compiler_workspaces "${compiler_temp_root}/bennu-build-*")
+  list(APPEND leftovers ${compiler_workspaces})
   if(leftovers)
     message(FATAL_ERROR "${context}: temporary artifacts remain: ${leftovers}")
   endif()
@@ -176,6 +179,7 @@ assert_no_temporary_artifacts("long emit-c publication failure")
 
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env --unset=CC
+          "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
           "${bennu}" build "${source}" -o "${real_native_output}"
   RESULT_VARIABLE real_build_exit OUTPUT_VARIABLE real_build_stdout
   ERROR_VARIABLE real_build_stderr)
@@ -204,6 +208,7 @@ file(REMOVE "${trace}" "${native_output}")
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
           "BENNU_FAKE_CC_MODE=success" "BENNU_FAKE_CC_TRACE=${trace}"
+          "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
           "${bennu}" build "${source}" -o "${native_output}"
           --cc "${compiler}"
   RESULT_VARIABLE build_exit OUTPUT_VARIABLE build_stdout ERROR_VARIABLE build_stderr)
@@ -229,6 +234,7 @@ execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
           "CC=${compiler}" "BENNU_FAKE_CC_MODE=success"
           "BENNU_FAKE_CC_TRACE=${trace}"
+          "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
           "${bennu}" build "${source}" -o "${cc_output}"
   RESULT_VARIABLE cc_exit OUTPUT_VARIABLE cc_stdout ERROR_VARIABLE cc_stderr)
 if(NOT "${cc_exit}" STREQUAL "0" OR NOT cc_stdout STREQUAL "" OR
@@ -245,6 +251,7 @@ file(REMOVE "${trace}")
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
           "BENNU_FAKE_CC_MODE=fail" "BENNU_FAKE_CC_TRACE=${trace}"
+          "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
           "${bennu}" build "${source}" -o "${native_output}"
           --cc "${compiler}"
   RESULT_VARIABLE compiler_exit OUTPUT_VARIABLE compiler_stdout
@@ -264,6 +271,7 @@ assert_no_temporary_artifacts("long compiler failure")
 
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env "BENNU_FAKE_CC_MODE=success"
+          "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
           "${bennu}" build "${source}" -o "${output_directory}"
           --cc "${compiler}"
   RESULT_VARIABLE build_publish_exit OUTPUT_VARIABLE build_publish_stdout
@@ -288,6 +296,7 @@ function(check_alias_rejection context command output_argument)
     execute_process(
       COMMAND "${CMAKE_COMMAND}" -E env
               "BENNU_FAKE_CC_MODE=success" "BENNU_FAKE_CC_TRACE=${trace}"
+              "TMP=${compiler_temp_root}" "TEMP=${compiler_temp_root}"
               "${bennu}" build "${source}" -o "${output_argument}"
               --cc "${compiler}"
       RESULT_VARIABLE alias_exit OUTPUT_VARIABLE alias_stdout
