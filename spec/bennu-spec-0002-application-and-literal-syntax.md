@@ -10,6 +10,8 @@
 
 **Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
 
+**Explicit sequential fan-out:** [BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md)
+
 **Target:** Bennu language rewrite; scalar literals, rank-1 vector literals,
 and primitive application
 
@@ -55,6 +57,11 @@ BENNU-SPEC-0006 extends expressions with bracketed structural tuple literals
 and amends prefix call preparation. Its compatibility section identifies every
 statement below that it supersedes; all unrelated Level 2 syntax remains in
 force.
+
+BENNU-SPEC-0007 additionally extends expressions with the reserved adjacent
+`fanout[...]` construct, brace-delimited primitive-call branch templates, and a
+branch-local `_` placeholder. Its grammar and structural-error order supersede
+this document only inside that construct.
 
 ## 3. Source bytes, lines, and positions
 
@@ -119,7 +126,8 @@ digit = "0" ... "9"
 Names are ASCII and case-sensitive. `true`, `false`, `inf`, and `nan` are
 reserved literal words and cannot be primitive names. `Bool`, `Int`, and
 `Double` are reserved type names and are valid only in the typed-empty forms in
-section 9.
+section 9. BENNU-SPEC-0007 additionally reserves `fanout` as a construct keyword;
+it cannot name a primitive even though its bytes match `primitive_name`.
 
 An unknown but syntactically valid primitive name still forms a primitive-call
 node. Later primitive lookup reports the unknown name at its primitive-name
@@ -155,8 +163,10 @@ inc 5               valid
 inc5                 one primitive name, not an application
 ```
 
-Commas, semicolons, braces, and operator punctuation do not separate
-expressions. They are invalid bytes in this grammar.
+Commas, semicolons, braces, and operator punctuation do not separate ordinary
+expressions. They are invalid bytes in this grammar. BENNU-SPEC-0007 introduces
+braces only as explicit fan-out branch delimiters; it does not make them general
+grouping or separator punctuation.
 
 ## 5. Programs and root expressions
 
@@ -212,6 +222,8 @@ expression = scalar_literal
 BENNU-SPEC-0005 adds parameter references on complete-program surfaces.
 BENNU-SPEC-0006 additionally adds `tuple_literal`; its brackets are distinguished
 from an adjacent application bracket by expression position.
+BENNU-SPEC-0007 additionally adds `fanout_expression`; its reserved keyword,
+outer brackets, branch braces, and `_` placeholder have no ordinary-call parse.
 
 There are no infix expressions and no grouping expression. Parentheses always
 denote a vector literal. Consequently Bennu has no operator-precedence table.
@@ -469,6 +481,9 @@ zero-argument application only when preceded immediately by a primitive name.
 BENNU-SPEC-0006 adds tuple brackets in expression position, including standalone
 empty `[]`; immediately adjacent `primitive_name[]` remains a zero-argument
 application.
+BENNU-SPEC-0007 adds the reserved `fanout[...]` bracket pair and matching branch
+braces. Those braces may nest ordinary balanced call, tuple, and vector
+delimiters, but are not expressions outside a fan-out branch list.
 
 A mismatched closing delimiter is reported at that delimiter. If end of source
 is reached with an opening delimiter unmatched, the missing-close diagnostic

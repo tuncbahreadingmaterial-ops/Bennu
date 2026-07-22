@@ -16,6 +16,8 @@
 
 **Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
 
+**Explicit sequential fan-out:** [BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -55,7 +57,7 @@ This specification does not define:
 - user-defined functions, closures, or partial application;
 - evaluation order for effectful expressions;
 - source constructs beyond those defined by BENNU-SPEC-0002,
-  BENNU-SPEC-0005, and BENNU-SPEC-0006;
+  BENNU-SPEC-0005, BENNU-SPEC-0006, and BENNU-SPEC-0007;
 - scalar domains outside the initial kernels defined by BENNU-SPEC-0003,
   including integer division;
 - optimizer, allocator, or generated-C implementation strategy; or
@@ -1222,7 +1224,12 @@ program parameters, argument binding, and the analysis/execution boundary.
 structural tuple values and types, static one-level prefix spreading, and the
 versioned profile-v2 resource boundary. Tuple arguments do not extend scalar
 primitive lifting and are rejected unless a later specification adds a
-tuple-aware signature. The following remaining decisions do not change scalar
+tuple-aware signature.
+[BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md) resolves the
+explicit branch-template syntax that borrows one operand across sequential
+primitive calls and returns their independently owned results as a tuple. It
+does not change primitive lifting, direct application, or tuple-aware signature
+selection. The following remaining decisions do not change scalar
 lifting itself
 but must be defined before their associated primitives or product surfaces
 become conforming:
