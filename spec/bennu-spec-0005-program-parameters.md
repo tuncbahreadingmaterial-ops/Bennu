@@ -135,7 +135,9 @@ parameters[n int]                invalid: expected exact type Bool, Int, or Doub
 
 For a missing name or type immediately before `]` or end of source, the primary
 diagnostic span is the zero-length insertion position before that byte. For an
-unexpected existing token, the primary span is that complete token.
+unexpected existing token, the primary span is that complete token. Section 5
+defines the complete phase-1 winner algorithm, stable reasons, and exact spans;
+implementations must not select a winner from parser accident or recovery order.
 
 ### 3.4 Header with no executable roots
 
@@ -240,22 +242,63 @@ These spans use BENNU-SPEC-0002's one-based byte coordinates and half-open
 representation. Internal separators are included in the complete header and
 complete declaration spans but excluded from name, type, and reference spans.
 
-Header diagnostics use these primary spans:
+Phase 1 uses the following closed structural-reason vocabulary for malformed or
+misplaced parameter headers:
+
+```text
+second_parameter_header
+parameter_header_after_root
+expected_header_open
+expected_parameter_name
+expected_parameter_type
+missing_header_close
+unexpected_header_token
+trailing_header_bytes
+```
+
+The winner is selected independently of parser recovery. Form every applicable
+phase-1 candidate, select the candidate with the earliest primary-span start
+byte, and, when candidates start at the same byte, select the first reason in
+the ordered list above. A zero-length insertion candidate starts at its
+insertion byte. An existing offending byte or token always uses a nonempty
+half-open span. This ordering makes a second header win over header-after-root
+at the same keyword, and makes an expected type win over a missing closing
+bracket at the same end-of-source insertion position.
+
+This table is the complete mapping from parameter-header structural failures to
+stable reasons and spans. The examples use one-based byte coordinates on one
+logical source buffer and half-open `[start,end)` notation.
+
+| Source shape or exact source | Stable reason | Exact primary span | Related context |
+| --- | --- | --- | --- |
+| Bare `parameters` | `expected_header_open` | End-of-source `[11,11)` | Keyword `[1,11)`. |
+| `parameters]` | `expected_header_open` | Offending `]` `[11,12)` | Keyword `[1,11)`. |
+| `parameters [n Int]` | `expected_header_open` | First non-adjacent byte, the space `[11,12)` | Keyword `[1,11)`; later `[` is not a recovery winner. |
+| `parameters[` | `missing_header_close` | End-of-source `[12,12)` | Opening `[` `[11,12)`. The empty interior is otherwise complete. |
+| `parameters[n` | `expected_parameter_type` | End-of-source `[13,13)` | Incomplete declaration `[12,13)`; this beats `missing_header_close` at `[13,13)`. |
+| `parameters[n]` | `expected_parameter_type` | Before `]`, `[13,13)` | Incomplete declaration `[12,13)`. |
+| `parameters[n Int delta` | `expected_parameter_type` | End-of-source `[23,23)` | Incomplete declaration `[18,23)`; this beats `missing_header_close` at `[23,23)`. |
+| A type appears where a name is required, as in `parameters[Int]` | `expected_parameter_name` | Complete `Int` token `[12,15)` | Opening `[` `[11,12)`. |
+| A token is not exact `Bool`, `Int`, or `Double`, as in `parameters[n Integer]` | `unexpected_header_token` | Complete `Integer` token `[14,21)` | Declaration name `[12,13)`. |
+| Punctuation or another token is not permitted by the production | `unexpected_header_token` | Complete offending token | The declaration or delimiter that established the expectation. |
+| A complete pair reaches end of source, as in `parameters[n Int` | `missing_header_close` | End-of-source `[17,17)` | Opening `[` `[11,12)`. |
+| Non-whitespace follows the closing bracket on its logical record | `trailing_header_bytes` | Complete first trailing token | Complete header span. |
+| `parameters[]\nparameters[]` | `second_parameter_header` | Second keyword `[14,24)` | First header `[1,13)`. |
+| `1\nparameters[]` | `parameter_header_after_root` | Keyword `[3,13)` | First root `[1,2)`. |
+| `parameters[]\n1\nparameters[]` | `second_parameter_header` | Second keyword `[16,26)` | First header `[1,13)`; this beats `parameter_header_after_root` at `[16,26)`. |
+
+The exact rows above are normative fixtures, not illustrative prose. CRLF and
+multiline variants apply the same byte-based algorithm to their actual source
+bytes. Once phase 1 succeeds, later diagnostics use these primary spans:
 
 | Failure | Primary span | Related context |
 | --- | --- | --- |
-| Header after an executable root | `parameters` keyword | First executable-root span. |
-| Second header | Second `parameters` keyword | First header span. |
-| Whitespace before `[` | `[` | Keyword span. |
-| Missing `]` | End-of-source insertion span | Opening `[` span. |
-| Unexpected or misspelled type | Complete offending token | Declaration name span. |
-| Missing name or type | Zero-length insertion span | Incomplete declaration span. |
 | Duplicate name | Later name span | Earlier name span. |
 | Reserved or primitive collision | Declaration name span | Colliding category or primitive identity. |
 | Unknown bare name | Bare name span | Complete root/call span when applicable. |
 
 Rendered source diagnostics may show one primary line and column, but structured
-results must retain the spans and related context above.
+results must retain the stable reason, spans, and related context above.
 
 ## 6. Whole-program static analysis
 
@@ -390,7 +433,8 @@ Existing zero-argument `evaluate_source` overloads behave exactly as calls with
 an empty argument span.
 
 The argument span is borrowed only for the duration of the call. Successful
-binding copies normalized scalar data into immutable indexed parameter slots.
+binding copies already-valid scalar data into immutable indexed parameter slots
+without rewriting its bits.
 The result retains no pointer, reference, iterator, or view into caller-owned
 arguments. Binding allocates no Bennu vector and performs no text conversion.
 
@@ -420,6 +464,13 @@ Thus a valid `Vector<Int>` supplied for an `Int` parameter is
 validation. A valid Bool supplied for an Int parameter is `type_mismatch`. An
 unknown scalar type, noncanonical NaN, or invalid inactive scalar field is
 `invalid_typed_value`.
+
+This operation validates an already-formed caller-supplied stored `Value`; it is
+not a raw binary64 construction or backend-ingress boundary. In particular, it
+must reject a noncanonical NaN as `invalid_typed_value` with invariant
+`noncanonical_nan` and must not normalize the caller's bits. BENNU-SPEC-0003
+section 8 separately requires normalization while constructing a Bennu value
+from raw backend bits, before those bits become a valid stored `Value`.
 
 The lowest failing one-based position wins. No later value is inspected after a
 failure.
@@ -458,13 +509,46 @@ Every `ArgumentError` carries:
 | `parameter_name` | Required when `position <= required_count`; absent for `extra`. |
 | `expected_type` | Required when `position <= required_count`; absent for `extra`. |
 | `declaration_span` | Required when `position <= required_count`; absent for `extra`. |
-| `actual_container` | Required for `container_mismatch`; otherwise absent unless useful for `invalid_typed_value`. |
-| `actual_type` | Required for `type_mismatch`; otherwise absent unless a valid type is known. |
-| `invalid_value_invariant` | Required for `invalid_typed_value` when a specific public invariant was identified. |
+| `actual_container` | Present exactly as specified below; otherwise absent. |
+| `actual_type` | Present exactly as specified below; otherwise absent. |
+| `invalid_value_invariant` | Required for every `invalid_typed_value`; otherwise absent. |
 
 Raw argument text is never stored in `ArgumentError` and is omitted from every
 diagnostic. This avoids terminal-control, escaping, privacy, and unbounded-text
 ambiguity.
+
+The closed `invalid_value_invariant` vocabulary for this scalar-only boundary is:
+
+```text
+unknown_container
+unknown_scalar_type
+inactive_scalar_field
+noncanonical_nan
+```
+
+`inactive_vector_payload` and `invalid_boolean_element` are public vector
+invariants, but they cannot be returned here: a recognized vector container
+returns `container_mismatch` before its payload or element tag is inspected.
+Every `invalid_typed_value` must identify exactly one invariant from the closed
+list; `none`, an absent field, or an implementation-defined value is invalid.
+
+Optional context presence and values are exact:
+
+| Reason/invariant | `actual_container` | `actual_type` | `invalid_value_invariant` |
+| --- | --- | --- | --- |
+| `invalid_typed_value` / `unknown_container` | `unknown` | absent | `unknown_container` |
+| `invalid_typed_value` / `unknown_scalar_type` | `scalar` | `unknown` | `unknown_scalar_type` |
+| `invalid_typed_value` / `inactive_scalar_field` | `scalar` | Exact recognized `Bool`, `Int`, or `Double` tag. | `inactive_scalar_field` |
+| `invalid_typed_value` / `noncanonical_nan` | `scalar` | `Double` | `noncanonical_nan` |
+| `container_mismatch` | `vector` | absent; the vector element tag is not inspected | absent |
+| `type_mismatch` | `scalar` | Exact valid supplied `Bool`, `Int`, or `Double` type. | absent |
+| `missing`, `extra`, `invalid_literal`, or `out_of_range` | absent | absent | absent |
+
+`parameter_name`, `expected_type`, and `declaration_span` are present if and
+only if `position <= required_count`; therefore they are absent exactly for
+`extra` and present for every other current reason. The values identify the
+declaration at `position`. No other optional `ArgumentError` field may be
+populated.
 
 ### 8.3 Count failures
 
@@ -487,6 +571,34 @@ extra position is reported.
 
 Count failures precede all malformed, out-of-range, invalid-value, container,
 and type failures, including a malformed value at an earlier supplied position.
+
+### 8.4 Stable process serialization
+
+The runner and every generated/native artifact serialize `ArgumentError` to one
+ASCII stderr line in exactly this field order:
+
+```text
+bennu_argument_error reason=<reason> required_count=<uint> supplied_count=<uint> position=<uint> parameter_name=<value> expected_type=<value> declaration_span=<value> actual_container=<value> actual_type=<value> invalid_value_invariant=<value>
+```
+
+The code block contains the record without its required final LF byte. `<uint>`
+is the shortest nonnegative decimal representation with no sign or leading zero
+except the value zero. A present enum or parameter name uses its exact ASCII
+spelling from this specification. A present declaration span is
+`<start-byte>:<start-line>:<start-column>-<end-byte>:<end-line>:<end-column>`,
+with all six numbers encoded as `<uint>` and the end excluded. An absent optional
+field is exactly one hyphen (`-`). The current present string values contain
+only ASCII letters, digits, and underscore. If a future specification permits
+another byte in a string value, each byte outside `[A-Za-z0-9_]` must be encoded
+as `%HH` with uppercase hexadecimal digits; `%` and `-` must therefore be
+escaped when present data uses them. There are single ASCII spaces between
+fields, no leading/trailing space, and one final LF byte. Native Windows text
+translation may expose that logical LF as CRLF; parsers remove exactly one
+platform line terminator before parsing the ASCII record.
+
+No prose prefix or suffix is part of this record, and raw argument text never
+appears. Conformance parses the fixed field names, order, absence marker,
+escaping, and values; it does not infer structured data from human prose.
 
 ## 9. Portable text arguments
 
@@ -613,21 +725,20 @@ separator.
 
 ## 11. Runtime binding and execution order
 
-### 11.1 Direct evaluator and runner
+### 11.1 Direct evaluator
 
-After all static phases succeed, the direct evaluator and runner apply this
-observable order:
+After all static phases succeed, the direct evaluator applies this observable
+order:
 
 ```text
 1. compare supplied and required argument counts
-2. validate typed arguments or decode text arguments from position 1 upward
+2. validate typed arguments from position 1 upward
 3. create one execution resource context
 4. execute roots in source order
 5. within a root, execute calls in left-to-right postorder
 6. within each call, check dynamic shape, then resource preflight, then domain
    or scalar-kernel/structural execution
-7. format every root value
-8. publish the complete formatted stdout batch
+7. return all structured root Values
 ```
 
 The first failure stops the sequence. Within dynamic shape agreement, the first
@@ -636,10 +747,65 @@ lowest zero-based failing result index wins as required by BENNU-SPEC-0001.
 Across roots, an earlier root's dynamic failure wins over every dynamic failure
 in a later root.
 
-Typed validation and text decoding complete before the resource context begins.
-No primitive receives raw text or performs argument decoding.
+Typed validation completes before the resource context begins. The evaluator
+does not format a successful `Value`, construct pending stdout, write stdout or
+stderr, or return a formatting/output-device failure.
 
-### 11.2 Generated and native programs
+### 11.2 Runner and artifact presentation
+
+The runner and generated/native process adapters own text decoding,
+presentation, and host output. After static analysis has succeeded for the
+runner, or at process start for an already-published artifact, they perform
+count comparison and lowest-position text decoding before creating the resource
+context. They then execute steps 3 through 6 above and continue in this exact
+order:
+
+```text
+7. format root Values into one pending byte batch in one-based root order
+8. write the complete pending batch to stdout
+9. flush stdout
+```
+
+No primitive receives raw text or performs argument decoding. All execution and
+all formatting complete before step 8 begins.
+
+Formatting failure is the stable structured class `FormattingError`. Its closed
+reasons are `invalid_value` and `conversion_failure`. Context always contains
+the one-based `root_position` and complete `root_span`; `invalid_value` also
+contains one exact public `ValueInvariant`, while `conversion_failure` has no
+invariant. The primary source position is the start of `root_span`. Roots are
+formatted in source order, so the lowest failing `root_position` wins. This
+failure occurs before publication and publishes zero stdout bytes.
+
+Host stdout failure is the stable structured class `OutputError`. Its closed
+reasons are `write_failed` and `flush_failed`. Context always contains
+`pending_byte_count` and `accepted_byte_count`. For `write_failed`, the latter
+is the byte count accepted by the single step-8 write and must be less than the
+pending count. For `flush_failed`, it equals the pending count because the write
+accepted the complete batch. Its deterministic `output_position` is the
+zero-based first unaccepted byte for `write_failed` and the pending byte count
+for `flush_failed`. No source span is attached. `OutputError` can occur only
+after execution and formatting have succeeded and publication has begun; an
+external device may therefore have observed a prefix. It returns process
+failure and best-effort stderr rather than a successful language result.
+
+Runner and artifact process serialization for these failures is also stable.
+It uses section 8.4's `<uint>`, span, absence, spacing, escaping, and logical-line
+terminator rules, with exactly one of these complete ASCII records and no prose:
+
+```text
+bennu_formatting_error reason=<reason> root_position=<uint> root_span=<span> invalid_value_invariant=<value>
+bennu_output_error reason=<reason> pending_byte_count=<uint> accepted_byte_count=<uint> output_position=<uint>
+```
+
+For `FormattingError(invalid_value)`, `invalid_value_invariant` is the exact
+public invariant; for `conversion_failure`, it is the absence marker `-`.
+`<span>` is section 8.4's six-component half-open span without angle brackets.
+An `OutputError` record is best effort because the host may also make stderr
+unwritable, but whenever the record is observable its bytes and fields are the
+stable conformance interface.
+
+### 11.3 Generated and native programs
 
 A generated or native program receives runtime arguments directly:
 
@@ -652,14 +818,20 @@ The process program name is not an argument. The ordered text argument list is
 passes `--`, it is ordinary first-argument text and normally fails the expected
 scalar grammar.
 
+On a hosted C entry where `argc <= 1`, the supplied script-argument count is
+exactly zero. The program must not read `argv[1]`, form a pointer to it, or
+subtract one into an unsigned count. Only an `argc > 1` branch may convert
+`argc - 1` to the checked internal count and inspect `argv[1]` onward.
+
 Static analysis already succeeded before the artifact was published. At each
-invocation the artifact begins with section 11.1 steps 1 and 2, then creates a
-fresh resource context and performs the same dynamic order. Emitted C and a
+invocation the artifact begins with section 11.2's count and decoding boundary,
+then creates a fresh resource context and performs the same dynamic and
+presentation order. Emitted C and a
 native executable built from it must return the same values, structured
 failure class/reason/context, stderr information, exit success/failure, and
 stdout bytes.
 
-### 11.3 Dynamic examples
+### 11.4 Dynamic examples
 
 ```bennu
 parameters[n Int]
@@ -737,10 +909,8 @@ form:
 source failures. They exit nonzero and preserve the existing publish-last
 destination contract.
 
-An argument diagnostic is one concise stderr record containing the
-`ArgumentError` reason, required and supplied counts, one-based position, and,
-when present, parameter name and expected type. It never includes raw argument
-text. It exits nonzero and writes no stdout.
+An argument diagnostic is exactly section 8.4's stable ASCII record. It exits
+nonzero and writes no stdout.
 
 A generated/native program has no source file dependency. Dynamic diagnostics
 use the embedded logical label `bennu-source` plus the original one-based line
@@ -750,26 +920,28 @@ and column:
 bennu-source:<line>:<column>: <category>: <message>
 ```
 
-Its argument diagnostics contain the same required fields as the runner and no
-raw text. Generated and native failures write one diagnostic record to stderr,
-exit nonzero, and write no stdout unless the failure is itself an stdout-device
+Its argument diagnostics use the same section 8.4 serialization as the runner.
+Generated and native failures write one diagnostic record to stderr, exit
+nonzero, and write no stdout unless the failure is itself an stdout-device
 failure.
 
-Exact human-readable message prose is not stable. Error kind, stable reason,
-structured context, primary position, channel, and success/failure status are
-stable and are the conformance interface.
+Exact human-readable prose for other diagnostics is not stable. The section 8.4
+argument record and section 11.2 formatting/output records are wholly stable.
+For every category, error kind, stable reason, structured context,
+primary/output position, channel, and success/failure status are the
+conformance interface.
 
 ### 12.3 Transactional language output
 
-The evaluator first returns all root values or one failure. The runner and
-artifacts evaluate and format every root into pending output before the first
-stdout write. Missing, extra, malformed, invalid typed, shape, resource, domain,
-or formatting failure publishes zero stdout bytes, including when an earlier
-root succeeded.
+The evaluator returns all structured root Values or one failure and performs no
+presentation I/O. The runner and artifacts evaluate and format every root into
+one pending output batch before the first stdout write. Missing, extra,
+malformed, invalid typed, shape, resource, domain, or `FormattingError` failure
+publishes zero stdout bytes, including when an earlier root succeeded.
 
-Once publication to an external stdout device begins, a later device write or
-flush failure may have made a byte prefix externally visible. The process must
-still return nonzero and report the established best-effort stdout failure.
+Once publication to an external stdout device begins, `OutputError` may mean a
+byte prefix became externally visible. The process must still return nonzero
+and report the stable reason/context on best-effort stderr.
 This unavoidable device behavior is not a relaxation allowing language or
 argument failures to stream partial root results.
 
@@ -944,11 +1116,11 @@ Strict C11 means GCC/Clang-compatible compilation with `-std=c11 -Wall -Wextra
 
 | Plan ID | Normative requirement | Required future evidence |
 | --- | --- | --- |
-| `PARG-001-HEADER` | Sections 3 through 5 grammar, placement, empty form, names, links, and exact spans. | Parser/analysis fixtures for valid LF/CRLF/multiline headers and every malformed, duplicate, collision, later/second-header, unknown-reference, and call/reference distinction; direct structured span assertions. |
+| `PARG-001-HEADER` | Sections 3 through 5 grammar, placement, empty form, names, links, exact malformed-header reasons/spans, and reserved primitive descriptor. | Parser/analysis fixtures for valid LF/CRLF/multiline headers and every table row, including bare `parameters`, missing `[`, `parameters[n` at EOS, second header, header after root, and both same-byte overlaps; assert exact stable reason and half-open primary/related spans. Reject a primitive descriptor whose source name is `parameters`; cover duplicate, collision, unknown-reference, and call/reference distinctions. |
 | `PARG-002-STATIC-ORDER` | Section 6 whole-program phase and traversal order. | Multi-root and nested fixtures combining name, arity, type, static shape, malformed typed arguments, and predicted dynamic errors; direct evaluator proves the required static winner before any argument inspection. |
 | `PARG-003-SHAPE-ANALYSIS` | Static versus dynamic shape classes. | Direct analysis fixtures for literal-vector mismatch, parameter scalars, literal-fed `iota`, two dynamic vectors, and mixed known/dynamic vectors; emit/build reject only the static mismatch. |
-| `PARG-004-TYPED-API` | Section 7 ordered typed API, exact types, ownership, and validation order. | Public C++ tests using plain `Value` arrays for all scalar types, repeated/unused parameters, invalid tags/inactive fields/noncanonical NaN, valid vectors, wrong scalar types, caller mutation after return, and empty-span compatibility. |
-| `PARG-005-ARGUMENT-ERROR` | Section 8 reasons, fields, count precedence, and lowest position. | Structured direct-result assertions for every reason and optional field, multiple missing/extra values, malformed-before-extra, and two invalid equal-count positions. Tests inspect fields, never prose. |
+| `PARG-004-TYPED-API` | Section 7 ordered typed API, exact types, ownership, and validation order. | Public C++ tests using plain `Value` arrays for all scalar types, repeated/unused parameters, invalid tags/inactive fields/noncanonical NaN, valid vectors, wrong scalar types, caller mutation after return, and empty-span compatibility. Inject the same raw noncanonical NaN through BENNU-SPEC-0003 construction normalization and through a caller-supplied stored `Value`; prove normalization only at raw ingress and `invalid_typed_value(noncanonical_nan)` at the public stored-Value boundary. |
+| `PARG-005-ARGUMENT-ERROR` | Section 8 reasons, fields, count precedence, lowest position, closed invariant vocabulary, and stable process record. | Structured direct-result assertions for every reason, invariant, and exact optional-field presence/value; multiple missing/extra values, malformed-before-extra, and two invalid equal-count positions. Runner/C/native tests parse the fixed ASCII field order, absence marker, span form, and escaping; tests never infer fields from prose. |
 | `PARG-006-TEXT-GRAMMAR` | Section 9 portable Bool/Int/Double grammar and range. | Table-driven runner and generated-C decoder corpus covering signs, zeroes, boundaries, partial parses, locale independence, underflow/signed zero, infinities, NaN, finite overflow, visible Double spelling, and raw-text omission. |
 | `PARG-007-RUNNER-SEPARATOR` | Section 10 exact `--` boundary. | CLI process tests for no separator, bare separator, negative values, stray pre-separator values, a second `--` as data, zero-parameter extra values, and CLI-usage-before-file precedence on every supported target. |
 | `PARG-008-ZERO-ROOTS` | Empty declaration and declared parameters with no roots. | Direct, runner, emitted-C, and native tests proving required validation, exact zero values/stdout on success, and count/decode failures despite no references. |
@@ -956,12 +1128,12 @@ Strict C11 means GCC/Clang-compatible compilation with `-std=c11 -Wall -Wextra
 | `PARG-010-RUNTIME-ORDER` | Section 11 root/call/dynamic failure order. | Multi-root and nested tests combining dynamic shape, bounded resource refusal, and Int overflow; compare winner, span, argument/index context, status, stderr class, and zero stdout across paths. |
 | `PARG-011-PROFILES` | Section 13 unchanged `trusted-local-v1`/`bounded-v1` accounting. | Instrumented resource tests prove binding emits no vector/live/work charge, calls emit existing canonical charges, binding failure creates no context, and each invocation resets. Replay bounded refusals across evaluator, C, and native. |
 | `PARG-012-EMIT-C` | Sections 11 and 12 typed emission without concrete values. | Deterministic emitted-byte checks across source paths and argument values; compile every valid dynamic fixture as strict C11; execute success and all argument/dynamic failures; inspect generated source for no runtime overload selection. |
-| `PARG-013-NATIVE` | Generated/native direct-argv equivalence. | Build and invoke native artifacts without `--`; compare byte-exact success output and normalized structured failure observations with emitted C and direct paths on Linux, Windows, and macOS. |
-| `PARG-014-DIAGNOSTICS` | Section 12 source/argument channels, embedded spans, raw-text omission, and statuses. | Direct no-I/O tests; runner path/line/column tests; generated `bennu-source` position tests; stderr/nonzero/no-stdout assertions; hostile control-byte argument proves no raw echo. |
-| `PARG-015-ATOMIC-STDOUT` | Complete-program transactional output and device-failure exception. | Programs with an early successful root and later argument-independent shape/resource/domain/format failure publish zero bytes on runner/C/native; injected short-write/final-flush tests may observe a prefix but must return nonzero. |
-| `PARG-016-REPRESENTABILITY` | No language cap and checked count/index/host boundaries. | Synthetic source-analysis seams exercise count/index/byte overflow without huge allocation; public span boundaries; generated checked `argc` comparison; host-limit documentation; no wrapping or truncated slot aliases. |
+| `PARG-013-NATIVE` | Generated/native direct-argv equivalence. | Build and invoke native artifacts without `--`; compare byte-exact success output and parsed section 8.4 failure records with emitted C and direct structured paths on Linux, Windows, and macOS. |
+| `PARG-014-DIAGNOSTICS` | Section 12 source/argument channels, embedded spans, raw-text omission, and statuses. | Direct no-I/O tests; runner path/line/column tests; generated `bennu-source` position tests; parse every section 8.4 field rather than prose; stderr/nonzero/no-stdout assertions; hostile control-byte argument proves no raw echo. |
+| `PARG-015-ATOMIC-STDOUT` | Complete-program transactional output and device-failure exception. | Programs with an early successful root and later argument-independent shape/resource/domain/format failure publish zero bytes on runner/C/native; parse the exact formatting record and assert reason, root position/span, and invariant presence. Injected short-write/final-flush tests parse the exact output record and assert reason, pending/accepted counts, and output position; a prefix may be observed but status is nonzero. |
+| `PARG-016-REPRESENTABILITY` | No language cap and checked count/index/host boundaries. | Synthetic source-analysis seams exercise count/index/byte overflow without huge allocation; public span boundaries; generated/native hosted fixtures call the argument adapter with `argc <= 1` and prove zero supplied arguments, no `argv[1]` access, no unsigned underflow, and checked `argc > 1` conversion; host-limit documentation; no wrapping or truncated slot aliases. |
 | `PARG-017-REGRESSION` | Header-absent zero-argument compatibility and program-only rejection. | Existing complete Release CTest remains green; zero-argument direct/runner/C/native corpus remains byte exact; REPL and `evaluate_expression` reject headers/references and recover as specified. |
-| `PARG-018-PLATFORMS` | Portable ASCII process boundary. | Target-native matrix executes Bool, Int extrema, visible Double, signed zero, infinity, NaN, negative values, missing/extra/malformed cases, strict C11, and native build on Linux x64, Windows x64, and macOS arm64; compare logical results and structured observations. |
+| `PARG-018-PLATFORMS` | Portable ASCII process boundary. | Target-native matrix executes Bool, Int extrema, visible Double, signed zero, infinity, NaN, negative values, missing/extra/malformed cases, `argc <= 1`, strict C11, and native build on Linux x64, Windows x64, and macOS arm64; compare logical results and parse exact section 8.4 records. |
 
 No one path substitutes for another: direct evaluator tests establish structured
 API data, runner tests establish `--` and file diagnostics, emitted-C tests

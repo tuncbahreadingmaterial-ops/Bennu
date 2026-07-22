@@ -237,6 +237,8 @@ Before evaluating source, an implementation must validate its primitive table.
 A valid table has:
 
 - unique primitive identities and names;
+- no primitive source name equal to the reserved program-header keyword
+  `parameters` from BENNU-SPEC-0005;
 - at least one signature per primitive;
 - no duplicate signatures;
 - no overload ambiguity under the promotion rules in section 7;
@@ -245,7 +247,9 @@ A valid table has:
 - a valid implementation dispatch entry for every signature.
 
 An invalid built-in descriptor is an implementation/configuration failure, not
-an ordinary Bennu program error.
+an ordinary Bennu program error. Descriptor conformance must include a table
+whose otherwise-valid primitive is rejected solely because its source name is
+`parameters`.
 
 ## 6. Application syntax
 
