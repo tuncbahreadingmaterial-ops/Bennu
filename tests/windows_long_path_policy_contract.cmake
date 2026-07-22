@@ -12,6 +12,7 @@ file(READ "${BENNU_SOURCE_DIR}/src/bennu-version.rc.in" resource_text)
 file(READ "${BENNU_SOURCE_DIR}/CMakeLists.txt" cmake_text)
 file(READ "${BENNU_SOURCE_DIR}/include/bennu/path_encoding.hpp" header_text)
 file(READ "${BENNU_SOURCE_DIR}/src/path_encoding.cpp" implementation_text)
+file(READ "${BENNU_SOURCE_DIR}/src/native_builder.cpp" native_builder_text)
 file(READ "${BENNU_SOURCE_DIR}/tests/windows_long_paths.cmake" native_test_text)
 file(READ "${BENNU_SOURCE_DIR}/README.md" readme_text)
 file(READ "${BENNU_SOURCE_DIR}/doc/decision-diary.md" diary_text)
@@ -44,6 +45,10 @@ require_text(implementation_text "path.has_root_name()"
   "extended-length drive-path normalization")
 require_text(implementation_text "path.make_preferred()"
   "extended-length separator normalization")
+require_text(native_builder_text "path_to_compiler_argument"
+  "ordinary MSVC path argument boundary")
+require_text(native_builder_text "\"/Fo:\""
+  "absolute MSVC object path without a process working-directory dependency")
 require_text(native_test_text "ordinary space éß 文 🐍"
   "lossless target-native long-path corpus")
 require_text(native_test_text "set(bennu"
