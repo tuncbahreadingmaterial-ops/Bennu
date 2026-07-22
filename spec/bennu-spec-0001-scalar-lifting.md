@@ -12,6 +12,8 @@
 
 **Execution profiles:** [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md)
 
+**Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
+
 **Target:** Bennu language rewrite; rank-0 and rank-1 values
 
 **Compatibility:** The rewrite does not preserve source, semantic, API, ABI, or
@@ -50,7 +52,8 @@ This specification does not define:
 - reductions, scans, filters, indexing, axes, or array views;
 - user-defined functions, closures, or partial application;
 - evaluation order for effectful expressions;
-- source constructs beyond those defined by BENNU-SPEC-0002;
+- source constructs beyond those defined by BENNU-SPEC-0002 and
+  BENNU-SPEC-0005;
 - scalar domains outside the initial kernels defined by BENNU-SPEC-0003,
   including integer division;
 - optimizer, allocator, or generated-C implementation strategy; or
@@ -234,6 +237,8 @@ Before evaluating source, an implementation must validate its primitive table.
 A valid table has:
 
 - unique primitive identities and names;
+- no primitive source name equal to the reserved program-header keyword
+  `parameters` from BENNU-SPEC-0005;
 - at least one signature per primitive;
 - no duplicate signatures;
 - no overload ambiguity under the promotion rules in section 7;
@@ -242,7 +247,9 @@ A valid table has:
 - a valid implementation dispatch entry for every signature.
 
 An invalid built-in descriptor is an implementation/configuration failure, not
-an ordinary Bennu program error.
+an ordinary Bennu program error. Descriptor conformance must include a table
+whose otherwise-valid primitive is rejected solely because its source name is
+`parameters`.
 
 ## 6. Application syntax
 
@@ -505,6 +512,11 @@ divide[Int() 0]
 This section is a metatheoretic rule and a contract for a future static checker.
 The rewrite may initially implement the same decisions dynamically from tagged
 values.
+
+BENNU-SPEC-0005 requires equivalent whole-program static type and shape
+analysis before argument binding for program execution and before emission.
+That requirement supersedes the initial dynamic-checking permission for every
+surface governed by BENNU-SPEC-0005.
 
 Let:
 
@@ -1169,9 +1181,12 @@ The evaluator and C emitter should consume the same validated typed program or
 equivalent semantic IR. The C backend must preserve actual vector values and
 element types; it must not reconstruct arbitrary vectors from length alone.
 
-Whether generated C embeds validated constants or lowers typed primitive loops
-is an implementation decision. Either strategy must satisfy the differential
-conformance requirement in section 16 and the configured resource profile.
+For programs without runtime parameters, whether generated C embeds validated
+constants or lowers typed primitive loops is an implementation decision.
+BENNU-SPEC-0005 requires parameterized programs to retain typed parameter slots
+and value-dependent execution in the artifact. Either strategy may still
+optimize statically safe work, but it must preserve the differential conformance
+requirement in section 16 and the configured resource profile.
 
 ## 19. Generalization path
 
@@ -1199,7 +1214,9 @@ source-span syntax. BENNU-SPEC-0003 resolves the initial kernels' Int overflow,
 binary64 arithmetic, floating equality, NaN, promotion, and domain-error
 semantics. [BENNU-SPEC-0004](bennu-spec-0004-execution-profiles.md) resolves
 which execution profiles Bennu ships and their optional memory and work
-limits. The following remaining decisions do not change scalar lifting itself
+limits. [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md) resolves typed
+program parameters, argument binding, and the analysis/execution boundary. The
+following remaining decisions do not change scalar lifting itself
 but must be defined before their associated primitives or product surfaces
 become conforming:
 

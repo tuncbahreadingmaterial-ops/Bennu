@@ -8,6 +8,8 @@
 
 **Source syntax:** [BENNU-SPEC-0002](bennu-spec-0002-application-and-literal-syntax.md)
 
+**Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
+
 **Target:** Bennu language rewrite; initial Bool, Int, and Double scalar kernels
 
 **Compatibility:** These semantics deliberately replace, rather than extend,
@@ -260,12 +262,23 @@ A valid stored Bennu `Double` must use this canonical NaN encoding:
 0x7ff8000000000000
 ```
 
-Every value-construction, backend-ingress, conversion, and scalar-kernel result
-boundary must normalize any other NaN encoding to the canonical encoding before
-the value is stored or returned. A signaling NaN therefore cannot remain in a
-valid Bennu value and cannot cause a host trap. Conformance tests must still
-inject positive and negative raw signaling-NaN patterns into the normalization
-boundary to verify this rule.
+Every value-construction, raw backend-ingress, conversion, and scalar-kernel
+result boundary must normalize any other NaN encoding to the canonical encoding
+before the value is stored or returned. Raw backend ingress means binary64 bits
+that have not yet become a public stored Bennu `Value`; it does not include
+validation of a caller-supplied `Value` record. A signaling NaN therefore cannot
+remain in a valid Bennu value and cannot cause a host trap. Conformance tests
+must still inject positive and negative raw signaling-NaN patterns into the
+normalization boundary to verify this rule.
+
+BENNU-SPEC-0005's typed argument API receives an already-formed public stored
+`Value`. It must validate that record without rewriting it and reject a
+noncanonical NaN as `ArgumentError(invalid_typed_value)` with
+`invalid_value_invariant = noncanonical_nan`. Normalizing that caller-supplied
+record would hide a violated public-value invariant and is forbidden. The same
+raw bits are therefore normalized when they enter through a construction/raw
+backend boundary and rejected when they are presented as an allegedly valid
+stored `Value`.
 
 Required normalization vectors are:
 

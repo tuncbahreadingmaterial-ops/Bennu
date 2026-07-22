@@ -8,6 +8,12 @@ semantics, implementation scope, or a Level 3 roadmap. Any implementation must
 first turn the selected parts into a focused specification and observable
 acceptance criteria.
 
+The parameter and runtime-argument proposal in sections 1 through 13 is now
+resolved normatively by
+[BENNU-SPEC-0005](../spec/bennu-spec-0005-program-parameters.md). This document
+remains a non-normative design record; its open-decision wording does not
+override that specification. The separate tuple proposal remains exploratory.
+
 ## 1. Goal
 
 Allow one Bennu program to operate on values supplied when it is run, while

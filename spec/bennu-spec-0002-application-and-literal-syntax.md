@@ -6,6 +6,8 @@
 
 **Parent specification:** [BENNU-SPEC-0001](bennu-spec-0001-scalar-lifting.md)
 
+**Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
+
 **Target:** Bennu language rewrite; scalar literals, rank-1 vector literals,
 and primitive application
 
@@ -42,6 +44,10 @@ Primitive lookup and arity validation happen after parsing.
 This specification does not add comments, variables, user-defined functions,
 partial application, pipelines, trains, infix operators, grouping parentheses,
 nested vectors, boxed values, or multidimensional arrays.
+
+BENNU-SPEC-0005 extends the complete-program grammar with one parameter header
+and immutable scalar parameter-reference expressions. Those references are not
+variables and do not add assignment or local scope.
 
 ## 3. Source bytes, lines, and positions
 
