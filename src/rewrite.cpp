@@ -2896,9 +2896,16 @@ CEmissionResult emit_rewrite_c_source_impl(
     }
   }
   for (const std::size_t root : lowering.roots) {
-    generated += "  if (!bennu_print_value(&bennu_values[" +
-                 std::to_string(root) +
-                 "])) { goto bennu_output_failure; }\n";
+    generated +=
+        "  { BennuStrictEnvironment bennu_print_environment;\n"
+        "    int bennu_print_succeeded = 0;\n"
+        "    bennu_begin_strict_environment(&bennu_print_environment);\n"
+        "    bennu_print_succeeded = bennu_print_value(&bennu_values[" +
+        std::to_string(root) +
+        "]);\n"
+        "    bennu_restore_strict_environment(&bennu_print_environment);\n"
+        "    if (!bennu_print_succeeded) { goto bennu_output_failure; }\n"
+        "  }\n";
   }
   if (!lowering.nodes.empty()) {
     generated += "  { size_t bennu_index = 0U;\n"

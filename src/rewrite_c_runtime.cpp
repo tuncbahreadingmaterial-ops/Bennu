@@ -640,6 +640,56 @@ static int bennu_double_is_zero(double value) {
          UINT64_C(0);
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
+typedef struct BennuStrictEnvironment {
+  unsigned int control;
+} BennuStrictEnvironment;
+
+static void
+bennu_begin_strict_environment(BennuStrictEnvironment *environment) {
+  environment->control = _mm_getcsr();
+  _mm_setcsr((environment->control | 0x1f80U) &
+             ~(0x003fU | 0x0040U | 0x6000U | 0x8000U));
+}
+
+static void
+bennu_restore_strict_environment(const BennuStrictEnvironment *environment) {
+  _mm_setcsr(environment->control);
+}
+#elif defined(__aarch64__)
+typedef struct BennuStrictEnvironment {
+  uint64_t control;
+  uint64_t status;
+} BennuStrictEnvironment;
+
+static void
+bennu_begin_strict_environment(BennuStrictEnvironment *environment) {
+  uint64_t strict_control = UINT64_C(0);
+  const uint64_t clear_status = UINT64_C(0);
+  __asm__ volatile("mrs %0, fpcr" : "=r"(environment->control));
+  __asm__ volatile("mrs %0, fpsr" : "=r"(environment->status));
+  strict_control = environment->control &
+                   ~(UINT64_C(0x00009f00) | UINT64_C(0x00c00000) |
+                     UINT64_C(0x03000000));
+  __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(strict_control) : "memory");
+  __asm__ volatile("msr fpsr, %0" : : "r"(clear_status) : "memory");
+}
+
+static void
+bennu_restore_strict_environment(const BennuStrictEnvironment *environment) {
+  __asm__ volatile("msr fpcr, %0\n\tisb"
+                   :
+                   : "r"(environment->control)
+                   : "memory");
+  __asm__ volatile("msr fpsr, %0"
+                   :
+                   : "r"(environment->status)
+                   : "memory");
+}
+#else
+#error "Bennu requires an x86-64 or AArch64 floating-point environment"
+#endif
+
 static double bennu_double_arithmetic(double left, double right,
                                       BennuDoubleOperation operation) {
   const int signs_differ =
@@ -657,16 +707,12 @@ static double bennu_double_arithmetic(double left, double right,
          bennu_double_is_infinity(right) != 0)))) {
     return bennu_double_from_bits(UINT64_C(0x7ff8000000000000));
   }
-#if defined(__x86_64__) || defined(_M_X64)
   {
-    const unsigned int original_control = _mm_getcsr();
-    const unsigned int strict_control =
-        (original_control | 0x1f80U) &
-        ~(0x003fU | 0x0040U | 0x6000U | 0x8000U);
+    BennuStrictEnvironment environment;
     volatile double volatile_left = left;
     volatile double volatile_right = right;
     volatile double result = 0.0;
-    _mm_setcsr(strict_control);
+    bennu_begin_strict_environment(&environment);
     if (operation == BENNU_DOUBLE_ADD) {
       result = volatile_left + volatile_right;
     } else if (operation == BENNU_DOUBLE_SUB) {
@@ -674,39 +720,9 @@ static double bennu_double_arithmetic(double left, double right,
     } else {
       result = volatile_left * volatile_right;
     }
-    _mm_setcsr(original_control);
+    bennu_restore_strict_environment(&environment);
     return bennu_normalize_double(result);
   }
-#elif defined(__aarch64__)
-  {
-    uint64_t original_control = UINT64_C(0);
-    uint64_t original_status = UINT64_C(0);
-    uint64_t strict_control = UINT64_C(0);
-    const uint64_t clear_status = UINT64_C(0);
-    volatile double volatile_left = left;
-    volatile double volatile_right = right;
-    volatile double result = 0.0;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
-    __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
-    strict_control = original_control &
-                     ~(UINT64_C(0x00009f00) | UINT64_C(0x00c00000) |
-                       UINT64_C(0x03000000));
-    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(strict_control) : "memory");
-    __asm__ volatile("msr fpsr, %0" : : "r"(clear_status) : "memory");
-    if (operation == BENNU_DOUBLE_ADD) {
-      result = volatile_left + volatile_right;
-    } else if (operation == BENNU_DOUBLE_SUB) {
-      result = volatile_left - volatile_right;
-    } else {
-      result = volatile_left * volatile_right;
-    }
-    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
-    __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
-    return bennu_normalize_double(result);
-  }
-#else
-#error "Bennu requires an x86-64 or AArch64 floating-point environment"
-#endif
 }
 
 static double bennu_add_double(double left, double right) {

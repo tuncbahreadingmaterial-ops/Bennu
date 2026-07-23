@@ -1741,7 +1741,8 @@ TEST_CASE("checked Int arithmetic kernels cover boundaries without partial arith
       CHECK(result.error.domain->operands.size() == arity);
       CHECK(result.error.location.offset == location.offset);
       REQUIRE(result.error.primitive.has_value());
-      CHECK(result.error.primitive->name == integer_case.primitive);
+      CHECK(result.error.primitive->name ==
+            std::string(integer_case.primitive));
     }
   }
 }
