@@ -16,6 +16,8 @@
 
 **Structural tuples and profile v2:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
 
+**Explicit sequential fan-out:** [BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md)
+
 **Target:** Bennu language rewrite; execution-profile policy for the evaluator,
 emitted C, and native execution paths
 
@@ -475,5 +477,6 @@ This specification does not define:
 Future profiles or limit kinds require a new versioned profile name and a new
 specification or amendment; the `-v1` names defined here are frozen to the
 contract in this document. BENNU-SPEC-0006 is that versioned specification for
-structural tuples and future tuple-producing fan-out. A tuple-capable backend
-must claim its exact v2 identity rather than reinterpret a v1 configuration.
+structural tuples, and BENNU-SPEC-0007 applies its existing tuple-table event and
+ordinal stream to explicit sequential fan-out. A tuple-capable backend must
+claim its exact v2 identity rather than reinterpret a v1 configuration.

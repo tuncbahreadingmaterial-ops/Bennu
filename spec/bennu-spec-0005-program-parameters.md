@@ -14,6 +14,8 @@
 
 **Structural tuples:** [BENNU-SPEC-0006](bennu-spec-0006-structural-tuples-and-profile-v2.md)
 
+**Explicit sequential fan-out:** [BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md)
+
 **Target:** Bennu programs, the public evaluator, the file runner, emitted C11,
 and native executables
 
@@ -162,6 +164,7 @@ Parameter names are ASCII, case-sensitive, lowercase identifiers. Every name
 must be unique in the header and must not equal any of:
 
 - the header keyword `parameters`;
+- the construct keyword `fanout` defined by BENNU-SPEC-0007;
 - the literal words `true`, `false`, `inf`, or `nan`;
 - the type names `Bool`, `Int`, or `Double`;
 - a primitive source name in the primitive descriptor table used to analyze the
@@ -361,6 +364,12 @@ discovery dependency-aware for tuple-spreading calls. An outer prefix arity
 cannot be formed until its operand has a valid static structural type. Its
 section 8.4 is the exact amendment for tuple-capable programs; the examples
 above remain unchanged when no tuple-producing expression occurs.
+
+BENNU-SPEC-0007 preserves that category precedence and adds fan-out branch
+dependencies. The complete program and every branch are structurally validated
+before execution; a fan-out operand type is derived before substitution at each
+branch-local placeholder; and branch candidates are ordered by source branch
+and left-to-right postorder as its section 6 defines.
 
 ### 6.3 Static and dynamic shape classes
 
@@ -749,6 +758,12 @@ order:
    or scalar-kernel/structural execution
 7. return all structured root Values
 ```
+
+BENNU-SPEC-0007 refines steps 5 and 6 for a fan-out node: evaluate its operand
+once, admit the profile-v2 result table, then execute complete branches
+sequentially from left to right. Its operand/table/branch first-failure and
+transactional cleanup order is part of the same complete-program execution; no
+later branch or root begins after failure.
 
 The first failure stops the sequence. Within dynamic shape agreement, the first
 one-based mismatching argument position wins. Within a lifted kernel, the
