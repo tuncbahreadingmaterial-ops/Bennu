@@ -1399,6 +1399,7 @@ struct RewriteLoweringNode {
   RewriteCardinality cardinality;
   ScalarType element_type;
   std::size_t element_count;
+  std::optional<PrimitiveId> primitive_id;
   PrimitiveImplementation implementation;
   bool runtime_shape_check;
   std::size_t first_argument;
@@ -1408,6 +1409,7 @@ struct RewriteLoweringNode {
   bool boolean;
   std::int64_t integer;
   double double_precision;
+  RewriteSpan primary_span;
   RewriteSpan source_span;
   SourceLocation source_location;
   std::string_view admission_point;
@@ -1642,6 +1644,7 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       vector ? RewriteCardinality::static_vector : RewriteCardinality::scalar,
       node.element_type,
       vector ? node.element_count : 1U,
+      std::nullopt,
       PrimitiveImplementation::none,
       false,
       0U,
@@ -1652,6 +1655,7 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       node.boolean,
       node.integer,
       node.double_precision,
+      node.span,
       node.span,
       rewrite_source_location(node.span.begin),
       vector ? std::string_view{"vector-literal"} : std::string_view{}};
@@ -1757,10 +1761,12 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
           lowering_type_error(program, call, descriptor, lowering));
     }
     RewriteLoweringNode &lowered = lowering.nodes[node_index];
+    lowered.primitive_id = descriptor.id;
     lowered.implementation = signature->implementation;
     lowered.element_type = signature->result.element;
     lowered.first_argument = call.first_argument;
     lowered.argument_count = call.argument_count;
+    lowered.primary_span = call.name_span;
     lowered.source_location = rewrite_source_location(call.name_span.begin);
     lowered.admission_point = descriptor.name;
     lowered.cardinality = descriptor.lifting == LiftingMode::none
@@ -2509,6 +2515,22 @@ std::string_view c_implementation_name(PrimitiveImplementation implementation) {
   return "0";
 }
 
+std::string_view c_primitive_id_name(PrimitiveId id) {
+  switch (id) {
+  case PrimitiveId::inc:
+    return "BENNU_PRIMITIVE_INC";
+  case PrimitiveId::add:
+    return "BENNU_PRIMITIVE_ADD";
+  case PrimitiveId::equals:
+    return "BENNU_PRIMITIVE_EQUALS";
+  case PrimitiveId::logical_not:
+    return "BENNU_PRIMITIVE_NOT";
+  case PrimitiveId::iota:
+    return "BENNU_PRIMITIVE_IOTA";
+  }
+  return "BENNU_PRIMITIVE_NONE";
+}
+
 std::string_view c_type_name(ScalarType type) {
   if (type == ScalarType::boolean) {
     return "BENNU_BOOL";
@@ -2588,7 +2610,14 @@ void append_resource_initialization(
   source += configuration.profile == ExecutionProfile::bounded_v1
                 ? "BENNU_PROFILE_BOUNDED_V1, "
                 : "BENNU_PROFILE_TRUSTED_LOCAL_V1, ";
-  source += "BENNU_LIMIT_NONE, 0U, 0U, 0U, NULL, {0U, 1U, 1U}};\n";
+  source +=
+      "BENNU_LIMIT_NONE, 0U, 0U, 0U, NULL, {0U, 1U, 1U}, "
+      "0, 0U, 0, 0U, 0, 0U, BENNU_IMPL_NONE, "
+      "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
+      "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
+      "BENNU_PRIMITIVE_NONE, {0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
+      "0U, {{0U, 1U, 1U}, {0U, 1U, 1U}}, "
+      "{{0U, 1U, 1U}, {0U, 1U, 1U}}};\n";
 }
 
 void append_source_location(std::string &source, SourceLocation location) {
@@ -2598,6 +2627,14 @@ void append_source_location(std::string &source, SourceLocation location) {
   append_c_unsigned(source, location.line);
   source += ", ";
   append_c_unsigned(source, location.column);
+  source.push_back(')');
+}
+
+void append_source_span(std::string &source, RewriteSpan span) {
+  source += "bennu_source_span(";
+  append_source_location(source, rewrite_source_location(span.begin));
+  source += ", ";
+  append_source_location(source, rewrite_source_location(span.end));
   source.push_back(')');
 }
 
@@ -2632,7 +2669,9 @@ void append_vector_node(std::string &source, std::size_t node_index,
   source += ", \"";
   source += node.admission_point;
   source += "\", ";
-  append_source_location(source, node.source_location);
+  append_source_span(source, node.primary_span);
+  source += ", ";
+  append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n";
 }
 
@@ -2644,6 +2683,8 @@ void append_shape_requirement(
   source += "  if (!bennu_require_shape(&bennu_resources, \"";
   source += call.admission_point;
   source += "\", ";
+  source += c_primitive_id_name(*call.primitive_id);
+  source += ", ";
   append_c_unsigned(source, argument_position);
   source += ", ";
   if (static_count.has_value()) {
@@ -2652,7 +2693,9 @@ void append_shape_requirement(
     source += "bennu_values[" + std::to_string(*dynamic_anchor) + "].count";
   }
   source += ", &bennu_values[" + std::to_string(argument_node) + "], ";
-  append_source_location(source, argument.source_location);
+  append_source_span(source, argument.source_span);
+  source += ", ";
+  append_source_span(source, call.source_span);
   source += ")) { goto bennu_failure; }\n";
 }
 
@@ -2714,7 +2757,11 @@ void append_call_node(std::string &source, std::size_t node_index,
   source += ", \"";
   source += node.admission_point;
   source += "\", ";
-  append_source_location(source, node.source_location);
+  source += c_primitive_id_name(*node.primitive_id);
+  source += ", ";
+  append_source_span(source, node.primary_span);
+  source += ", ";
+  append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n";
   for (std::size_t argument = 0U; argument < node.argument_count; ++argument) {
     const std::size_t argument_node =
@@ -2783,12 +2830,13 @@ CEmissionResult emit_rewrite_c_source_impl(
   std::string generated;
   append_rewrite_c_runtime(generated);
   append_literal_arrays(generated, lowering);
-  generated += "int main(void) {\n";
+  generated += "static int bennu_execute(BennuResources *snapshot) {\n";
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
                "  (void)bennu_apply;\n"
                "  (void)bennu_require_shape;\n"
                "  (void)bennu_source_location;\n"
+               "  (void)bennu_source_span;\n"
                "  (void)bennu_print_value;\n";
   if (!lowering.nodes.empty()) {
     generated += "  static BennuValue bennu_values[" +
@@ -2801,7 +2849,8 @@ CEmissionResult emit_rewrite_c_source_impl(
   if (!lowering.nodes.empty()) {
     generated += "    goto bennu_failure;\n";
   } else {
-    generated += "    (void)bennu_report_failure(&bennu_resources);\n"
+    generated += "    if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
+                 "    (void)bennu_report_failure(&bennu_resources);\n"
                  "    return 1;\n";
   }
   generated += "  }\n";
@@ -2831,7 +2880,8 @@ CEmissionResult emit_rewrite_c_source_impl(
         "    }\n"
         "  }\n";
   }
-  generated += "  return fflush(stdout) == 0 ? 0 : 1;\n";
+  generated += "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
+               "  return fflush(stdout) == 0 ? 0 : 1;\n";
   if (!lowering.nodes.empty()) {
     generated += "bennu_failure:\n"
                  "  { size_t bennu_index = 0U;\n"
@@ -2841,6 +2891,7 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
                  "    }\n"
                  "  }\n"
+                 "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
                  "  (void)bennu_report_failure(&bennu_resources);\n"
                  "  return 1;\n";
     if (!lowering.roots.empty()) {
@@ -2853,11 +2904,15 @@ CEmissionResult emit_rewrite_c_source_impl(
           "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
           "    }\n"
           "  }\n"
+          "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
           "  (void)fputs(\"OutputError: stdout failure\\n\", stderr);\n"
           "  return 1;\n";
     }
   }
-  generated += "}\n";
+  generated += "}\n\n"
+               "int main(void) {\n"
+               "  return bennu_execute(NULL);\n"
+               "}\n";
   return CEmissionResult{
       true, std::move(generated),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};

@@ -44,6 +44,12 @@ WP10 obsolete-surface deletion|tests/obsolete_surface_contract.cmake|OBSOLETE-SU
 BENNU-SPEC-0005 sections 6.1 and 6.2|src/rewrite.cpp|typed lowering applies whole-program phase precedence
 BENNU-SPEC-0005 section 6.2|src/rewrite.cpp|typed lowering checks type errors before static shape errors across roots
 BENNU-SPEC-0005 section 6.3|src/rewrite.cpp|typed lowering is value independent and retains dynamic shape data
-BENNU-SPEC-0005 sections 6.3 and 11.1|src/rewrite.cpp|typed runtime shape checks honor static anchors and first mismatch order
-BENNU-SPEC-0005 sections 6.4 and 12.1|tests/public_cutover_conformance.cpp|LOWERING-01 emission defers value-dependent failures to runtime
-BENNU-SPEC-0005 sections 11.3, 12.1, and 12.2|tests/public_path_error_matrix.cmake|PARG-012-VALUE-INDEPENDENT-EMISSION
+BENNU-SPEC-0005 sections 6.3 and 11.1 dynamic-shape agreement|src/rewrite.cpp|typed runtime shape checks honor static anchors and first mismatch order
+BENNU-SPEC-0005 sections 6.4 and 12.1 emitter acceptance|tests/public_cutover_conformance.cpp|LOWERING-01 emission defers value-dependent failures to runtime
+BENNU-SPEC-0005 sections 11.1 dynamic failure order and 12.2 source-bound diagnostics|tests/public_path_error_matrix.cmake|LOWERING-ARTIFACT-DYNAMIC-DIAGNOSTICS
+BENNU-SPEC-0005 sections 11.1 resource failure order and 12.2 generated/native resource diagnostics|tests/public_resource_contract.cmake|PARG-012-RESOURCE-DIAGNOSTICS
+BENNU-SPEC-0005 section 11.1 dynamic precedence pair conflicts|tests/public_path_error_matrix.cmake|PUBLIC-DYNAMIC-PRECEDENCE-PAIR-MATRIX
+BENNU-SPEC-0005 section 12.2 generated structured domain, shape, and resource contexts|tests/public_resource_contract.cmake|GENERATED-RUNTIME-STRUCTURED-CONTEXT
+BENNU-SPEC-0005 section 12.2 transactional cleanup and reset after generated failure|tests/public_resource_contract.cmake|GENERATED-RUNTIME-SAME-PROCESS-RESET
+BENNU-SPEC-0005 section 12.2 bounded-v1 limit diagnostic contexts|tests/public_resource_contract.cmake|PUBLIC-PROFILE-LIMIT-DIAGNOSTIC-MATRIX
+BENNU-SPEC-0005 section 17 evaluator, generated, and native diagnostic equivalence|tests/public_path_error_matrix.cmake|PUBLIC-EVALUATOR-GENERATED-NATIVE-DIAGNOSTIC-EQUIVALENCE

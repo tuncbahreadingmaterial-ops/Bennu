@@ -1,5 +1,8 @@
 # TEST-ID: PUBLIC-ERROR-CLI-MATRIX
 # TEST-ID: PARG-012-VALUE-INDEPENDENT-EMISSION
+# TEST-ID: LOWERING-ARTIFACT-DYNAMIC-DIAGNOSTICS
+# TEST-ID: PUBLIC-DYNAMIC-PRECEDENCE-PAIR-MATRIX
+# TEST-ID: PUBLIC-EVALUATOR-GENERATED-NATIVE-DIAGNOSTIC-EQUIVALENCE
 foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_C_COMPILER_ID
                  BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -75,7 +78,7 @@ function(check_public_failure case_name source_text line column category message
 endfunction()
 
 function(check_public_dynamic_failure case_name source_text line column
-         category message_text artifact_stderr)
+         category message_text)
   set(source_file "${work_directory}/${case_name}.bennu")
   set(c_output "${work_directory}/${case_name}.c")
   set(emitted_output
@@ -84,6 +87,8 @@ function(check_public_dynamic_failure case_name source_text line column
     "${work_directory}/${case_name}-native${BENNU_EXECUTABLE_SUFFIX}")
   set(expected
     "${source_file}:${line}:${column}: ${category}: ${message_text}\n")
+  set(artifact_expected
+    "bennu-source:${line}:${column}: ${category}: ${message_text}\n")
   file(WRITE "${source_file}" "${source_text}\n")
 
   execute_process(
@@ -125,7 +130,8 @@ function(check_public_dynamic_failure case_name source_text line column
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+              -pedantic-errors
               "${c_output}" -o "${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
@@ -143,11 +149,11 @@ function(check_public_dynamic_failure case_name source_text line column
   string(REPLACE "\r\n" "\n" emitted_stdout "${emitted_stdout}")
   string(REPLACE "\r\n" "\n" emitted_stderr "${emitted_stderr}")
   if("${emitted_exit}" STREQUAL "0" OR NOT emitted_stdout STREQUAL "" OR
-     NOT emitted_stderr STREQUAL artifact_stderr)
+     NOT emitted_stderr STREQUAL artifact_expected)
     message(FATAL_ERROR
       "PUBLIC-ERROR-MATRIX ${case_name} emitted runtime mismatch\n"
       "exit: ${emitted_exit}\nstdout: [${emitted_stdout}]\n"
-      "expected stderr: [${artifact_stderr}]\nactual stderr: [${emitted_stderr}]")
+      "expected stderr: [${artifact_expected}]\nactual stderr: [${emitted_stderr}]")
   endif()
 
   file(WRITE "${native_output}" "sentinel native bytes\n")
@@ -170,11 +176,11 @@ function(check_public_dynamic_failure case_name source_text line column
   string(REPLACE "\r\n" "\n" native_stdout "${native_stdout}")
   string(REPLACE "\r\n" "\n" native_stderr "${native_stderr}")
   if("${native_exit}" STREQUAL "0" OR NOT native_stdout STREQUAL "" OR
-     NOT native_stderr STREQUAL artifact_stderr)
+     NOT native_stderr STREQUAL artifact_expected)
     message(FATAL_ERROR
       "PUBLIC-ERROR-MATRIX ${case_name} native runtime mismatch\n"
       "exit: ${native_exit}\nstdout: [${native_stdout}]\n"
-      "expected stderr: [${artifact_stderr}]\nactual stderr: [${native_stderr}]")
+      "expected stderr: [${artifact_expected}]\nactual stderr: [${native_stderr}]")
   endif()
 endfunction()
 
@@ -195,23 +201,51 @@ check_public_failure(type "add[1 true]" 1 7 "TypeError"
 check_public_failure(shape "add[(1 2) (3)]" 1 11 "ShapeMismatch"
   "add argument 2 expected shape [2], got [1]")
 check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
-  "DomainError" "inc failed: integer_overflow"
-  "DomainError: integer_overflow\n")
+  "DomainError" "inc failed: integer_overflow")
+check_public_dynamic_failure(domain_vector
+  "add[(0 9223372036854775807) (0 1)]" 1 1
+  "DomainError" "add failed: integer_overflow at result index 1")
 check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
-  "ResourceError" "iota resource request failed: size_overflow"
-  "ResourceError: size_overflow\n")
+  "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(resource_child_before_shape
+  "add[iota[2305843009213693952] (1 2)]" 1 5
+  "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(domain_child_before_parent_shape
+  "add[add[iota[3] (9223372036854775807 9223372036854775807 9223372036854775807)] (1 2)]"
+  1 5 "DomainError" "add failed: integer_overflow at result index 0")
+check_public_dynamic_failure(shape_before_same_call_domain
+  "add[iota[3] (9223372036854775807 9223372036854775807)]"
+  1 5 "ShapeMismatch" "add argument 1 expected shape [2], got [3]")
+check_public_failure(static_shape_before_nested_domain
+  "add[inc[(0 9223372036854775807)] (0)]" 1 34
+  "ShapeMismatch" "add argument 2 expected shape [2], got [1]")
 check_public_dynamic_failure(dynamic_shape_dynamic_dynamic
   "add[iota[2] iota[3]]" 1 13
-  "ShapeMismatch" "add argument 2 expected shape [2], got [3]"
-  "bennu-source:1:13: ShapeMismatch: add argument 2 expected shape [2], got [3]\n")
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
 check_public_dynamic_failure(dynamic_shape_static_dynamic
   "add[(1 2) iota[3]]" 1 11
-  "ShapeMismatch" "add argument 2 expected shape [2], got [3]"
-  "bennu-source:1:11: ShapeMismatch: add argument 2 expected shape [2], got [3]\n")
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
 check_public_dynamic_failure(dynamic_shape_dynamic_static
   "add[iota[3] (1 2)]" 1 5
-  "ShapeMismatch" "add argument 1 expected shape [2], got [3]"
-  "bennu-source:1:5: ShapeMismatch: add argument 1 expected shape [2], got [3]\n")
+  "ShapeMismatch" "add argument 1 expected shape [2], got [3]")
+check_public_dynamic_failure(domain_root_before_later_shape
+  "inc 9223372036854775807\nadd[iota[2] iota[3]]" 1 1
+  "DomainError" "inc failed: integer_overflow")
+check_public_dynamic_failure(shape_root_before_later_domain
+  "add[iota[2] iota[3]]\ninc 9223372036854775807" 1 13
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
+check_public_dynamic_failure(resource_root_before_later_domain
+  "iota[2305843009213693952]\ninc 9223372036854775807" 1 1
+  "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(resource_root_before_later_shape
+  "iota[2305843009213693952]\nadd[iota[2] iota[3]]" 1 1
+  "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(domain_root_before_later_resource
+  "inc 9223372036854775807\niota[2305843009213693952]" 1 1
+  "DomainError" "inc failed: integer_overflow")
+check_public_dynamic_failure(shape_root_before_later_resource
+  "add[iota[2] iota[3]]\niota[2305843009213693952]" 1 13
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
 check_public_failure(late_transaction "inc 5\nwat[1]" 2 1 "UnknownPrimitive"
   "unknown primitive 'wat'")
 
