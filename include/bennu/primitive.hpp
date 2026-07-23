@@ -27,6 +27,21 @@ enum class PrimitiveImplementation {
   equals_double,
   logical_not_boolean,
   iota_integer,
+  logical_and_boolean,
+  logical_or_boolean,
+  not_equals_boolean,
+  not_equals_integer,
+  not_equals_double,
+  odd_integer,
+  even_integer,
+  is_positive_integer,
+  is_positive_double,
+  is_negative_integer,
+  is_negative_double,
+  less_than_integer,
+  less_than_double,
+  greater_than_integer,
+  greater_than_double,
 };
 
 struct ValueType {

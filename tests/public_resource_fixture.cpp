@@ -216,6 +216,40 @@ constexpr std::string_view work_refusal_assertions = R"bennu_assert(
         snapshot.failure_primary_span.begin.line != 2U ||
         bennu_probe_total_allocations <= allocations_before)bennu_assert";
 
+constexpr std::string_view issue54_work_cleanup_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_WORK_UNITS ||
+        snapshot.failure_configured_limit != 3U ||
+        snapshot.failure_usage_before != 3U ||
+        snapshot.failure_refused_charge != 1U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_ODD ||
+        strcmp(snapshot.failure_admission_point, "odd") != 0 ||
+        snapshot.failure_has_requested_elements != 0 ||
+        snapshot.failure_has_requested_bytes != 0 ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        snapshot.work_units != 3U ||
+        snapshot.reservation_ordinal != 3U ||
+        bennu_probe_total_allocations != allocations_before + 3U)bennu_assert";
+
+constexpr std::string_view issue54_allocation_cleanup_assertions =
+    R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_GREATER_THAN ||
+        strcmp(snapshot.failure_admission_point, "greater_than") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 3U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 3U ||
+        snapshot.failure_has_element_index != 0 ||
+        snapshot.failure_primary_span.begin.line != 1U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        snapshot.work_units != 0U ||
+        snapshot.reservation_ordinal != 3U ||
+        bennu_probe_total_allocations != allocations_before + 2U)bennu_assert";
+
 constexpr std::string_view vector_refusal_assertions = R"bennu_assert(
         snapshot.failure != BENNU_FAILURE_PROFILE ||
         snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
@@ -615,7 +649,7 @@ std::string refusal_evidence(const bennu::Error &error) {
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 29) {
+  if (argument_count != 34) {
     return 2;
   }
 
@@ -815,6 +849,68 @@ int main(int argument_count, char **arguments) {
     return 32;
   }
 
+  constexpr std::string_view issue54_work_source =
+      "less_than[(1 2 3) (4 5 6)]\n"
+      "odd[1]\n";
+  const bennu::EvaluationConfiguration issue54_work_configuration{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{24U}, std::size_t{51U},
+                            std::size_t{3U}},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  bennu::ProgramResult issue54_work =
+      bennu::evaluate_source(issue54_work_source, issue54_work_configuration);
+  if (issue54_work.ok || !issue54_work.values.empty() ||
+      !is_resource_error(issue54_work.error,
+                         bennu::ResourceErrorReason::profile_limit) ||
+      issue54_work.error.resource->limit_kind !=
+          bennu::ResourceLimitKind::max_work_units ||
+      issue54_work.error.resource->configured_limit != std::size_t{3U} ||
+      issue54_work.error.resource->usage_before != std::size_t{3U} ||
+      issue54_work.error.resource->refused_charge != std::size_t{1U} ||
+      issue54_work.error.resource->requested_elements.has_value() ||
+      issue54_work.error.resource->requested_bytes.has_value() ||
+      !issue54_work.error.primitive.has_value() ||
+      issue54_work.error.primitive->id != bennu::PrimitiveId::odd ||
+      issue54_work.error.primitive->name != "odd" ||
+      issue54_work.error.location.line != std::size_t{2U} ||
+      issue54_work.error.location.column != std::size_t{1U}) {
+    destroy_program(issue54_work);
+    return 36;
+  }
+  const std::string issue54_work_expected =
+      refusal_evidence(issue54_work.error);
+  if (issue54_work_expected.empty() ||
+      !write_file(arguments[31], issue54_work_expected)) {
+    return 37;
+  }
+
+  constexpr std::string_view issue54_allocation_source =
+      "greater_than[(1 2 3) (0 0 0)]\n";
+  const bennu::EvaluationConfiguration issue54_allocation_configuration{
+      bennu::ExecutionProfile::trusted_local_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{std::size_t{2U}}};
+  bennu::ValueResult issue54_allocation = bennu::evaluate_expression(
+      issue54_allocation_source, issue54_allocation_configuration);
+  if (issue54_allocation.ok ||
+      !is_resource_error(
+          issue54_allocation.error,
+          bennu::ResourceErrorReason::allocation_unavailable) ||
+      issue54_allocation.error.resource->requested_elements !=
+          std::size_t{3U} ||
+      issue54_allocation.error.resource->requested_bytes != std::size_t{3U} ||
+      !issue54_allocation.error.primitive.has_value() ||
+      issue54_allocation.error.primitive->id !=
+          bennu::PrimitiveId::greater_than ||
+      issue54_allocation.error.primitive->name != "greater_than" ||
+      issue54_allocation.error.location.line != std::size_t{1U} ||
+      issue54_allocation.error.location.column != std::size_t{1U}) {
+    if (issue54_allocation.ok) {
+      bennu::destroy_value(issue54_allocation.value);
+    }
+    return 38;
+  }
+
   const bennu::EvaluationConfiguration fail_first{
       bennu::ExecutionProfile::trusted_local_v1,
       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
@@ -968,7 +1064,14 @@ int main(int argument_count, char **arguments) {
                             shape_before_resource_assertions) ||
       !emit_probe_and_build(resource_before_domain_source, fail_third,
                             arguments[27], arguments[28], arguments[1],
-                            resource_before_domain_assertions)) {
+                            resource_before_domain_assertions) ||
+      !emit_probe_and_build(issue54_work_source, issue54_work_configuration,
+                            arguments[29], arguments[30], arguments[1],
+                            issue54_work_cleanup_assertions) ||
+      !emit_probe_and_build(issue54_allocation_source,
+                            issue54_allocation_configuration, arguments[32],
+                            arguments[33], arguments[1],
+                            issue54_allocation_cleanup_assertions)) {
     return 27;
   }
   const std::optional<std::string> context_probe = generated_runtime_probe();

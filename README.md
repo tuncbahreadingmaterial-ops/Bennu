@@ -5,12 +5,18 @@ scalars and homogeneous rank-1 vectors. The public evaluator, REPL, file runner,
 C11 emitter, and native builder all use the same rewrite grammar and typed
 semantics.
 
-The initial public primitives are exactly:
+The public primitives are exactly:
 
 - `inc`: increment an `Int` or `Double` scalar or vector;
 - `add`: add numeric arguments element by element;
 - `equals`: compare `Bool`, `Int`, or `Double` arguments element by element;
-- `not`: negate `Bool` arguments element by element; and
+- `not_equals`: the elementwise logical complement of `equals`;
+- `not`, `and`, and `or`: ordinary eager `Bool` logic element by element;
+- `odd` and `even`: classify `Int` values by remainder modulo two;
+- `is_positive` and `is_negative`: compare `Int` or `Double` values strictly
+  against zero;
+- `less_than` and `greater_than`: strict numeric ordering in written operand
+  order; and
 - `iota`: construct the `Int` vector `1` through `n`, or an empty `Int` vector
   when `n <= 0`.
 
@@ -26,7 +32,12 @@ not broadcast. Exact overloads win; the only implicit conversion is
 `Int -> Double`. Integer overflow is a structured domain error. Output is
 canonical, including `true`/`false`, visible `.0` for integral-valued Doubles,
 `-0.0`, `inf`, `-inf`, `nan`, and parenthesized vectors. Every complete program
-is evaluated before runner output is published.
+is evaluated before runner output is published. Numeric predicates use the
+same overload resolution: all-`Int` arguments stay exact, while mixed
+`Int`/`Double` arguments compare after `Int -> Double` conversion. Both signed
+zeros are neither positive nor negative and are equal for ordering; NaN is
+unordered, so both strict ordering predicates and both sign predicates return
+`false` when the relevant operand is NaN. Infinities use ordinary IEEE ordering.
 
 The CLI defaults to the `trusted-local-v1` execution profile with
 `max_vector_bytes`, `max_live_evaluation_bytes`, and `max_work_units` omitted.
@@ -107,6 +118,13 @@ requires brackets for multi-argument calls, reserves parentheses for homogeneous
 rank-1 literals, and requires an explicit type for empty vectors. The initial
 language has no variables, user functions, trains, effects, reductions,
 multidimensional arrays, `length`, or `divide`.
+
+Issue #54 deliberately does not copy three Anka predicate details. Bennu defines
+parity mathematically, so `odd[-3]` is true rather than rejecting negative odd
+integers. Ordering preserves written operand order: `less_than[left right]`
+means `left < right`, and `greater_than[left right]` means `left > right`.
+Ordering remains numeric-only; Bool ordering and Bool/numeric conversions are
+rejected instead of adding comparison or conversion overloads.
 
 ## Version and release provenance
 

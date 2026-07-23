@@ -196,6 +196,7 @@ if(BUILD_TESTING)
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
+    tests/issue54_primitives.cpp
     tests/public_cutover_conformance.cpp
   )
   target_include_directories(bennu_tests PRIVATE include)

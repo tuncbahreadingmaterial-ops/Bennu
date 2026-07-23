@@ -81,6 +81,21 @@ if(emitted_source MATCHES "${BENNU_SOURCE_DIR}" OR
    NOT emitted_source MATCHES "BENNU_IMPL_EQUALS_DOUBLE" OR
    NOT emitted_source MATCHES "BENNU_IMPL_NOT_BOOL" OR
    NOT emitted_source MATCHES "BENNU_IMPL_IOTA_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_AND_BOOL" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_OR_BOOL" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_NOT_EQUALS_BOOL" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_NOT_EQUALS_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_NOT_EQUALS_DOUBLE" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_ODD_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_EVEN_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_IS_POSITIVE_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_IS_POSITIVE_DOUBLE" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_IS_NEGATIVE_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_IS_NEGATIVE_DOUBLE" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_LESS_THAN_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_LESS_THAN_DOUBLE" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_GREATER_THAN_INT" OR
+   NOT emitted_source MATCHES "BENNU_IMPL_GREATER_THAN_DOUBLE" OR
    NOT emitted_source MATCHES
        "INT64_C\\(7\\), \\(-INT64_C\\(3\\)\\), INT64_C\\(11\\), INT64_C\\(0\\)" OR
    emitted_source MATCHES "for \\(int64_t value = INT64_C\\(1\\); value <= count")
