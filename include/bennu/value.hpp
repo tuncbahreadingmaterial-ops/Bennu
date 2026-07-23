@@ -42,6 +42,7 @@ struct VectorValue {
   std::size_t double_count;
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
+  std::shared_ptr<std::size_t> accounting_owner{};
 };
 
 using TupleTableStorage =
@@ -52,6 +53,7 @@ struct TupleTableReservation {
   std::size_t element_count{0U};
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
+  std::shared_ptr<std::size_t> accounting_owner{};
 };
 
 struct ValueNode {
@@ -124,6 +126,7 @@ struct ValueValidationResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 struct ScalarProjectionResult {
@@ -146,6 +149,7 @@ struct ValueFormattingResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 struct BorrowedValueView {
@@ -161,6 +165,7 @@ struct ValueTypeResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 struct ValueTupleArityResult {
@@ -171,6 +176,7 @@ struct ValueTupleArityResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 struct ValueTupleElementResult {
@@ -181,6 +187,7 @@ struct ValueTupleElementResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 struct ValueDestructionResult {
@@ -189,6 +196,7 @@ struct ValueDestructionResult {
   std::vector<std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 Value make_bool_value(bool value);
@@ -196,18 +204,33 @@ Value make_int_value(std::int64_t value);
 Value make_double_value(double value);
 Value move_value(Value &source);
 ValueValidationResult validate_value(const Value &value);
+ValueValidationResult validate_value(
+    const Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 ValueValidationResult value_element_type(const Value &value,
                                          ScalarType &element_type);
 ValueValidationResult value_rank(const Value &value, std::size_t &rank);
 ValueValidationResult value_length(const Value &value, std::size_t &length);
 ScalarProjectionResult project_scalar(const Value &value, std::size_t index);
 ValueTypeResult value_type(const Value &value);
+ValueTypeResult value_type(
+    const Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 ValueTypeResult value_type(BorrowedValueView view);
+ValueTypeResult value_type(
+    BorrowedValueView view,
+    HostAllocationFailureInjection &allocation_failure);
 ValueTupleArityResult value_tuple_arity(const Value &value);
 ValueTupleElementResult value_tuple_element(const Value &value,
                                             std::size_t index);
 ValueDestructionResult destroy_value(Value &value);
+ValueDestructionResult destroy_value(
+    Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 ValueFormattingResult format_value(const Value &value);
+ValueFormattingResult format_value(
+    const Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 
 } // namespace bennu
 

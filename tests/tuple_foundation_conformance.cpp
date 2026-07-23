@@ -158,6 +158,7 @@ TEST_CASE("TUP-003-VALUES") {
       "detached-vector");
   REQUIRE(detached_vector.ok);
   detached_vector.value.vector.accounting_active = false;
+  detached_vector.value.vector.accounting_owner = nullptr;
   CHECK(validate_value(detached_vector.value).ok);
   CHECK(destroy_value(detached_vector.value).ok);
 
@@ -313,6 +314,21 @@ TEST_CASE("TUP-003-VALUES") {
   Value inactive_tuple_vector = make_pair();
   inactive_tuple_vector.vector.element_type = ScalarType::integer;
   check_invalid(inactive_tuple_vector, ValueInvariant::inactive_vector_payload);
+  Value invalid_root_wins_before_inactive_fields = make_pair();
+  invalid_root_wins_before_inactive_fields.tuple.root_index =
+      invalid_root_wins_before_inactive_fields.tuple.nodes.size() + 1U;
+  invalid_root_wins_before_inactive_fields.scalar.integer = 1;
+  check_invalid(invalid_root_wins_before_inactive_fields,
+                ValueInvariant::invalid_value_root);
+  HostAllocationFailureInjection root_winner_allocation_failure{0U, 0U};
+  const ValueValidationResult root_winner_under_pressure = validate_value(
+      invalid_root_wins_before_inactive_fields,
+      root_winner_allocation_failure);
+  CHECK_FALSE(root_winner_under_pressure.ok);
+  CHECK(root_winner_under_pressure.invariant ==
+        ValueInvariant::invalid_value_root);
+  CHECK(root_winner_under_pressure.resource_error ==
+        HostResourceErrorReason::none);
   Value invalid_range = make_pair();
   invalid_range.tuple.first_child = invalid_range.tuple.child_indexes.size() + 1U;
   check_invalid(invalid_range, ValueInvariant::invalid_tuple_range);
@@ -386,6 +402,59 @@ TEST_CASE("TUP-003-VALUES") {
   invalid_payload_handle.tuple.nodes[0].vector_payload_index = 1U;
   check_invalid(invalid_payload_handle,
                 ValueInvariant::invalid_vector_payload_handle);
+
+  std::array<Value, 2> distinct_vector_children{{
+      make_test_vector(invariant_resources, {1}),
+      make_test_vector(invariant_resources, {2}),
+  }};
+  TupleConstructionResult duplicate_pointer_tuple = make_tuple_value(
+      invariant_resources, distinct_vector_children, tuple_location,
+      "duplicate-payload-pointer");
+  REQUIRE(duplicate_pointer_tuple.ok);
+  VectorValue &first_payload =
+      duplicate_pointer_tuple.value.tuple.vector_payloads[0];
+  VectorValue &second_payload =
+      duplicate_pointer_tuple.value.tuple.vector_payloads[1];
+  std::int64_t *second_original = second_payload.integers.release();
+  second_payload.integers.reset(first_payload.integers.get());
+  check_invalid(duplicate_pointer_tuple.value,
+                ValueInvariant::aliased_vector_payload);
+  (void)second_payload.integers.release();
+  second_payload.integers.reset(second_original);
+  CHECK(release_value_reservations(invariant_resources,
+                                   duplicate_pointer_tuple.value)
+            .ok);
+
+  Value duplicate_reservation = make_nested();
+  TupleTableReservation &nested_reservation =
+      duplicate_reservation.tuple.reservations[0];
+  std::byte *nested_storage = nested_reservation.storage.release();
+  nested_reservation.storage.reset(
+      duplicate_reservation.tuple.root_reservation.storage.get());
+  check_invalid(duplicate_reservation,
+                ValueInvariant::aliased_tuple_reservation);
+  (void)nested_reservation.storage.release();
+  nested_reservation.storage.reset(nested_storage);
+  CHECK(release_value_reservations(invariant_resources,
+                                   duplicate_reservation)
+            .ok);
+
+  std::array<Value, 1> cross_kind_child{{
+      make_test_vector(invariant_resources, {1}),
+  }};
+  TupleConstructionResult cross_kind = make_tuple_value(
+      invariant_resources, cross_kind_child, tuple_location,
+      "cross-kind-payload-pointer");
+  REQUIRE(cross_kind.ok);
+  VectorValue &cross_kind_payload =
+      cross_kind.value.tuple.vector_payloads[0];
+  std::int64_t *cross_kind_storage = cross_kind_payload.integers.release();
+  cross_kind_payload.integers.reset(reinterpret_cast<std::int64_t *>(
+      cross_kind.value.tuple.root_reservation.storage.get()));
+  check_invalid(cross_kind.value, ValueInvariant::aliased_vector_payload);
+  (void)cross_kind_payload.integers.release();
+  cross_kind_payload.integers.reset(cross_kind_storage);
+  CHECK(release_value_reservations(invariant_resources, cross_kind.value).ok);
 }
 
 TEST_CASE("TUP-004-MOVE-CLEANUP") {
@@ -421,6 +490,106 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
   CHECK_FALSE(outer.value.claimed);
   CHECK(destroy_value(outer.value).ok);
   CHECK(resources.live_evaluation_bytes == 0U);
+
+  EvaluationResources destroy_resources =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 1> destroy_child{{make_int_value(1)}};
+  TupleConstructionResult destroy_tuple = make_tuple_value(
+      destroy_resources, destroy_child, tuple_location,
+      "active-destroy-accounting");
+  REQUIRE(destroy_tuple.ok);
+  CHECK(destroy_resources.live_evaluation_bytes == 16U);
+  CHECK(destroy_value(destroy_tuple.value).ok);
+  CHECK(destroy_resources.live_evaluation_bytes == 0U);
+
+  VectorAllocationResult direct_vector = allocate_vector(
+      destroy_resources, ScalarType::integer, 1U, 0U, tuple_location,
+      "active-vector-destroy-accounting");
+  REQUIRE(direct_vector.ok);
+  CHECK(destroy_resources.live_evaluation_bytes == sizeof(std::int64_t));
+  CHECK(destroy_value(direct_vector.value).ok);
+  CHECK(destroy_resources.live_evaluation_bytes == 0U);
+
+  EvaluationResources first_context =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources second_context =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 1> first_child{{make_int_value(1)}};
+  std::array<Value, 1> second_child{{make_int_value(2)}};
+  TupleConstructionResult first_tuple = make_tuple_value(
+      first_context, first_child, tuple_location, "first-context");
+  TupleConstructionResult second_tuple = make_tuple_value(
+      second_context, second_child, tuple_location, "second-context");
+  REQUIRE(first_tuple.ok);
+  REQUIRE(second_tuple.ok);
+  const ValueReleaseResult wrong_context =
+      release_value_reservations(second_context, first_tuple.value);
+  CHECK_FALSE(wrong_context.ok);
+  CHECK(wrong_context.error == ValueReleaseError::resource_context_mismatch);
+  CHECK(first_tuple.value.claimed);
+  CHECK(first_context.live_evaluation_bytes == 16U);
+  CHECK(second_context.live_evaluation_bytes == 16U);
+  CHECK(release_value_reservations(first_context, first_tuple.value).ok);
+  CHECK(release_value_reservations(second_context, second_tuple.value).ok);
+  CHECK(first_context.live_evaluation_bytes == 0U);
+  CHECK(second_context.live_evaluation_bytes == 0U);
+
+  VectorAllocationResult first_vector = allocate_vector(
+      first_context, ScalarType::integer, 1U, 0U, tuple_location,
+      "first-vector-context");
+  VectorAllocationResult second_vector = allocate_vector(
+      second_context, ScalarType::integer, 1U, 0U, tuple_location,
+      "second-vector-context");
+  REQUIRE(first_vector.ok);
+  REQUIRE(second_vector.ok);
+  const ValueReleaseResult wrong_vector_context =
+      release_vector_reservation(second_context, first_vector.value);
+  CHECK_FALSE(wrong_vector_context.ok);
+  CHECK(wrong_vector_context.error ==
+        ValueReleaseError::resource_context_mismatch);
+  CHECK(first_vector.value.claimed);
+  CHECK(first_context.live_evaluation_bytes == sizeof(std::int64_t));
+  CHECK(second_context.live_evaluation_bytes == sizeof(std::int64_t));
+  CHECK(release_vector_reservation(first_context, first_vector.value).ok);
+  CHECK(release_vector_reservation(second_context, second_vector.value).ok);
+
+  VectorAllocationResult malformed_vector = allocate_vector(
+      first_context, ScalarType::integer, 1U, 0U, tuple_location,
+      "malformed-vector-release");
+  REQUIRE(malformed_vector.ok);
+  std::int64_t *malformed_storage =
+      malformed_vector.value.vector.integers.get();
+  malformed_vector.value.scalar.integer = 1;
+  const std::size_t live_before_malformed_release =
+      first_context.live_evaluation_bytes;
+  const ValueReleaseResult malformed_release =
+      release_vector_reservation(first_context, malformed_vector.value);
+  CHECK_FALSE(malformed_release.ok);
+  CHECK(malformed_release.invariant == ValueInvariant::inactive_scalar_field);
+  CHECK(malformed_vector.value.claimed);
+  CHECK(malformed_vector.value.vector.integers.get() == malformed_storage);
+  CHECK(first_context.live_evaluation_bytes == live_before_malformed_release);
+  malformed_vector.value.scalar.integer = 0;
+  CHECK(release_vector_reservation(first_context, malformed_vector.value).ok);
+  CHECK(first_context.live_evaluation_bytes == 0U);
+
+  EvaluationResources move_source =
+      make_trusted_local_v2_resources(no_failure);
+  {
+    EvaluationResources move_destination = std::move(move_source);
+    VectorAllocationResult moved_context_vector = allocate_vector(
+        move_destination, ScalarType::integer, 1U, 0U, tuple_location,
+        "moved-resource-context");
+    REQUIRE(moved_context_vector.ok);
+    CHECK(move_source.live_evaluation_bytes == sizeof(std::int64_t));
+    CHECK(release_vector_reservation(move_source, moved_context_vector.value).ok);
+  }
+  CHECK(move_source.live_evaluation_bytes == 0U);
+  VectorAllocationResult reused_move_source = allocate_vector(
+      move_source, ScalarType::integer, 1U, 0U, tuple_location,
+      "reused-moved-resource-context");
+  REQUIRE(reused_move_source.ok);
+  CHECK(release_vector_reservation(move_source, reused_move_source.value).ok);
 }
 
 TEST_CASE("TUP-005-FORMAT") {
@@ -591,6 +760,42 @@ TEST_CASE("TUP-007-TABLE-CHARGE") {
 }
 
 TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  EvaluationResources vector_overflow =
+      make_trusted_local_v2_resources(no_failure);
+  vector_overflow.reservation_ordinal = maximum;
+  const VectorAllocationResult vector_ordinal_overflow = allocate_vector(
+      vector_overflow, ScalarType::boolean, 1U, 0U, tuple_location,
+      "vector-ordinal-overflow");
+  CHECK_FALSE(vector_ordinal_overflow.ok);
+  REQUIRE(vector_ordinal_overflow.error.resource.has_value());
+  CHECK(vector_ordinal_overflow.error.resource->reason ==
+        ResourceErrorReason::size_overflow);
+  CHECK(vector_overflow.reservation_ordinal == maximum);
+
+  EvaluationResources workspace_overflow =
+      make_trusted_local_v2_resources(no_failure);
+  workspace_overflow.reservation_ordinal = maximum;
+  const WorkspaceReservationResult workspace_ordinal_overflow =
+      reserve_workspace(workspace_overflow, 1U, 0U, tuple_location,
+                        "workspace-ordinal-overflow");
+  CHECK_FALSE(workspace_ordinal_overflow.ok);
+  REQUIRE(workspace_ordinal_overflow.error.resource.has_value());
+  CHECK(workspace_ordinal_overflow.error.resource->reason ==
+        ResourceErrorReason::size_overflow);
+  CHECK(workspace_overflow.reservation_ordinal == maximum);
+
+  EvaluationResources tuple_overflow =
+      make_trusted_local_v2_resources(no_failure);
+  tuple_overflow.reservation_ordinal = maximum;
+  const TupleReservationResult tuple_ordinal_overflow = reserve_tuple_table(
+      tuple_overflow, 1U, tuple_location, "tuple-ordinal-overflow");
+  CHECK_FALSE(tuple_ordinal_overflow.ok);
+  REQUIRE(tuple_ordinal_overflow.error.resource.has_value());
+  CHECK(tuple_ordinal_overflow.error.resource->reason ==
+        ResourceErrorReason::size_overflow);
+  CHECK(tuple_overflow.reservation_ordinal == maximum);
+
   EvaluationResources resources = make_trusted_local_v2_resources(
       AllocationFailureInjection{2U});
   VectorAllocationResult vector = allocate_vector(
@@ -715,6 +920,183 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
     CHECK(empty_nested_resources.reservation_ordinal == 2U);
     CHECK(empty_nested_resources.live_evaluation_bytes == 0U);
   }
+}
+
+TEST_CASE("TUP-009-HOST-ALLOCATION-FAILURES") {
+  std::array<TypeArena, 2> elements{{make_scalar_type(ScalarType::integer),
+                                     make_vector_type(ScalarType::boolean)}};
+  std::size_t construction_failures = 0U;
+  bool construction_succeeded = false;
+  for (std::size_t ordinal = 0U; ordinal < 16U; ++ordinal) {
+    HostAllocationFailureInjection failure{ordinal, 0U};
+    const TypeConstructionResult result = make_tuple_type(elements, failure);
+    if (result.ok) {
+      construction_succeeded = true;
+      break;
+    }
+    ++construction_failures;
+    CHECK(result.invariant == TypeInvariant::none);
+    CHECK(result.resource_error ==
+          HostResourceErrorReason::allocation_unavailable);
+  }
+  CHECK(construction_failures >= 1U);
+  CHECK(construction_succeeded);
+
+  const TypeConstructionResult pair = make_tuple_type(elements);
+  REQUIRE(pair.ok);
+  const TypeArena &pair_type = pair.type;
+  HostAllocationFailureInjection validation_failure{0U, 0U};
+  const TypeValidationResult invalid_for_resources =
+      validate_type(pair_type, validation_failure);
+  CHECK_FALSE(invalid_for_resources.ok);
+  CHECK(invalid_for_resources.invariant == TypeInvariant::none);
+  CHECK(invalid_for_resources.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+
+  std::size_t equality_failures = 0U;
+  bool equality_succeeded = false;
+  for (std::size_t ordinal = 0U; ordinal < 16U; ++ordinal) {
+    HostAllocationFailureInjection equality_failure{ordinal, 0U};
+    const TypeEqualityResult equality =
+        structural_type_equal(pair_type, pair_type, equality_failure);
+    if (equality.ok) {
+      CHECK(equality.equal);
+      equality_succeeded = true;
+      break;
+    }
+    ++equality_failures;
+    CHECK_FALSE(equality.equal);
+    CHECK(equality.invariant == TypeInvariant::none);
+    CHECK(equality.resource_error ==
+          HostResourceErrorReason::allocation_unavailable);
+  }
+  CHECK(equality_failures >= 1U);
+  CHECK(equality_succeeded);
+
+  std::size_t type_format_failures = 0U;
+  bool type_format_succeeded = false;
+  for (std::size_t ordinal = 0U; ordinal < 16U; ++ordinal) {
+    HostAllocationFailureInjection type_format_failure{ordinal, 0U};
+    const TypeFormattingResult type_format =
+        format_type(pair_type, type_format_failure);
+    if (type_format.ok) {
+      CHECK(type_format.formatted == "Tuple<Int, Vector<Bool>>");
+      type_format_succeeded = true;
+      break;
+    }
+    ++type_format_failures;
+    CHECK(type_format.invariant == TypeInvariant::none);
+    CHECK(type_format.resource_error ==
+          HostResourceErrorReason::allocation_unavailable);
+  }
+  CHECK(type_format_failures >= 1U);
+  CHECK(type_format_succeeded);
+
+  EvaluationResources resources =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 2> children{{make_int_value(1), make_bool_value(true)}};
+  TupleConstructionResult tuple = make_tuple_value(
+      resources, children, tuple_location, "host-allocation-failures");
+  REQUIRE(tuple.ok);
+
+  HostAllocationFailureInjection value_validation_failure{0U, 0U};
+  const ValueValidationResult value_validation =
+      validate_value(tuple.value, value_validation_failure);
+  CHECK_FALSE(value_validation.ok);
+  CHECK(value_validation.invariant == ValueInvariant::none);
+  CHECK(value_validation.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+
+  HostAllocationFailureInjection value_type_validation_failure{0U, 0U};
+  const ValueTypeResult value_type_validation =
+      value_type(tuple.value, value_type_validation_failure);
+  CHECK_FALSE(value_type_validation.ok);
+  CHECK(value_type_validation.invariant == ValueInvariant::none);
+  CHECK(value_type_validation.error == ValueAccessError::none);
+  CHECK(value_type_validation.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+
+  HostAllocationFailureInjection value_type_construction_failure{1U, 0U};
+  const ValueTypeResult value_type_construction =
+      value_type(tuple.value, value_type_construction_failure);
+  CHECK_FALSE(value_type_construction.ok);
+  CHECK(value_type_construction.invariant == ValueInvariant::none);
+  CHECK(value_type_construction.error == ValueAccessError::none);
+  CHECK(value_type_construction.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+
+  HostAllocationFailureInjection value_type_success{2U, 0U};
+  const ValueTypeResult constructed_value_type =
+      value_type(tuple.value, value_type_success);
+  REQUIRE(constructed_value_type.ok);
+  CHECK(valid_type_text(constructed_value_type.type) == "Tuple<Int, Bool>");
+
+  HostAllocationFailureInjection value_format_failure{1U, 0U};
+  const ValueFormattingResult value_format =
+      format_value(tuple.value, value_format_failure);
+  CHECK_FALSE(value_format.ok);
+  CHECK(value_format.error == ValueFormatError::none);
+  CHECK(value_format.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+  CHECK(release_value_reservations(resources, tuple.value).ok);
+
+  EvaluationResources metadata_resources =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 2> metadata_children{{make_int_value(1),
+                                         make_bool_value(true)}};
+  HostAllocationFailureInjection metadata_failure{0U, 0U};
+  const TupleConstructionResult metadata_result = make_tuple_value(
+      metadata_resources, metadata_children, tuple_location,
+      "host-metadata-failure", metadata_failure);
+  CHECK_FALSE(metadata_result.ok);
+  CHECK(metadata_result.invariant == ValueInvariant::none);
+  REQUIRE(metadata_result.error.resource.has_value());
+  CHECK(metadata_result.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(metadata_result.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{0U});
+  CHECK(metadata_resources.reservation_ordinal == 1U);
+  CHECK(metadata_resources.live_evaluation_bytes == 0U);
+  CHECK(metadata_children[0].claimed);
+  CHECK(metadata_children[1].claimed);
+
+  EvaluationResources destroy_resources =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 1> destroy_children{{make_int_value(1)}};
+  TupleConstructionResult destroy_tuple = make_tuple_value(
+      destroy_resources, destroy_children, tuple_location,
+      "host-destroy-failure");
+  REQUIRE(destroy_tuple.ok);
+  HostAllocationFailureInjection destroy_failure{0U, 0U};
+  const ValueDestructionResult destroy_result =
+      destroy_value(destroy_tuple.value, destroy_failure);
+  CHECK_FALSE(destroy_result.ok);
+  CHECK(destroy_result.invariant == ValueInvariant::none);
+  CHECK(destroy_result.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+  CHECK(destroy_tuple.value.claimed);
+  CHECK(destroy_resources.live_evaluation_bytes == 16U);
+  CHECK(destroy_value(destroy_tuple.value).ok);
+  CHECK(destroy_resources.live_evaluation_bytes == 0U);
+
+  EvaluationResources release_resources =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<Value, 1> release_children{{make_int_value(1)}};
+  TupleConstructionResult release_tuple = make_tuple_value(
+      release_resources, release_children, tuple_location,
+      "host-release-failure");
+  REQUIRE(release_tuple.ok);
+  HostAllocationFailureInjection release_failure{0U, 0U};
+  const ValueReleaseResult release_result = release_value_reservations(
+      release_resources, release_tuple.value, release_failure);
+  CHECK_FALSE(release_result.ok);
+  CHECK(release_result.invariant == ValueInvariant::none);
+  CHECK(release_result.resource_error ==
+        HostResourceErrorReason::allocation_unavailable);
+  CHECK(release_tuple.value.claimed);
+  CHECK(release_resources.live_evaluation_bytes == 16U);
+  CHECK(release_value_reservations(release_resources, release_tuple.value).ok);
+  CHECK(release_resources.live_evaluation_bytes == 0U);
 }
 
 TEST_CASE("TUP-012-DIRECT-PRESERVATION") {

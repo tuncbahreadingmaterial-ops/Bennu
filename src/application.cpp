@@ -47,6 +47,27 @@ Error primitive_error(ErrorKind kind, const PrimitiveDescriptor &descriptor,
   return error;
 }
 
+Error host_resource_error(PrimitiveApplicationContext &context,
+                          const PrimitiveDescriptor &descriptor,
+                          HostResourceErrorReason reason,
+                          SourceLocation location) {
+  Error error = primitive_error(ErrorKind::resource_error, descriptor, location);
+  error.resource = ResourceErrorContext{
+      reason == HostResourceErrorReason::size_overflow
+          ? ResourceErrorReason::size_overflow
+          : ResourceErrorReason::allocation_unavailable,
+      std::nullopt,
+      std::nullopt,
+      std::string(execution_profile_name(context.resources.profile)),
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+  };
+  return error;
+}
+
 Error arity_error(const PrimitiveDescriptor &descriptor,
                   std::size_t supplied_arity, SourceLocation location) {
   Error error = primitive_error(ErrorKind::arity_error, descriptor, location);
@@ -79,7 +100,8 @@ bool type_accepts(const PrimitiveDescriptor &descriptor,
           parameter.element == ScalarType::double_precision);
 }
 
-Error type_error(const PrimitiveDescriptor &descriptor,
+Error type_error(PrimitiveApplicationContext &application_context,
+                 const PrimitiveDescriptor &descriptor,
                  std::span<const Value> arguments,
                  std::span<const ScalarType> actual_types,
                  SourceLocation location) {
@@ -90,6 +112,11 @@ Error type_error(const PrimitiveDescriptor &descriptor,
     ValueTypeResult actual = value_type(arguments[index]);
     if (actual.ok) {
       context.actual_arguments.push_back(std::move(actual.type));
+    } else if (actual.resource_error != HostResourceErrorReason::none) {
+      Error resource_error = host_resource_error(
+          application_context, descriptor, actual.resource_error, location);
+      resource_error.argument_position = index + 1U;
+      return resource_error;
     }
   }
 
@@ -218,6 +245,13 @@ PrimitiveApplicationResult apply_primitive_impl(
   for (std::size_t index = 0; index < arguments.size(); ++index) {
     const ValueValidationResult validation = validate_value(arguments[index]);
     if (!validation.ok) {
+      if (validation.resource_error != HostResourceErrorReason::none) {
+        Error error = host_resource_error(context, descriptor,
+                                          validation.resource_error,
+                                          call_location);
+        error.argument_position = index + 1U;
+        return application_failure(std::move(error));
+      }
       Error error = primitive_error(ErrorKind::invalid_value, descriptor,
                                     call_location);
       error.argument_position = index + 1U;
@@ -227,9 +261,19 @@ PrimitiveApplicationResult apply_primitive_impl(
       return application_failure(std::move(error));
     }
     ScalarType element_type = ScalarType::boolean;
-    if (!value_element_type(arguments[index], element_type).ok) {
+    const ValueValidationResult element_type_result =
+        value_element_type(arguments[index], element_type);
+    if (!element_type_result.ok) {
+      if (element_type_result.resource_error !=
+          HostResourceErrorReason::none) {
+        Error error = host_resource_error(context, descriptor,
+                                          element_type_result.resource_error,
+                                          call_location);
+        error.argument_position = index + 1U;
+        return application_failure(std::move(error));
+      }
       return application_failure(type_error(
-          descriptor, arguments,
+          context, descriptor, arguments,
           std::span<const ScalarType>(actual_types.data(), arguments.size()),
           call_location));
     }
@@ -272,8 +316,8 @@ PrimitiveApplicationResult apply_primitive_impl(
       }
     }
     if (selected_structural == nullptr) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
     if (selected_structural->implementation !=
             PrimitiveImplementation::iota_integer ||
@@ -316,8 +360,8 @@ PrimitiveApplicationResult apply_primitive_impl(
     }
     if (selected.status != SignatureSelectionStatus::success ||
         selected.signature == nullptr) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
     selected_signature = selected.signature;
   } else {
@@ -329,8 +373,8 @@ PrimitiveApplicationResult apply_primitive_impl(
                  expected == ScalarType::double_precision);
     }
     if (!accepts) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
   }
 
