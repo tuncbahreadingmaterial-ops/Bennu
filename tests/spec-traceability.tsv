@@ -65,3 +65,16 @@ Issue #54 exact scalar vector empty work charges and no partial preflight result
 Issue #54 evaluator strict-C11 and native work refusal allocation failure and same-process cleanup|tests/public_resource_contract.cmake|ISSUE54-RESOURCE-CROSS-BACKEND
 Issue #54 all fifteen implementations evaluator runner REPL strict-C11 and native value agreement|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CROSS-PATH-BYTES
 Issue #54 static and dynamic error parity|tests/public_path_error_matrix.cmake|PUBLIC-EVALUATOR-GENERATED-NATIVE-DIAGNOSTIC-EQUIVALENCE
+BENNU-SPEC-0005 sections 3 and 5 parameter header grammar, placement, and exact diagnostics|tests/public_cutover_conformance.cpp|PARG-001-HEADER
+BENNU-SPEC-0005 section 4 declaration and reference names|tests/public_cutover_conformance.cpp|PARG-001-NAMES
+BENNU-SPEC-0001 section 5.4 reserved parameter-header primitive name|src/primitive.cpp|PARG-001-RESERVED-PRIMITIVE-DESCRIPTOR
+BENNU-SPEC-0005 section 6.2 whole-program static phase order before binding|tests/public_cutover_conformance.cpp|PARG-002-STATIC-ORDER
+BENNU-SPEC-0005 section 6.3 static and dynamic shape analysis|tests/public_cutover_conformance.cpp|PARG-003-SHAPE-ANALYSIS
+BENNU-SPEC-0005 sections 7 and 13.1 ordered typed API and borrowed scalar ownership|tests/public_cutover_conformance.cpp|PARG-004-TYPED-API
+BENNU-SPEC-0005 sections 5, 6.1, and 12.1 parameter-reference lowering metadata|src/rewrite.cpp|PARG-004-PARAMETER-LOWERING-METADATA
+BENNU-SPEC-0005 section 8 structured typed argument failures and lowest position|tests/public_cutover_conformance.cpp|PARG-005-ARGUMENT-ERROR
+BENNU-SPEC-0005 sections 3.3 and 3.4 empty header and zero-root binding|tests/public_cutover_conformance.cpp|PARG-008-ZERO-ROOTS
+BENNU-SPEC-0005 sections 6.3 and 11.4 parameter-driven iota and dynamic shape|tests/public_cutover_conformance.cpp|PARG-009-DYNAMIC-IOTA-SHAPE
+BENNU-SPEC-0005 section 11.1 multi-root and postorder dynamic failure order|tests/public_cutover_conformance.cpp|PARG-010-RUNTIME-ORDER
+BENNU-SPEC-0005 section 13.1 unchanged profile accounting for scalar binding|tests/public_cutover_conformance.cpp|PARG-011-PROFILES
+BENNU-SPEC-0005 sections 4.2 and 15 zero-input compatibility and program-only rejection|tests/public_cutover_conformance.cpp|PARG-017-REGRESSION
