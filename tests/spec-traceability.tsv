@@ -26,6 +26,8 @@ BENNU-SPEC-0003 sections 14 and 15|tests/c_emission_contract.cmake|PUBLIC-SUCCES
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic formatted public surface|tests/c_emission_contract.cmake|CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic emitted and native exact binary64 bits|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-EXACT-BITS
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic hostile environment trap containment and exact restoration|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-HOSTILE-FP-TRAP-RESTORATION
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic standard C ambient rounding emitted isolation|tests/c_emission_contract.cmake|CHECKED-ARITHMETIC-STANDARD-FENV-EMITTED
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic standard C ambient rounding native isolation|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-STANDARD-FENV-NATIVE
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic generated and native structured overflow|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-STRUCTURED-OVERFLOW
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic generated and native resource cleanup|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-RESOURCE-MATRIX
 BENNU-SPEC-0003 sections 14 and 15 checked arithmetic direct evaluator resource refusal|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-DIRECT-RESOURCE-MATRIX

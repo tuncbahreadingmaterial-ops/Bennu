@@ -650,17 +650,36 @@ static int bennu_double_is_zero(double value) {
 #if defined(__x86_64__) || defined(_M_X64)
 typedef struct BennuStrictEnvironment {
   unsigned int control;
+#if !defined(_MSC_VER)
+  /* FNSTENV/FLDENV use a 28-byte x87 environment image in x64 mode. */
+  unsigned char x87[28];
+#endif
 } BennuStrictEnvironment;
 
 static void
 bennu_begin_strict_environment(BennuStrictEnvironment *environment) {
   environment->control = _mm_getcsr();
+#if !defined(_MSC_VER)
+  {
+    uint16_t strict_x87_control = UINT16_C(0);
+    __asm__ volatile("fnstenv %0" : "=m"(environment->x87));
+    (void)memcpy(&strict_x87_control, environment->x87,
+                 sizeof(strict_x87_control));
+    strict_x87_control =
+        (uint16_t)((strict_x87_control | UINT16_C(0x003f)) &
+                   ~UINT16_C(0x0c00));
+    __asm__ volatile("fldcw %0" : : "m"(strict_x87_control));
+  }
+#endif
   _mm_setcsr((environment->control | 0x1f80U) &
              ~(0x003fU | 0x0040U | 0x6000U | 0x8000U));
 }
 
 static void
 bennu_restore_strict_environment(const BennuStrictEnvironment *environment) {
+#if !defined(_MSC_VER)
+  __asm__ volatile("fldenv %0" : : "m"(environment->x87));
+#endif
   _mm_setcsr(environment->control);
 }
 #elif defined(__aarch64__)

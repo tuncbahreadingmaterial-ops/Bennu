@@ -2,6 +2,7 @@
 # TEST-ID: PUBLIC-SUCCESS-CROSS-PATH-BYTES
 # TEST-ID: PUBLIC-SUCCESS-NATIVE
 # TEST-ID: CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES
+# TEST-ID: CHECKED-ARITHMETIC-STANDARD-FENV-EMITTED
 foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -17,10 +18,13 @@ set(expected_file
 set(generated_file "${work_directory}/public-path.c")
 set(repeated_file "${work_directory}/public-path-repeat.c")
 set(hostile_file "${work_directory}/public-path-hostile-fp.c")
+set(standard_fenv_file "${work_directory}/public-path-standard-fenv.c")
 set(generated_executable
   "${work_directory}/public-path-emitted${BENNU_EXECUTABLE_SUFFIX}")
 set(hostile_executable
   "${work_directory}/public-path-hostile-fp${BENNU_EXECUTABLE_SUFFIX}")
+set(standard_fenv_executable
+  "${work_directory}/public-path-standard-fenv${BENNU_EXECUTABLE_SUFFIX}")
 set(native_executable
   "${work_directory}/public-path-native${BENNU_EXECUTABLE_SUFFIX}")
 file(REMOVE_RECURSE "${work_directory}")
@@ -143,6 +147,78 @@ set(hostile_main [=[int main(void) {
   return 98;
 #endif
 }]=])
+set(standard_fenv_main [=[int main(void) {
+  static const int rounding_modes[] = {
+      FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+  const int original_rounding = fegetround();
+  size_t index = 0U;
+  int result = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+  const unsigned int original_control = _mm_getcsr();
+#elif defined(__aarch64__)
+  uint64_t original_control = UINT64_C(0);
+  uint64_t original_status = UINT64_C(0);
+  __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
+  __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
+#endif
+  if (original_rounding == -1) {
+    return 97;
+  }
+  for (index = 0U;
+       index < sizeof(rounding_modes) / sizeof(rounding_modes[0]); ++index) {
+    int caller_exceptions = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned int caller_control = 0U;
+#elif defined(__aarch64__)
+    uint64_t caller_control = UINT64_C(0);
+    uint64_t caller_status = UINT64_C(0);
+#endif
+    if (fesetround(rounding_modes[index]) != 0) {
+      result = 96;
+      break;
+    }
+    caller_exceptions = fetestexcept(FE_ALL_EXCEPT);
+#if defined(__x86_64__) || defined(_M_X64)
+    caller_control = _mm_getcsr();
+#elif defined(__aarch64__)
+    __asm__ volatile("mrs %0, fpcr" : "=r"(caller_control));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(caller_status));
+#endif
+    result = bennu_execute(NULL);
+    if (result != 0 || fegetround() != rounding_modes[index] ||
+        fetestexcept(FE_ALL_EXCEPT) != caller_exceptions) {
+      if (result == 0) {
+        result = 99;
+      }
+      break;
+    }
+#if defined(__x86_64__) || defined(_M_X64)
+    if (_mm_getcsr() != caller_control) {
+      result = 99;
+      break;
+    }
+#elif defined(__aarch64__)
+    {
+      uint64_t restored_control = UINT64_C(0);
+      uint64_t restored_status = UINT64_C(0);
+      __asm__ volatile("mrs %0, fpcr" : "=r"(restored_control));
+      __asm__ volatile("mrs %0, fpsr" : "=r"(restored_status));
+      if (restored_control != caller_control || restored_status != caller_status) {
+        result = 99;
+        break;
+      }
+    }
+#endif
+  }
+  (void)fesetround(original_rounding);
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_setcsr(original_control);
+#elif defined(__aarch64__)
+  __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+  __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+#endif
+  return result;
+}]=])
 string(REPLACE "${normal_main}" "${hostile_main}" hostile_source
        "${emitted_source}")
 if(hostile_source STREQUAL emitted_source)
@@ -150,6 +226,14 @@ if(hostile_source STREQUAL emitted_source)
     "CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES could not install hostile FP harness")
 endif()
 file(WRITE "${hostile_file}" "${hostile_source}")
+string(REPLACE "${normal_main}" "${standard_fenv_main}" standard_fenv_body
+       "${emitted_source}")
+if(standard_fenv_body STREQUAL emitted_source)
+  message(FATAL_ERROR
+    "CHECKED-ARITHMETIC-STANDARD-FENV could not install standard fenv harness")
+endif()
+set(standard_fenv_source "#include <fenv.h>\n${standard_fenv_body}")
+file(WRITE "${standard_fenv_file}" "${standard_fenv_source}")
 
 if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
   execute_process(
@@ -164,6 +248,13 @@ if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     WORKING_DIRECTORY "${work_directory}"
     RESULT_VARIABLE hostile_compile_exit OUTPUT_VARIABLE hostile_compile_stdout
     ERROR_VARIABLE hostile_compile_stderr)
+  execute_process(
+    COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
+            "${standard_fenv_file}" "/Fe:${standard_fenv_executable}"
+    WORKING_DIRECTORY "${work_directory}"
+    RESULT_VARIABLE standard_fenv_compile_exit
+    OUTPUT_VARIABLE standard_fenv_compile_stdout
+    ERROR_VARIABLE standard_fenv_compile_stderr)
 else()
   execute_process(
     COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math -ffp-contract=off
@@ -179,14 +270,25 @@ else()
     WORKING_DIRECTORY "${work_directory}"
     RESULT_VARIABLE hostile_compile_exit OUTPUT_VARIABLE hostile_compile_stdout
     ERROR_VARIABLE hostile_compile_stderr)
+  execute_process(
+    COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math -ffp-contract=off
+            -fno-fast-math -Wall -Wextra -Werror -pedantic-errors
+            "${standard_fenv_file}" -o "${standard_fenv_executable}" -lm
+    WORKING_DIRECTORY "${work_directory}"
+    RESULT_VARIABLE standard_fenv_compile_exit
+    OUTPUT_VARIABLE standard_fenv_compile_stdout
+    ERROR_VARIABLE standard_fenv_compile_stderr)
 endif()
 if(NOT "${compile_exit}" STREQUAL "0" OR
-   NOT "${hostile_compile_exit}" STREQUAL "0")
+   NOT "${hostile_compile_exit}" STREQUAL "0" OR
+   NOT "${standard_fenv_compile_exit}" STREQUAL "0")
   message(FATAL_ERROR
     "PUBLIC-SUCCESS-MATRIX strict C11 compilation failed\n"
     "stdout: [${compile_stdout}]\nstderr: [${compile_stderr}]\n"
     "hostile stdout: [${hostile_compile_stdout}]\n"
-    "hostile stderr: [${hostile_compile_stderr}]")
+    "hostile stderr: [${hostile_compile_stderr}]\n"
+    "standard fenv stdout: [${standard_fenv_compile_stdout}]\n"
+    "standard fenv stderr: [${standard_fenv_compile_stderr}]")
 endif()
 
 execute_process(
@@ -202,6 +304,10 @@ execute_process(
   RESULT_VARIABLE hostile_exit OUTPUT_VARIABLE hostile_stdout
   ERROR_VARIABLE hostile_stderr)
 execute_process(
+  COMMAND "${standard_fenv_executable}"
+  RESULT_VARIABLE standard_fenv_exit OUTPUT_VARIABLE standard_fenv_stdout
+  ERROR_VARIABLE standard_fenv_stderr)
+execute_process(
   COMMAND "${native_executable}"
   RESULT_VARIABLE native_exit OUTPUT_VARIABLE native_stdout
   ERROR_VARIABLE native_stderr)
@@ -212,17 +318,20 @@ execute_process(
 if(NOT "${generated_exit}" STREQUAL "0" OR
    NOT "${generated_repeat_exit}" STREQUAL "0" OR
    NOT "${hostile_exit}" STREQUAL "0" OR
+   NOT "${standard_fenv_exit}" STREQUAL "0" OR
    NOT "${native_exit}" STREQUAL "0" OR
    NOT "${native_repeat_exit}" STREQUAL "0" OR
    NOT generated_stderr STREQUAL "" OR
    NOT generated_repeat_stderr STREQUAL "" OR
    NOT hostile_stderr STREQUAL "" OR
+   NOT standard_fenv_stderr STREQUAL "" OR
    NOT native_stderr STREQUAL "" OR NOT native_repeat_stderr STREQUAL "")
   message(FATAL_ERROR
     "PUBLIC-SUCCESS-MATRIX emitted or native execution failed\n"
     "generated: ${generated_exit} [${generated_stderr}]\n"
     "generated repeat: ${generated_repeat_exit} [${generated_repeat_stderr}]\n"
     "hostile generated: ${hostile_exit} [${hostile_stderr}]\n"
+    "standard fenv generated: ${standard_fenv_exit} [${standard_fenv_stderr}]\n"
     "native: ${native_exit} [${native_stderr}]\n"
     "native repeat: ${native_repeat_exit} [${native_repeat_stderr}]")
 endif()
@@ -235,6 +344,16 @@ endforeach()
 string(REPLACE "> " "" repl_stdout "${repl_stdout}")
 file(READ "${expected_file}" expected_stdout)
 string(REPLACE "\r\n" "\n" expected_stdout "${expected_stdout}")
+set(standard_fenv_expected_stdout
+    "${expected_stdout}${expected_stdout}${expected_stdout}")
+string(REPLACE "\r\n" "\n" standard_fenv_stdout
+       "${standard_fenv_stdout}")
+if(NOT standard_fenv_stdout STREQUAL standard_fenv_expected_stdout)
+  message(FATAL_ERROR
+    "CHECKED-ARITHMETIC-STANDARD-FENV output differs from tracked corpus\n"
+    "expected: [${standard_fenv_expected_stdout}]\n"
+    "actual: [${standard_fenv_stdout}]")
+endif()
 foreach(path_name runner repl emitted emitted-repeat hostile native native-repeat)
   if(path_name STREQUAL "runner")
     set(actual "${runner_stdout}")

@@ -161,6 +161,101 @@ bool emit_probe_and_build(
   return built.ok;
 }
 
+std::optional<std::string> generated_standard_fenv_probe() {
+  const bennu::CEmissionResult emitted = bennu::emit_c_source(
+      "dec[1.7976931348623157e308]\n"
+      "sub[1.0 5.551115123125783e-17]\n"
+      "mul[1.0000000000000002 1.0000000000000002]\n"
+      "mul[5e-324 1.5]\n"
+      "sub[1e-323 5e-324]\n");
+  if (!emitted.ok ||
+      emitted.source.find("static int bennu_execute(BennuResources *snapshot)") ==
+          std::string::npos) {
+    return std::nullopt;
+  }
+  std::string source = R"bennu_c(#include <fenv.h>
+#define main bennu_generated_main
+)bennu_c";
+  source += emitted.source;
+  source += R"bennu_c(
+#undef main
+
+int main(void) {
+  static const int rounding_modes[] = {
+      FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+  const int original_rounding = fegetround();
+  size_t index = 0U;
+  int result = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+  const unsigned int original_control = _mm_getcsr();
+#elif defined(__aarch64__)
+  uint64_t original_control = UINT64_C(0);
+  uint64_t original_status = UINT64_C(0);
+  __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
+  __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
+#endif
+  if (original_rounding == -1) {
+    return 97;
+  }
+  for (index = 0U;
+       index < sizeof(rounding_modes) / sizeof(rounding_modes[0]); ++index) {
+    int caller_exceptions = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned int caller_control = 0U;
+#elif defined(__aarch64__)
+    uint64_t caller_control = UINT64_C(0);
+    uint64_t caller_status = UINT64_C(0);
+#endif
+    if (fesetround(rounding_modes[index]) != 0) {
+      result = 96;
+      break;
+    }
+    caller_exceptions = fetestexcept(FE_ALL_EXCEPT);
+#if defined(__x86_64__) || defined(_M_X64)
+    caller_control = _mm_getcsr();
+#elif defined(__aarch64__)
+    __asm__ volatile("mrs %0, fpcr" : "=r"(caller_control));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(caller_status));
+#endif
+    result = bennu_execute(NULL);
+    if (result != 0 || fegetround() != rounding_modes[index] ||
+        fetestexcept(FE_ALL_EXCEPT) != caller_exceptions) {
+      if (result == 0) {
+        result = 99;
+      }
+      break;
+    }
+#if defined(__x86_64__) || defined(_M_X64)
+    if (_mm_getcsr() != caller_control) {
+      result = 99;
+      break;
+    }
+#elif defined(__aarch64__)
+    {
+      uint64_t restored_control = UINT64_C(0);
+      uint64_t restored_status = UINT64_C(0);
+      __asm__ volatile("mrs %0, fpcr" : "=r"(restored_control));
+      __asm__ volatile("mrs %0, fpsr" : "=r"(restored_status));
+      if (restored_control != caller_control || restored_status != caller_status) {
+        result = 99;
+        break;
+      }
+    }
+#endif
+  }
+  (void)fesetround(original_rounding);
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_setcsr(original_control);
+#elif defined(__aarch64__)
+  __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+  __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+#endif
+  return result;
+}
+)bennu_c";
+  return source;
+}
+
 constexpr std::string_view allocation_iota_assertions = R"bennu_assert(
         snapshot.failure != BENNU_FAILURE_ALLOCATION ||
         snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
@@ -1104,7 +1199,7 @@ std::string refusal_evidence(const bennu::Error &error) {
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 29) {
+  if (argument_count != 30) {
     return 2;
   }
 
@@ -1541,6 +1636,17 @@ int main(int argument_count, char **arguments) {
       bennu::NativeBuildRequest{*context_probe, arguments[22], arguments[1], ""});
   if (!context_probe_native.ok) {
     return 33;
+  }
+  const std::optional<std::string> standard_fenv_probe =
+      generated_standard_fenv_probe();
+  if (!standard_fenv_probe.has_value()) {
+    return 38;
+  }
+  const bennu::NativeBuildResult standard_fenv_probe_native =
+      bennu::build_native(bennu::NativeBuildRequest{
+          *standard_fenv_probe, arguments[29], arguments[1], ""});
+  if (!standard_fenv_probe_native.ok) {
+    return 39;
   }
   return 0;
 }
