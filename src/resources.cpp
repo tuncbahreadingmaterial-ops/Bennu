@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <ostream>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
