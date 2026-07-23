@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bennu {
@@ -36,6 +37,8 @@ enum class ErrorKind {
   argument_error,
   shape_mismatch,
   invalid_execution_profile,
+  profile_error,
+  invalid_value,
   resource_error,
   domain_error,
   invalid_primitive_table,
@@ -50,6 +53,7 @@ enum class ResourceErrorReason {
 
 enum class ResourceLimitKind {
   max_vector_bytes,
+  max_tuple_table_bytes,
   max_live_evaluation_bytes,
   max_work_units,
 };
@@ -58,11 +62,22 @@ struct ResourceErrorContext {
   ResourceErrorReason reason;
   std::optional<std::size_t> requested_elements;
   std::optional<std::size_t> requested_bytes;
-  std::string profile;
+  std::string_view profile;
   std::optional<ResourceLimitKind> limit_kind;
   std::optional<std::size_t> configured_limit;
   std::optional<std::size_t> usage_before;
   std::optional<std::size_t> refused_charge;
+  std::optional<std::size_t> allocation_ordinal{};
+};
+
+enum class ProfileErrorReason {
+  unsupported_value_kind,
+};
+
+struct ProfileErrorContext {
+  ProfileErrorReason reason;
+  std::string profile_name;
+  TypeKind value_kind;
 };
 
 struct ScalarSignatureContext {
@@ -81,7 +96,8 @@ struct DomainErrorContext {
 };
 
 struct PrimitiveErrorContext {
-  std::string name;
+  HostArray<char> name_storage{};
+  std::string_view name{};
   std::optional<PrimitiveId> id{};
 };
 
@@ -95,10 +111,7 @@ struct ArityErrorContext {
   std::vector<std::size_t> accepted;
 };
 
-struct ErrorValueType {
-  ContainerKind container;
-  ScalarType element;
-};
+using ErrorValueType = TypeArena;
 
 struct TypeErrorSignatureContext {
   std::vector<ErrorValueType> parameters;
@@ -168,6 +181,13 @@ struct ParameterErrorContext {
   std::optional<SourceSpan> related_span{};
 };
 
+struct ValueErrorContext {
+  ValueInvariant invariant;
+  std::vector<std::size_t> path;
+  std::optional<std::size_t> node_index;
+  std::optional<std::size_t> edge_index;
+};
+
 struct Error {
   ErrorKind kind;
   SourceLocation location;
@@ -180,6 +200,8 @@ struct Error {
   std::optional<ShapeErrorContext> shape{};
   std::optional<std::size_t> element_index{};
   std::optional<ResourceErrorContext> resource{};
+  std::optional<ProfileErrorContext> profile{};
+  std::optional<ValueErrorContext> value{};
   std::optional<DomainErrorContext> domain{};
   std::optional<ArgumentErrorContext> argument{};
   std::optional<ParameterErrorContext> parameter{};
@@ -190,6 +212,8 @@ struct Error {
 
 Error make_error(ErrorKind kind, SourceLocation location, std::string message);
 Error make_error(ErrorKind kind, SourceLocation location);
+std::optional<PrimitiveErrorContext> make_primitive_error_context(
+    std::string_view name, std::optional<PrimitiveId> id);
 
 } // namespace bennu
 

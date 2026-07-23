@@ -1988,8 +1988,8 @@ Error lowering_primitive_error(ErrorKind kind,
                                const PrimitiveDescriptor &descriptor,
                                SourceLocation location) {
   Error error = make_error(kind, location);
-  error.primitive = PrimitiveErrorContext{
-      std::string(descriptor.name), std::optional<PrimitiveId>{descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
   return error;
 }
 
@@ -2036,7 +2036,9 @@ Error lowering_type_error(const RewriteProgram &program,
     const RewriteLoweringNode &argument =
         lowering.nodes[program.arguments[call.first_argument + index]];
     context.actual_arguments.push_back(
-        ErrorValueType{lowering_container(argument), argument.element_type});
+        lowering_container(argument) == ContainerKind::scalar
+            ? make_scalar_type(argument.element_type)
+            : make_vector_type(argument.element_type));
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -2051,12 +2053,15 @@ Error lowering_type_error(const RewriteProgram &program,
     accepted.parameters.reserve(signature.parameter_count);
     for (std::size_t parameter_index = 0U;
          parameter_index < signature.parameter_count; ++parameter_index) {
-      accepted.parameters.push_back(ErrorValueType{
-          signature.parameters[parameter_index].container,
-          signature.parameters[parameter_index].element});
+      accepted.parameters.push_back(
+          signature.parameters[parameter_index].container ==
+                  ContainerKind::scalar
+              ? make_scalar_type(signature.parameters[parameter_index].element)
+              : make_vector_type(signature.parameters[parameter_index].element));
     }
-    accepted.result = ErrorValueType{signature.result.container,
-                                     signature.result.element};
+    accepted.result = signature.result.container == ContainerKind::scalar
+                          ? make_scalar_type(signature.result.element)
+                          : make_vector_type(signature.result.element);
     context.accepted_signatures.push_back(std::move(accepted));
     candidates.push_back(&signature);
   }
@@ -2464,7 +2469,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
       diagnostic.formatting_error = result.error;
       return false;
     }
-    formatted.push_back(std::move(result.formatted));
+    formatted.push_back(std::string(result.formatted));
   }
   return true;
 }
@@ -2557,7 +2562,9 @@ ErrorKind parse_error_kind(RewriteParseError error) {
 
 std::string semantic_error_message(const Error &error) {
   const std::string primitive =
-      error.primitive.has_value() ? error.primitive->name : "evaluation";
+      error.primitive.has_value()
+          ? std::string(error.primitive->name)
+          : std::string("evaluation");
   if (error.kind == ErrorKind::arity_error && error.arity.has_value()) {
     std::string message = primitive + " received " +
                           std::to_string(error.arity->supplied) +
@@ -2611,13 +2618,14 @@ std::string semantic_error_message(const Error &error) {
 }
 
 Error public_error_from_diagnostic(
-    std::string_view source, const RewriteEvaluationDiagnostic &diagnostic) {
+    std::string_view source, RewriteEvaluationDiagnostic &diagnostic) {
   if (diagnostic.error.kind != ErrorKind::none) {
-    Error error = diagnostic.error;
+    Error error = std::move(diagnostic.error);
     if (error.kind == ErrorKind::unknown_name &&
         !error.primitive.has_value()) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message = "unknown primitive '" + name + "'";
     }
     if (error.message.empty()) {
@@ -2665,7 +2673,8 @@ Error public_error_from_diagnostic(
         parse_error_message(parse_error));
     if (parse_error == RewriteParseError::unknown_primitive) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message += " '" + name + "'";
     }
     error.primary_span = rewrite_source_span(diagnostic.primary);
@@ -3627,8 +3636,9 @@ struct RewriteEvaluatorErrorFixture {
   std::optional<std::size_t> element_index;
 };
 
-bool error_value_type_equal(ErrorValueType left, ErrorValueType right) {
-  return left.container == right.container && left.element == right.element;
+bool error_value_type_equal(const ErrorValueType &left,
+                            const ErrorValueType &right) {
+  return structural_type_equal(left, right);
 }
 
 bool scalar_value_equal(const ScalarValue &left, const ScalarValue &right) {

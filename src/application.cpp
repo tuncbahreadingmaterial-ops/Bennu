@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,8 +43,29 @@ Value value_from_scalar(const ScalarValue &scalar) {
 Error primitive_error(ErrorKind kind, const PrimitiveDescriptor &descriptor,
                       SourceLocation location) {
   Error error = make_error(kind, location);
-  error.primitive = PrimitiveErrorContext{
-      std::string(descriptor.name), std::optional<PrimitiveId>{descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
+  return error;
+}
+
+Error host_resource_error(PrimitiveApplicationContext &context,
+                          const PrimitiveDescriptor &descriptor,
+                          HostResourceErrorReason reason,
+                          SourceLocation location) {
+  Error error = primitive_error(ErrorKind::resource_error, descriptor, location);
+  error.resource = ResourceErrorContext{
+      reason == HostResourceErrorReason::size_overflow
+          ? ResourceErrorReason::size_overflow
+          : ResourceErrorReason::allocation_unavailable,
+      std::nullopt,
+      std::nullopt,
+      execution_profile_name(context.resources.profile),
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+  };
   return error;
 }
 
@@ -67,6 +89,9 @@ bool type_accepts(const PrimitiveDescriptor &descriptor,
                   std::size_t argument_index, const Value &argument,
                   ScalarType actual_type) {
   const ValueType parameter = signature.parameters[argument_index];
+  if (argument.container == ContainerKind::tuple) {
+    return false;
+  }
   if (descriptor.lifting == LiftingMode::none) {
     return parameter.container == argument.container &&
            parameter.element == actual_type;
@@ -76,7 +101,8 @@ bool type_accepts(const PrimitiveDescriptor &descriptor,
           parameter.element == ScalarType::double_precision);
 }
 
-Error type_error(const PrimitiveDescriptor &descriptor,
+Error type_error(PrimitiveApplicationContext &application_context,
+                 const PrimitiveDescriptor &descriptor,
                  std::span<const Value> arguments,
                  std::span<const ScalarType> actual_types,
                  SourceLocation location) {
@@ -84,8 +110,15 @@ Error type_error(const PrimitiveDescriptor &descriptor,
   TypeErrorContext context;
   context.actual_arguments.reserve(arguments.size());
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    context.actual_arguments.push_back(
-        ErrorValueType{arguments[index].container, actual_types[index]});
+    ValueTypeResult actual = value_type(arguments[index]);
+    if (actual.ok) {
+      context.actual_arguments.push_back(std::move(actual.type));
+    } else if (actual.resource_error != HostResourceErrorReason::none) {
+      Error resource_error = host_resource_error(
+          application_context, descriptor, actual.resource_error, location);
+      resource_error.argument_position = index + 1U;
+      return resource_error;
+    }
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -100,12 +133,16 @@ Error type_error(const PrimitiveDescriptor &descriptor,
     accepted.parameters.reserve(signature.parameter_count);
     for (std::size_t parameter_index = 0;
          parameter_index < signature.parameter_count; ++parameter_index) {
-      accepted.parameters.push_back(ErrorValueType{
-          signature.parameters[parameter_index].container,
-          signature.parameters[parameter_index].element});
+      accepted.parameters.push_back(
+          signature.parameters[parameter_index].container ==
+                  ContainerKind::scalar
+              ? make_scalar_type(signature.parameters[parameter_index].element)
+              : make_vector_type(signature.parameters[parameter_index].element));
     }
     accepted.result =
-        ErrorValueType{signature.result.container, signature.result.element};
+        signature.result.container == ContainerKind::scalar
+            ? make_scalar_type(signature.result.element)
+            : make_vector_type(signature.result.element);
     context.accepted_signatures.push_back(std::move(accepted));
     candidates.push_back(&signature);
   }
@@ -207,10 +244,39 @@ PrimitiveApplicationResult apply_primitive_impl(
 
   std::array<ScalarType, maximum_application_arity> actual_types{};
   for (std::size_t index = 0; index < arguments.size(); ++index) {
+    const ValueValidationResult validation = validate_value(arguments[index]);
+    if (!validation.ok) {
+      if (validation.resource_error != HostResourceErrorReason::none) {
+        Error error = host_resource_error(context, descriptor,
+                                          validation.resource_error,
+                                          call_location);
+        error.argument_position = index + 1U;
+        return application_failure(std::move(error));
+      }
+      Error error = primitive_error(ErrorKind::invalid_value, descriptor,
+                                    call_location);
+      error.argument_position = index + 1U;
+      error.value = ValueErrorContext{
+          validation.invariant,
+          std::vector<std::size_t>(validation.path.begin(),
+                                   validation.path.end()),
+          validation.node_index, validation.edge_index};
+      return application_failure(std::move(error));
+    }
     ScalarType element_type = ScalarType::boolean;
-    if (!value_element_type(arguments[index], element_type).ok) {
+    const ValueValidationResult element_type_result =
+        value_element_type(arguments[index], element_type);
+    if (!element_type_result.ok) {
+      if (element_type_result.resource_error !=
+          HostResourceErrorReason::none) {
+        Error error = host_resource_error(context, descriptor,
+                                          element_type_result.resource_error,
+                                          call_location);
+        error.argument_position = index + 1U;
+        return application_failure(std::move(error));
+      }
       return application_failure(type_error(
-          descriptor, arguments,
+          context, descriptor, arguments,
           std::span<const ScalarType>(actual_types.data(), arguments.size()),
           call_location));
     }
@@ -253,8 +319,8 @@ PrimitiveApplicationResult apply_primitive_impl(
       }
     }
     if (selected_structural == nullptr) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
     if (selected_structural->implementation !=
             PrimitiveImplementation::iota_integer ||
@@ -297,8 +363,8 @@ PrimitiveApplicationResult apply_primitive_impl(
     }
     if (selected.status != SignatureSelectionStatus::success ||
         selected.signature == nullptr) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
     selected_signature = selected.signature;
   } else {
@@ -310,8 +376,8 @@ PrimitiveApplicationResult apply_primitive_impl(
                  expected == ScalarType::double_precision);
     }
     if (!accepts) {
-      return application_failure(
-          type_error(descriptor, arguments, actual_type_span, call_location));
+      return application_failure(type_error(
+          context, descriptor, arguments, actual_type_span, call_location));
     }
   }
 
@@ -350,10 +416,10 @@ PrimitiveApplicationResult apply_primitive_impl(
     }
     vector_value = std::move(allocated.value);
   } else {
-    const WorkChargeResult admitted = charge_work(
+    WorkChargeResult admitted = charge_work(
         context.resources, 1, call_location, descriptor.name);
     if (!admitted.ok) {
-      Error error = admitted.error;
+      Error error = std::move(admitted.error);
       if (error.primitive.has_value()) {
         error.primitive->id = descriptor.id;
       }
@@ -476,7 +542,7 @@ Value test_bool_vector(std::initializer_list<std::uint8_t> values) {
 [[maybe_unused]] std::string formatted_value(const Value &value) {
   const ValueFormattingResult result = format_value(value);
   CHECK(result.ok);
-  return result.formatted;
+  return std::string(result.formatted);
 }
 
 } // namespace
@@ -603,13 +669,17 @@ TEST_CASE("application errors carry deterministic arity type and shape context")
   if (type.error.type.has_value()) {
     REQUIRE(type.error.type->actual_arguments.size() == 2);
     if (type.error.type->actual_arguments.size() == 2) {
-      CHECK(type.error.type->actual_arguments[0].container ==
-            ContainerKind::vector);
-      CHECK(type.error.type->actual_arguments[0].element ==
+      const TypeArena &left = type.error.type->actual_arguments[0];
+      const TypeArena &right = type.error.type->actual_arguments[1];
+      const std::span<const TypeNode> left_nodes = type_nodes(left);
+      const std::span<const TypeNode> right_nodes = type_nodes(right);
+      REQUIRE(left_nodes.size() == 1U);
+      REQUIRE(right_nodes.size() == 1U);
+      CHECK(left_nodes[left.root_index].kind == TypeKind::vector);
+      CHECK(left_nodes[left.root_index].scalar ==
             ScalarType::integer);
-      CHECK(type.error.type->actual_arguments[1].container ==
-            ContainerKind::vector);
-      CHECK(type.error.type->actual_arguments[1].element ==
+      CHECK(right_nodes[right.root_index].kind == TypeKind::vector);
+      CHECK(right_nodes[right.root_index].scalar ==
             ScalarType::boolean);
     }
     CHECK(type.error.type->accepted_signatures.size() == 2);

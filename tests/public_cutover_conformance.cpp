@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <ostream>
 #include <span>
 #include <string>
 
@@ -16,7 +17,7 @@ namespace {
 std::string formatted(bennu::Value &value) {
   const bennu::ValueFormattingResult result = bennu::format_value(value);
   CHECK(result.ok);
-  return result.formatted;
+  return std::string(result.formatted);
 }
 
 void destroy_program(bennu::ProgramResult &result) {

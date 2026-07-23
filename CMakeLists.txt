@@ -46,6 +46,7 @@ set(bennu_implementation_sources
   src/rewrite.cpp
   src/rewrite_c_runtime.cpp
   src/resources.cpp
+  src/type.cpp
   src/value.cpp
 )
 
@@ -192,14 +193,17 @@ endif()
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  find_package(Threads REQUIRED)
   add_executable(bennu_tests
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
     tests/public_cutover_conformance.cpp
+    tests/tuple_foundation_conformance.cpp
   )
   target_include_directories(bennu_tests PRIVATE include)
   target_include_directories(bennu_tests SYSTEM PRIVATE third_party/doctest)
+  target_link_libraries(bennu_tests PRIVATE Threads::Threads)
   target_compile_definitions(bennu_tests PRIVATE
     DOCTEST_CONFIG_NO_EXCEPTIONS
     DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
@@ -210,10 +214,46 @@ if(BUILD_TESTING)
     CXX_EXTENSIONS NO
   )
   add_test(NAME unit.doctest COMMAND bennu_tests)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(bennu_structural_host_allocation_refusal
+      tests/structural_host_allocation_refusal.cpp
+      src/error.cpp
+      src/resources.cpp
+      src/type.cpp
+      src/value.cpp
+    )
+    target_include_directories(
+      bennu_structural_host_allocation_refusal PRIVATE include)
+    target_include_directories(
+      bennu_structural_host_allocation_refusal SYSTEM PRIVATE
+      third_party/doctest)
+    target_compile_definitions(
+      bennu_structural_host_allocation_refusal PRIVATE
+      DOCTEST_CONFIG_DISABLE
+      DOCTEST_CONFIG_NO_EXCEPTIONS
+      DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+    )
+    target_link_libraries(
+      bennu_structural_host_allocation_refusal PRIVATE Threads::Threads)
+    set_target_properties(bennu_structural_host_allocation_refusal PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED YES
+      CXX_EXTENSIONS NO
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(
+        bennu_structural_host_allocation_refusal PRIVATE -fno-exceptions)
+    endif()
+    add_test(
+      NAME unit.structural_host_allocation_refusal
+      COMMAND bennu_structural_host_allocation_refusal
+    )
+  endif()
   add_test(
     NAME spec.traceability
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability.cmake"
   )
   add_test(
@@ -222,6 +262,13 @@ if(BUILD_TESTING)
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability_negative.cmake"
+  )
+  add_test(
+    NAME spec.traceability_tuple_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability_tuple_negative.cmake"
   )
   add_test(
     NAME architecture.obsolete_surface
@@ -340,8 +387,8 @@ if(BUILD_TESTING)
   )
   add_test(
     NAME public.api_resource_matrix
-    COMMAND
-      "${CMAKE_COMMAND}"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
       "-DBENNU_PUBLIC_RESOURCE_FIXTURE=$<TARGET_FILE:bennu_public_resource_fixture>"
       "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
       "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"

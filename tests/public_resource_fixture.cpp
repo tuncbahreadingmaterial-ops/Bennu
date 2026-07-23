@@ -599,14 +599,14 @@ std::string refusal_evidence(const bennu::Error &error) {
   return "bennu-source:" + std::to_string(error.location.line) + ":" +
          std::to_string(error.location.column) + ": ResourceError: reason=" +
          std::string(reason) +
-         " profile=" + error.resource->profile +
+         " profile=" + std::string(error.resource->profile) +
          " limit=" + std::string(limit) +
          " configured=" +
          std::to_string(*error.resource->configured_limit) +
          " usage-before=" + std::to_string(*error.resource->usage_before) +
          " refused-charge=" +
          std::to_string(*error.resource->refused_charge) +
-         " admission=" + error.primitive->name +
+         " admission=" + std::string(error.primitive->name) +
          " source=" + std::to_string(error.location.offset) + ":" +
          std::to_string(error.location.line) + ":" +
          std::to_string(error.location.column) + "\n";

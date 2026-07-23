@@ -6,7 +6,8 @@
 # TEST-ID: GENERATED-RUNTIME-STRUCTURED-CONTEXT
 # TEST-ID: GENERATED-RUNTIME-SAME-PROCESS-RESET
 # TEST-ID: PUBLIC-PROFILE-LIMIT-DIAGNOSTIC-MATRIX
-foreach(required BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
+# TEST-ID: TUP-018-REGRESSION-PLATFORMS
+foreach(required BENNU_EXECUTABLE BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
@@ -16,6 +17,24 @@ endforeach()
 set(work_directory "${CMAKE_CURRENT_BINARY_DIR}/public resource contract")
 file(REMOVE_RECURSE "${work_directory}")
 file(MAKE_DIRECTORY "${work_directory}")
+
+file(READ "${BENNU_SOURCE_DIR}/tests/fixtures/public-path-success.out"
+     tuple_regression_expected)
+execute_process(
+  COMMAND "${BENNU_EXECUTABLE}" run
+          "${BENNU_SOURCE_DIR}/tests/fixtures/public-path-success.bennu"
+  RESULT_VARIABLE tuple_cli_exit OUTPUT_VARIABLE tuple_cli_stdout
+  ERROR_VARIABLE tuple_cli_stderr)
+string(REPLACE "\r\n" "\n" tuple_cli_stdout "${tuple_cli_stdout}")
+string(REPLACE "\r\n" "\n" tuple_cli_stderr "${tuple_cli_stderr}")
+if(NOT "${tuple_cli_exit}" STREQUAL "0" OR
+   NOT tuple_cli_stdout STREQUAL tuple_regression_expected OR
+   NOT tuple_cli_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "TUP-018 CLI regression mismatch\n"
+    "exit: ${tuple_cli_exit}\nstdout: [${tuple_cli_stdout}]\n"
+    "stderr: [${tuple_cli_stderr}]")
+endif()
 
 set(profile_c "${work_directory}/profile.c")
 set(profile_emitted
