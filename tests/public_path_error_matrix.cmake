@@ -1,5 +1,6 @@
 # TEST-ID: PUBLIC-ERROR-CLI-MATRIX
 # TEST-ID: PARG-012-VALUE-INDEPENDENT-EMISSION
+# TEST-ID: LOWERING-ARTIFACT-DYNAMIC-DIAGNOSTICS
 foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_C_COMPILER_ID
                  BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -196,10 +197,14 @@ check_public_failure(shape "add[(1 2) (3)]" 1 11 "ShapeMismatch"
   "add argument 2 expected shape [2], got [1]")
 check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
   "DomainError" "inc failed: integer_overflow"
-  "DomainError: integer_overflow\n")
+  "bennu-source:1:1: DomainError: inc failed: integer_overflow\n")
+check_public_dynamic_failure(domain_vector_element
+  "inc[(9223372036854775806 9223372036854775807)]" 1 1
+  "DomainError" "inc failed: integer_overflow at result index 1"
+  "bennu-source:1:1: DomainError: inc failed: integer_overflow at result index 1\n")
 check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
   "ResourceError" "iota resource request failed: size_overflow"
-  "ResourceError: size_overflow\n")
+  "bennu-source:1:1: ResourceError: iota resource request failed: size_overflow\n")
 check_public_dynamic_failure(dynamic_shape_dynamic_dynamic
   "add[iota[2] iota[3]]" 1 13
   "ShapeMismatch" "add argument 2 expected shape [2], got [3]"

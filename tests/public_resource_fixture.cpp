@@ -91,7 +91,9 @@ std::string refusal_evidence(const bennu::Error &error) {
       *error.resource->limit_kind == bennu::ResourceLimitKind::max_work_units
           ? "max_work_units"
           : "unexpected";
-  return "ResourceError: reason=" + std::string(reason) +
+  return "bennu-source:" + std::to_string(error.location.line) + ":" +
+         std::to_string(error.location.column) + ": ResourceError: reason=" +
+         std::string(reason) +
          " profile=" + error.resource->profile +
          " limit=" + std::string(limit) +
          " configured=" +

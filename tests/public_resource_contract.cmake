@@ -137,7 +137,7 @@ function(check_profile_refusal name executable invocation)
   endif()
 endfunction()
 
-function(check_allocation_failure name executable)
+function(check_allocation_failure name executable expected_stderr)
   foreach(invocation RANGE 1 2)
     execute_process(
       COMMAND "${executable}"
@@ -146,8 +146,7 @@ function(check_allocation_failure name executable)
     string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
     string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
     if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
-       NOT run_stderr STREQUAL
-           "ResourceError: allocation_unavailable\n")
+       NOT run_stderr STREQUAL expected_stderr)
       message(FATAL_ERROR
         "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} was not atomic\n"
         "exit: ${run_exit}\nstdout: [${run_stdout}]\nstderr: [${run_stderr}]")
@@ -166,9 +165,17 @@ foreach(bounded_reset_iteration RANGE 1 2)
   check_profile_refusal(refusal-native "${refusal_native}"
                         "${bounded_reset_iteration}")
 endforeach()
+set(iota_allocation_error
+  "bennu-source:1:1: ResourceError: iota resource request failed: allocation_unavailable\n")
+set(lifted_allocation_error
+  "bennu-source:1:1: ResourceError: inc resource request failed: allocation_unavailable\n")
+set(late_allocation_error
+  "bennu-source:2:1: ResourceError: iota resource request failed: allocation_unavailable\n")
 foreach(path iota lifted late)
-  check_allocation_failure("${path}-emitted" "${${path}_emitted}")
-  check_allocation_failure("${path}-native" "${${path}_native}")
+  check_allocation_failure("${path}-emitted" "${${path}_emitted}"
+                           "${${path}_allocation_error}")
+  check_allocation_failure("${path}-native" "${${path}_native}"
+                           "${${path}_allocation_error}")
 endforeach()
 
 file(REMOVE_RECURSE "${work_directory}")
