@@ -11,6 +11,14 @@ void append_rewrite_c_runtime(std::string &source) {
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef BENNU_RUNTIME_MALLOC
+#define BENNU_RUNTIME_MALLOC(size) malloc(size)
+#endif
+
+#ifndef BENNU_RUNTIME_FREE
+#define BENNU_RUNTIME_FREE(data) free(data)
+#endif
+
 typedef enum BennuType {
   BENNU_BOOL = 0,
   BENNU_INT = 1,
@@ -298,7 +306,8 @@ static int bennu_charge_work(
   return 1;
 }
 
-static int bennu_allocate(BennuResources *resources, BennuValue *value,
+)bennu_c";
+  source += R"bennu_c(static int bennu_allocate(BennuResources *resources, BennuValue *value,
                           BennuType type, size_t count, size_t work,
                           const char *admission_point,
                           BennuPrimitiveId primitive_id,
@@ -356,7 +365,7 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
                                  primary_span, context_span);
       return 0;
     }
-    data = malloc(bytes);
+    data = BENNU_RUNTIME_MALLOC(bytes);
     if (data == NULL) {
       bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
                                  1, bytes, admission_point, primitive_id,
@@ -380,7 +389,7 @@ static void bennu_release(BennuResources *resources, BennuValue *value) {
     if (bytes <= resources->live_bytes) {
       resources->live_bytes -= bytes;
     }
-    free(value->data);
+    BENNU_RUNTIME_FREE(value->data);
   }
   (void)memset(value, 0, sizeof(*value));
 }
@@ -809,7 +818,8 @@ static int bennu_write_double(double value) {
   return bennu_write_text(normalized);
 }
 
-static int bennu_print_scalar(BennuType type, uint8_t boolean,
+)bennu_c";
+  source += R"bennu_c(static int bennu_print_scalar(BennuType type, uint8_t boolean,
                               int64_t integer, double double_precision) {
   if (type == BENNU_BOOL) {
     return bennu_write_text(boolean != 0U ? "true" : "false");

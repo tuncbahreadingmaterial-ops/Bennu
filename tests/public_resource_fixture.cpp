@@ -75,18 +75,228 @@ bool emit_and_build(std::string_view source,
   return built.ok;
 }
 
+std::optional<std::string>
+generated_failure_probe(std::string_view generated,
+                        std::string_view failure_assertions) {
+  if (generated.find("static int bennu_execute(BennuResources *snapshot)") ==
+          std::string_view::npos ||
+      generated.find("BENNU_RUNTIME_MALLOC") == std::string_view::npos ||
+      generated.find("BENNU_RUNTIME_FREE") == std::string_view::npos) {
+    return std::nullopt;
+  }
+  std::string probe = R"bennu_c(#include <stddef.h>
+static void *bennu_probe_malloc(size_t size);
+static void bennu_probe_free(void *data);
+#define BENNU_RUNTIME_MALLOC(size) bennu_probe_malloc(size)
+#define BENNU_RUNTIME_FREE(data) bennu_probe_free(data)
+#define main bennu_generated_main
+)bennu_c";
+  probe += generated;
+  probe += R"bennu_c(
+#undef main
+
+static size_t bennu_probe_outstanding_allocations = 0U;
+static size_t bennu_probe_total_allocations = 0U;
+static int bennu_probe_invalid_free = 0;
+
+static void *bennu_probe_malloc(size_t size) {
+  void *data = malloc(size);
+  if (data != NULL) {
+    bennu_probe_outstanding_allocations += 1U;
+    bennu_probe_total_allocations += 1U;
+  }
+  return data;
+}
+
+static void bennu_probe_free(void *data) {
+  if (data != NULL) {
+    if (bennu_probe_outstanding_allocations == 0U) {
+      bennu_probe_invalid_free = 1;
+    } else {
+      bennu_probe_outstanding_allocations -= 1U;
+    }
+  }
+  free(data);
+}
+
+int main(void) {
+  size_t iteration = 0U;
+  for (iteration = 0U; iteration < 2U; ++iteration) {
+    BennuResources snapshot = {0};
+    const size_t allocations_before = bennu_probe_total_allocations;
+    if (bennu_execute(&snapshot) == 0 || snapshot.live_bytes != 0U ||
+        bennu_probe_outstanding_allocations != 0U ||
+        bennu_probe_invalid_free != 0 ||
+        snapshot.failure_admission_point == NULL ||
+        !bennu_failure_context_valid(&snapshot) ||
+)bennu_c";
+  probe += failure_assertions;
+  probe += R"bennu_c() {
+      return 1;
+    }
+  }
+  return 0;
+}
+)bennu_c";
+  return probe;
+}
+
+bool emit_probe_and_build(
+    std::string_view source,
+    const bennu::EvaluationConfiguration &configuration, const char *c_path,
+    const char *native_path, const char *compiler,
+    std::string_view failure_assertions) {
+  const bennu::CEmissionResult emitted =
+      bennu::emit_c_source(source, configuration);
+  if (!emitted.ok) {
+    return false;
+  }
+  const std::optional<std::string> probe =
+      generated_failure_probe(emitted.source, failure_assertions);
+  if (!probe.has_value() || !write_file(c_path, *probe)) {
+    return false;
+  }
+  const bennu::NativeBuildResult built = bennu::build_native(
+      bennu::NativeBuildRequest{*probe, native_path, compiler, ""});
+  return built.ok;
+}
+
+constexpr std::string_view allocation_iota_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 16U ||
+        snapshot.failure_primary_span.begin.line != 1U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        bennu_probe_total_allocations != allocations_before)bennu_assert";
+
+constexpr std::string_view allocation_lifted_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+        strcmp(snapshot.failure_admission_point, "inc") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 16U ||
+        snapshot.failure_primary_span.begin.line != 1U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view allocation_late_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 16U ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view work_refusal_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_WORK_UNITS ||
+        snapshot.failure_configured_limit != 1U ||
+        snapshot.failure_usage_before != 1U ||
+        snapshot.failure_refused_charge != 1U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+        strcmp(snapshot.failure_admission_point, "inc") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 1U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 8U ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view vector_refusal_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_VECTOR_BYTES ||
+        snapshot.failure_configured_limit != 8U ||
+        snapshot.failure_usage_before != 0U ||
+        snapshot.failure_refused_charge != 16U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 16U ||
+        bennu_probe_total_allocations != allocations_before)bennu_assert";
+
+constexpr std::string_view live_refusal_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES ||
+        snapshot.failure_configured_limit != 8U ||
+        snapshot.failure_usage_before != 8U ||
+        snapshot.failure_refused_charge != 8U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+        strcmp(snapshot.failure_admission_point, "inc") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 1U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 8U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view size_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_SIZE ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != UINT64_C(2305843009213693952) ||
+        snapshot.failure_has_requested_bytes != 0 ||
+        bennu_probe_total_allocations != allocations_before)bennu_assert";
+
+constexpr std::string_view shape_before_resource_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_SHAPE ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_ADD ||
+        strcmp(snapshot.failure_admission_point, "add") != 0 ||
+        snapshot.failure_configured_limit != 2U ||
+        snapshot.failure_usage_before != 3U ||
+        snapshot.failure_refused_charge != 1U ||
+        snapshot.failure_has_requested_elements != 0 ||
+        snapshot.failure_has_requested_bytes != 0 ||
+        snapshot.failure_primary_span.begin.line != 1U ||
+        snapshot.failure_primary_span.begin.column != 5U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view resource_before_domain_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_ADD ||
+        strcmp(snapshot.failure_admission_point, "add") != 0 ||
+        snapshot.failure_has_requested_elements == 0 ||
+        snapshot.failure_requested_elements != 1U ||
+        snapshot.failure_has_requested_bytes == 0 ||
+        snapshot.failure_requested_bytes != 8U ||
+        snapshot.failure_has_element_index != 0 ||
+        snapshot.failure_primary_span.begin.line != 1U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
 std::optional<std::string> generated_runtime_probe() {
   const bennu::CEmissionResult emitted =
-      bennu::emit_c_source("1\ninc 9223372036854775807\n");
+      bennu::emit_c_source(
+          "1\nadd[(0 9223372036854775807) (0 1)]\n");
   if (!emitted.ok) {
     return std::nullopt;
   }
   constexpr std::string_view expected_domain_provenance =
-      "\"inc\", BENNU_PRIMITIVE_INC, "
+      "\"add\", BENNU_PRIMITIVE_ADD, "
       "bennu_source_span(bennu_source_location(3U, 2U, 1U), "
       "bennu_source_location(6U, 2U, 4U)), "
       "bennu_source_span(bennu_source_location(3U, 2U, 1U), "
-      "bennu_source_location(26U, 2U, 24U))";
+      "bennu_source_location(37U, 2U, 35U))";
   const bennu::CEmissionResult shape_emitted =
       bennu::emit_c_source("add[iota[2] iota[3]]\n");
   constexpr std::string_view expected_shape_provenance =
@@ -96,21 +306,45 @@ std::optional<std::string> generated_runtime_probe() {
       "bennu_source_location(20U, 1U, 20U)), "
       "bennu_source_span(bennu_source_location(1U, 1U, 1U), "
       "bennu_source_location(21U, 1U, 21U))";
-  if (emitted.source.find(expected_domain_provenance) == std::string::npos ||
+  if (emitted.source.find(
+          "static int bennu_execute(BennuResources *snapshot)") ==
+          std::string::npos ||
+      emitted.source.find("BENNU_RUNTIME_MALLOC") == std::string::npos ||
+      emitted.source.find("BENNU_RUNTIME_FREE") == std::string::npos ||
+      emitted.source.find(expected_domain_provenance) == std::string::npos ||
       !shape_emitted.ok ||
       shape_emitted.source.find(expected_shape_provenance) ==
           std::string::npos) {
     return std::nullopt;
   }
-  std::string source = emitted.source;
-  constexpr std::string_view main_declaration = "int main(void) {";
-  const std::size_t main_position = source.find(main_declaration);
-  if (main_position == std::string::npos) {
-    return std::nullopt;
-  }
-  source.replace(main_position, main_declaration.size(),
-                 "int bennu_original_main(void) {");
+  std::string source = R"bennu_c(#include <stddef.h>
+static void *bennu_probe_malloc(size_t size);
+static void bennu_probe_free(void *data);
+#define BENNU_RUNTIME_MALLOC(size) bennu_probe_malloc(size)
+#define BENNU_RUNTIME_FREE(data) bennu_probe_free(data)
+#define main bennu_generated_main
+)bennu_c";
+  source += emitted.source;
   source += R"bennu_c(
+
+#undef main
+
+static size_t bennu_probe_outstanding_allocations = 0U;
+
+static void *bennu_probe_malloc(size_t size) {
+  void *data = malloc(size);
+  if (data != NULL) {
+    bennu_probe_outstanding_allocations += 1U;
+  }
+  return data;
+}
+
+static void bennu_probe_free(void *data) {
+  if (data != NULL) {
+    bennu_probe_outstanding_allocations -= 1U;
+  }
+  free(data);
+}
 
 static int bennu_probe_domain_context(void) {
   BennuResources resources = {0};
@@ -284,8 +518,40 @@ int main(void) {
       BENNU_PRIMITIVE_IOTA != 4) {
     return 2;
   }
-  if (bennu_original_main() == 0 || bennu_original_main() == 0) {
-    return 1;
+  {
+    size_t iteration = 0U;
+    for (iteration = 0U; iteration < 2U; ++iteration) {
+      BennuResources snapshot = {0};
+      if (bennu_execute(&snapshot) == 0 ||
+          snapshot.failure != BENNU_FAILURE_DOMAIN ||
+          snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+          snapshot.failure_implementation != BENNU_IMPL_ADD_INT ||
+          snapshot.failure_primitive_id != BENNU_PRIMITIVE_ADD ||
+          snapshot.failure_signature.parameter_count != 2U ||
+          snapshot.failure_signature.parameter_types[0] != BENNU_INT ||
+          snapshot.failure_signature.parameter_types[1] != BENNU_INT ||
+          snapshot.failure_signature.result_type != BENNU_INT ||
+          snapshot.failure_operand_count != 2U ||
+          snapshot.failure_left_operand.type != BENNU_INT ||
+          snapshot.failure_left_operand.integer != INT64_MAX ||
+          snapshot.failure_right_operand.type != BENNU_INT ||
+          snapshot.failure_right_operand.integer != INT64_C(1) ||
+          snapshot.failure_has_element_index == 0 ||
+          snapshot.failure_element_index != 1U ||
+          snapshot.failure_has_requested_elements != 0 ||
+          snapshot.failure_has_requested_bytes != 0 ||
+          snapshot.failure_primary_span.begin.line != 2U ||
+          snapshot.failure_primary_span.begin.column != 1U ||
+          snapshot.failure_primary_span.end.column != 4U ||
+          snapshot.failure_context_span.begin.line != 2U ||
+          snapshot.failure_context_span.begin.column != 1U ||
+          snapshot.failure_context_span.end.column != 35U ||
+          snapshot.live_bytes != 0U ||
+          bennu_probe_outstanding_allocations != 0U ||
+          !bennu_failure_context_valid(&snapshot)) {
+        return 1;
+      }
+    }
   }
   const int domain = bennu_probe_domain_context();
   const int profiles = bennu_probe_profile_contexts();
@@ -348,7 +614,7 @@ std::string refusal_evidence(const bennu::Error &error) {
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 22) {
+  if (argument_count != 29) {
     return 2;
   }
 
@@ -571,6 +837,10 @@ int main(int argument_count, char **arguments) {
       bennu::ExecutionProfile::trusted_local_v1,
       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
       bennu::AllocationFailureInjection{std::size_t{1U}}};
+  const bennu::EvaluationConfiguration fail_third{
+      bennu::ExecutionProfile::trusted_local_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{std::size_t{2U}}};
   bennu::ValueResult lifted =
       bennu::evaluate_expression("inc[(1 2)]", fail_second);
   if (lifted.ok ||
@@ -604,6 +874,51 @@ int main(int argument_count, char **arguments) {
     return 25;
   }
 
+  constexpr std::string_view shape_before_resource_source =
+      "add[iota[3] (9223372036854775807 9223372036854775807)]\n";
+  bennu::ValueResult shape_before_resource = bennu::evaluate_expression(
+      shape_before_resource_source, fail_third);
+  if (shape_before_resource.ok ||
+      shape_before_resource.error.kind != bennu::ErrorKind::shape_mismatch ||
+      shape_before_resource.error.argument_position != std::size_t{1U} ||
+      !shape_before_resource.error.shape.has_value() ||
+      shape_before_resource.error.shape->expected !=
+          std::vector<std::size_t>{2U} ||
+      shape_before_resource.error.shape->actual !=
+          std::vector<std::size_t>{3U} ||
+      !shape_before_resource.error.primitive.has_value() ||
+      shape_before_resource.error.primitive->name != "add" ||
+      shape_before_resource.error.location.line != std::size_t{1U} ||
+      shape_before_resource.error.location.column != std::size_t{5U}) {
+    if (shape_before_resource.ok) {
+      bennu::destroy_value(shape_before_resource.value);
+    }
+    return 34;
+  }
+
+  constexpr std::string_view resource_before_domain_source =
+      "add[(9223372036854775807) (1)]\n";
+  bennu::ValueResult resource_before_domain = bennu::evaluate_expression(
+      resource_before_domain_source, fail_third);
+  if (resource_before_domain.ok ||
+      !is_resource_error(
+          resource_before_domain.error,
+          bennu::ResourceErrorReason::allocation_unavailable) ||
+      resource_before_domain.error.resource->requested_elements !=
+          std::size_t{1U} ||
+      resource_before_domain.error.resource->requested_bytes !=
+          std::size_t{8U} ||
+      resource_before_domain.error.domain.has_value() ||
+      !resource_before_domain.error.primitive.has_value() ||
+      resource_before_domain.error.primitive->name != "add" ||
+      resource_before_domain.error.location.line != std::size_t{1U} ||
+      resource_before_domain.error.location.column != std::size_t{1U}) {
+    if (resource_before_domain.ok) {
+      bennu::destroy_value(resource_before_domain.value);
+    }
+    return 35;
+  }
+
   bennu::ValueResult overflow = bennu::evaluate_expression(
       "iota[2305843009213693952]", exact_profile);
   if (overflow.ok ||
@@ -626,24 +941,44 @@ int main(int argument_count, char **arguments) {
 
   if (!emit_and_build(profile_source, exact_profile, arguments[4], arguments[5],
                       arguments[1]) ||
-      !emit_and_build(profile_source, one_past_profile, arguments[12],
-                      arguments[13], arguments[1]) ||
-      !emit_and_build("iota[2]\n", fail_first, arguments[6], arguments[7],
-                      arguments[1]) ||
-      !emit_and_build("inc[(1 2)]\n", fail_second, arguments[8], arguments[9],
-                      arguments[1]) ||
-      !emit_and_build("iota[2]\niota[2]\n", fail_second, arguments[10],
-                      arguments[11], arguments[1]) ||
-      !emit_and_build(vector_refusal_source, vector_refusal_configuration,
-                      arguments[16], arguments[17], arguments[1]) ||
-      !emit_and_build(live_refusal_source, live_refusal_configuration,
-                      arguments[19], arguments[20], arguments[1])) {
+      !emit_probe_and_build(profile_source, one_past_profile, arguments[12],
+                            arguments[13], arguments[1],
+                            work_refusal_assertions) ||
+      !emit_probe_and_build("iota[2]\n", fail_first, arguments[6], arguments[7],
+                            arguments[1], allocation_iota_assertions) ||
+      !emit_probe_and_build("inc[(1 2)]\n", fail_second, arguments[8],
+                            arguments[9], arguments[1],
+                            allocation_lifted_assertions) ||
+      !emit_probe_and_build("iota[2]\niota[2]\n", fail_second, arguments[10],
+                            arguments[11], arguments[1],
+                            allocation_late_assertions) ||
+      !emit_probe_and_build(vector_refusal_source,
+                            vector_refusal_configuration, arguments[16],
+                            arguments[17], arguments[1],
+                            vector_refusal_assertions) ||
+      !emit_probe_and_build(live_refusal_source, live_refusal_configuration,
+                            arguments[19], arguments[20], arguments[1],
+                            live_refusal_assertions) ||
+      !emit_probe_and_build("iota[2305843009213693952]\n", fail_first,
+                            arguments[23], arguments[24], arguments[1],
+                            size_assertions) ||
+      !emit_probe_and_build(shape_before_resource_source, fail_third,
+                            arguments[25], arguments[26], arguments[1],
+                            shape_before_resource_assertions) ||
+      !emit_probe_and_build(resource_before_domain_source, fail_third,
+                            arguments[27], arguments[28], arguments[1],
+                            resource_before_domain_assertions)) {
     return 27;
   }
   const std::optional<std::string> context_probe = generated_runtime_probe();
   if (!context_probe.has_value() ||
       !write_file(arguments[15], *context_probe)) {
     return 28;
+  }
+  const bennu::NativeBuildResult context_probe_native = bennu::build_native(
+      bennu::NativeBuildRequest{*context_probe, arguments[22], arguments[1], ""});
+  if (!context_probe_native.ok) {
+    return 33;
   }
   return 0;
 }

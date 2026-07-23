@@ -2830,7 +2830,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   std::string generated;
   append_rewrite_c_runtime(generated);
   append_literal_arrays(generated, lowering);
-  generated += "int main(void) {\n";
+  generated += "static int bennu_execute(BennuResources *snapshot) {\n";
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
                "  (void)bennu_apply;\n"
@@ -2849,7 +2849,8 @@ CEmissionResult emit_rewrite_c_source_impl(
   if (!lowering.nodes.empty()) {
     generated += "    goto bennu_failure;\n";
   } else {
-    generated += "    (void)bennu_report_failure(&bennu_resources);\n"
+    generated += "    if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
+                 "    (void)bennu_report_failure(&bennu_resources);\n"
                  "    return 1;\n";
   }
   generated += "  }\n";
@@ -2879,7 +2880,8 @@ CEmissionResult emit_rewrite_c_source_impl(
         "    }\n"
         "  }\n";
   }
-  generated += "  return fflush(stdout) == 0 ? 0 : 1;\n";
+  generated += "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
+               "  return fflush(stdout) == 0 ? 0 : 1;\n";
   if (!lowering.nodes.empty()) {
     generated += "bennu_failure:\n"
                  "  { size_t bennu_index = 0U;\n"
@@ -2889,6 +2891,7 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
                  "    }\n"
                  "  }\n"
+                 "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
                  "  (void)bennu_report_failure(&bennu_resources);\n"
                  "  return 1;\n";
     if (!lowering.roots.empty()) {
@@ -2901,11 +2904,15 @@ CEmissionResult emit_rewrite_c_source_impl(
           "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
           "    }\n"
           "  }\n"
+          "  if (snapshot != NULL) { *snapshot = bennu_resources; }\n"
           "  (void)fputs(\"OutputError: stdout failure\\n\", stderr);\n"
           "  return 1;\n";
     }
   }
-  generated += "}\n";
+  generated += "}\n\n"
+               "int main(void) {\n"
+               "  return bennu_execute(NULL);\n"
+               "}\n";
   return CEmissionResult{
       true, std::move(generated),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};

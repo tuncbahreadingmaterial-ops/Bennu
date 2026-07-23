@@ -46,6 +46,25 @@ set(late_native
 set(context_probe_c "${work_directory}/generated-runtime-context-probe.c")
 set(context_probe_emitted
   "${work_directory}/generated-runtime-context-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(context_probe_native
+  "${work_directory}/generated-runtime-context-probe-native${BENNU_EXECUTABLE_SUFFIX}")
+set(size_probe_c "${work_directory}/generated-runtime-size-probe.c")
+set(size_probe_emitted
+  "${work_directory}/generated-runtime-size-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(size_probe_native
+  "${work_directory}/generated-runtime-size-probe-native${BENNU_EXECUTABLE_SUFFIX}")
+set(shape_resource_probe_c
+  "${work_directory}/generated-runtime-shape-before-resource-probe.c")
+set(shape_resource_probe_emitted
+  "${work_directory}/generated-runtime-shape-before-resource-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(shape_resource_probe_native
+  "${work_directory}/generated-runtime-shape-before-resource-probe-native${BENNU_EXECUTABLE_SUFFIX}")
+set(resource_domain_probe_c
+  "${work_directory}/generated-runtime-resource-before-domain-probe.c")
+set(resource_domain_probe_emitted
+  "${work_directory}/generated-runtime-resource-before-domain-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(resource_domain_probe_native
+  "${work_directory}/generated-runtime-resource-before-domain-probe-native${BENNU_EXECUTABLE_SUFFIX}")
 set(vector_refusal_c "${work_directory}/profile-vector-refusal.c")
 set(vector_refusal_emitted
   "${work_directory}/profile-vector-refusal-emitted${BENNU_EXECUTABLE_SUFFIX}")
@@ -74,6 +93,10 @@ execute_process(
           "${vector_refusal_expected}"
           "${live_refusal_c}" "${live_refusal_native}"
           "${live_refusal_expected}"
+          "${context_probe_native}"
+          "${size_probe_c}" "${size_probe_native}"
+          "${shape_resource_probe_c}" "${shape_resource_probe_native}"
+          "${resource_domain_probe_c}" "${resource_domain_probe_native}"
   RESULT_VARIABLE fixture_exit OUTPUT_VARIABLE fixture_stdout
   ERROR_VARIABLE fixture_stderr)
 if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
@@ -84,7 +107,8 @@ if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
     "stderr: [${fixture_stderr}]")
 endif()
 
-foreach(c_file profile refusal iota lifted late context_probe vector_refusal
+foreach(c_file profile refusal iota lifted late context_probe size_probe
+               shape_resource_probe resource_domain_probe vector_refusal
                live_refusal)
   set(source "${${c_file}_c}")
   set(executable "${${c_file}_emitted}")
@@ -167,8 +191,8 @@ function(check_generated_context_probe executable)
   string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
   string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
   string(CONCAT expected_stderr
-    "bennu-source:2:1: DomainError: inc failed: integer_overflow\n"
-    "bennu-source:2:1: DomainError: inc failed: integer_overflow\n")
+    "bennu-source:2:1: DomainError: add failed: integer_overflow at result index 1\n"
+    "bennu-source:2:1: DomainError: add failed: integer_overflow at result index 1\n")
   if(NOT "${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
      NOT run_stderr STREQUAL expected_stderr)
     message(FATAL_ERROR
@@ -186,13 +210,14 @@ function(check_profile_refusal name executable invocation)
     set(expected_file "${live_refusal_expected}")
   endif()
   file(READ "${expected_file}" expected_stderr)
+  set(expected_stderr "${expected_stderr}${expected_stderr}")
   execute_process(
     COMMAND "${executable}"
     RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
     ERROR_VARIABLE run_stderr)
   string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
   string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
-  if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
+  if(NOT "${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
      NOT run_stderr STREQUAL expected_stderr)
     message(FATAL_ERROR
       "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} refusal mismatch\n"
@@ -202,6 +227,7 @@ function(check_profile_refusal name executable invocation)
 endfunction()
 
 function(check_allocation_failure name executable expected_stderr)
+  set(expected_stderr "${expected_stderr}${expected_stderr}")
   foreach(invocation RANGE 1 2)
     execute_process(
       COMMAND "${executable}"
@@ -209,7 +235,7 @@ function(check_allocation_failure name executable expected_stderr)
       ERROR_VARIABLE run_stderr)
     string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
     string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
-    if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
+    if(NOT "${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
        NOT run_stderr STREQUAL expected_stderr)
       message(FATAL_ERROR
         "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} was not atomic\n"
@@ -240,6 +266,23 @@ foreach(profile_context_iteration RANGE 1 2)
                         "${profile_context_iteration}")
 endforeach()
 check_generated_context_probe("${context_probe_emitted}")
+check_generated_context_probe("${context_probe_native}")
+check_allocation_failure(size-probe-emitted "${size_probe_emitted}"
+  "bennu-source:1:1: ResourceError: iota resource request failed: size_overflow\n")
+check_allocation_failure(size-probe-native "${size_probe_native}"
+  "bennu-source:1:1: ResourceError: iota resource request failed: size_overflow\n")
+check_allocation_failure(shape-before-resource-emitted
+  "${shape_resource_probe_emitted}"
+  "bennu-source:1:5: ShapeMismatch: add argument 1 expected shape [2], got [3]\n")
+check_allocation_failure(shape-before-resource-native
+  "${shape_resource_probe_native}"
+  "bennu-source:1:5: ShapeMismatch: add argument 1 expected shape [2], got [3]\n")
+check_allocation_failure(resource-before-domain-emitted
+  "${resource_domain_probe_emitted}"
+  "bennu-source:1:1: ResourceError: add resource request failed: allocation_unavailable\n")
+check_allocation_failure(resource-before-domain-native
+  "${resource_domain_probe_native}"
+  "bennu-source:1:1: ResourceError: add resource request failed: allocation_unavailable\n")
 foreach(path iota lifted late)
   if(path STREQUAL "iota")
     set(allocation_expected

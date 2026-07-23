@@ -210,6 +210,12 @@ check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
 check_public_dynamic_failure(resource_child_before_shape
   "add[iota[2305843009213693952] (1 2)]" 1 5
   "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(domain_child_before_parent_shape
+  "add[add[iota[3] (9223372036854775807 9223372036854775807 9223372036854775807)] (1 2)]"
+  1 5 "DomainError" "add failed: integer_overflow at result index 0")
+check_public_dynamic_failure(shape_before_same_call_domain
+  "add[iota[3] (9223372036854775807 9223372036854775807)]"
+  1 5 "ShapeMismatch" "add argument 1 expected shape [2], got [3]")
 check_public_failure(static_shape_before_nested_domain
   "add[inc[(0 9223372036854775807)] (0)]" 1 34
   "ShapeMismatch" "add argument 2 expected shape [2], got [1]")
