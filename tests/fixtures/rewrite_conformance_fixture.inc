@@ -143,6 +143,12 @@ const RewriteValidFixture rewrite_valid_fixtures[] = {
    R"snapshot(roots=[2];nodes=[{kind=scalar_literal,span=[9:1:9,10:1:10),element_type=integer,boolean=0,integer=5,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[5:1:5,11:1:11),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,12:1:12),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=1}];arguments=[0,1];argument_spans=[[9:1:9,10:1:10),[5:1:5,11:1:11)];calls=[{syntax=bracketed,name=inc,name_span=[5:1:5,8:1:8),opening_delimiter_span=[8:1:8,9:1:9),closing_delimiter_span=[10:1:10,11:1:11),prefix_separator_span=[9:1:9,9:1:9),span=[5:1:5,11:1:11),first_argument=0,argument_count=1,primitive=none},{syntax=bracketed,name=inc,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,5:1:5),closing_delimiter_span=[11:1:11,12:1:12),prefix_separator_span=[5:1:5,5:1:5),span=[1:1:1,12:1:12),first_argument=1,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot"},
   {"unary bracket vector operand", "inc[(1 2 3)]", true,
    R"snapshot(roots=[1];nodes=[{kind=vector_literal,span=[5:1:5,12:1:12),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=3,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,13:1:13),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[0];argument_spans=[[5:1:5,12:1:12)];calls=[{syntax=bracketed,name=inc,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,5:1:5),closing_delimiter_span=[12:1:12,13:1:13),prefix_separator_span=[5:1:5,5:1:5),span=[1:1:1,13:1:13),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[1,2,3];double_elements=[];vector_element_spans=[[6:1:6,7:1:7),[8:1:8,9:1:9),[10:1:10,11:1:11)])snapshot"},
+  {"bare unresolved name", "true0", true,
+   R"snapshot(roots=[0];nodes=[{kind=unresolved_name,span=[1:1:1,6:1:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot"},
+  {"bare unresolved name before next root", "inc\n5", true,
+   R"snapshot(roots=[0,1];nodes=[{kind=unresolved_name,span=[1:1:1,4:1:4),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[5:2:1,6:2:2),element_type=integer,boolean=0,integer=5,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot"},
+  {"bare unresolved identifier", "inc5", true,
+   R"snapshot(roots=[0];nodes=[{kind=unresolved_name,span=[1:1:1,5:1:5),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot"},
 };
 
 const RewriteInvalidFixture rewrite_invalid_fixtures[] = {
@@ -182,16 +188,16 @@ const RewriteInvalidFixture rewrite_invalid_fixtures[] = {
   {"missing vector close", "(1 2", false, RewriteParseError::missing_delimiter, {{5U, 1U, 5U}, {5U, 1U, 5U}}},
   {"bare CR", "true\rfalse", false, RewriteParseError::invalid_byte, {{5U, 1U, 5U}, {6U, 1U, 6U}}},
   {"uppercase Bool literal", "TRUE", false, RewriteParseError::invalid_byte, {{1U, 1U, 1U}, {5U, 1U, 5U}}},
-  {"Bool word with suffix", "true0", false, RewriteParseError::primitive_requires_application, {{1U, 1U, 1U}, {6U, 1U, 6U}}},
+
   {"positive infinity with plus", "+inf", false, RewriteParseError::malformed_literal, {{1U, 1U, 1U}, {5U, 1U, 5U}}},
   {"negative NaN", "-nan", false, RewriteParseError::malformed_literal, {{1U, 1U, 1U}, {5U, 1U, 5U}}},
   {"capitalized infinity", "Inf", false, RewriteParseError::invalid_byte, {{1U, 1U, 1U}, {4U, 1U, 4U}}},
   {"capitalized NaN", "NAN", false, RewriteParseError::invalid_byte, {{1U, 1U, 1U}, {4U, 1U, 4U}}},
   {"NaN payload", "nan(payload)", false, RewriteParseError::trailing_input, {{4U, 1U, 4U}, {5U, 1U, 5U}}},
-  {"prefix line terminator", "inc\n5", false, RewriteParseError::primitive_requires_application, {{1U, 1U, 1U}, {4U, 1U, 4U}}},
+
   {"typed empty internal space", "Int( )", false, RewriteParseError::invalid_vector_element, {{1U, 1U, 1U}, {4U, 1U, 4U}}},
   {"literal trailing input", "true false", false, RewriteParseError::trailing_input, {{6U, 1U, 6U}, {11U, 1U, 11U}}},
-  {"primitive without application", "inc5", false, RewriteParseError::primitive_requires_application, {{1U, 1U, 1U}, {5U, 1U, 5U}}},
+
   {"missing prefix operand", "inc ", false, RewriteParseError::expected_expression, {{5U, 1U, 5U}, {5U, 1U, 5U}}},
   {"invalid non-ASCII byte", "\xc3\xa9", false, RewriteParseError::invalid_byte, {{1U, 1U, 1U}, {2U, 1U, 2U}}},
 };

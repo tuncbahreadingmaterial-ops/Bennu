@@ -54,6 +54,7 @@ enum class PrimitiveTableError {
   empty_table,
   duplicate_id,
   duplicate_name,
+  reserved_name,
   missing_signature,
   duplicate_signature,
   zero_arity,

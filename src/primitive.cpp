@@ -300,6 +300,10 @@ validate_primitive_table(std::span<const PrimitiveDescriptor> descriptors) {
   for (std::size_t descriptor_index = 0;
        descriptor_index < descriptors.size(); ++descriptor_index) {
     const PrimitiveDescriptor &descriptor = descriptors[descriptor_index];
+    if (descriptor.name == "parameters") {
+      return invalid_table(PrimitiveTableError::reserved_name,
+                           descriptor_index, 0, descriptor_index, 0);
+    }
     for (std::size_t previous_index = 0; previous_index < descriptor_index;
          ++previous_index) {
       if (descriptors[previous_index].id == descriptor.id) {
@@ -872,6 +876,12 @@ TEST_CASE("primitive descriptor validation rejects every invalid fixture class")
   }};
   check_invalid(duplicate_names, PrimitiveTableError::duplicate_name);
 
+  const std::array<PrimitiveDescriptor, 1> reserved_name{{
+      descriptor(PrimitiveId::inc, "parameters", int_signatures.data(), 1),
+  }};
+  // Covered independently by PARG-001-RESERVED-PRIMITIVE-DESCRIPTOR.
+  check_invalid(reserved_name, PrimitiveTableError::reserved_name);
+
   const std::array<PrimitiveDescriptor, 1> missing_signatures{{
       descriptor(PrimitiveId::inc, "inc", nullptr, 0),
   }};
@@ -905,6 +915,22 @@ TEST_CASE("primitive descriptor validation rejects every invalid fixture class")
   check_invalid(ambiguous, PrimitiveTableError::equal_cost_ambiguity);
 
   check_invalid({}, PrimitiveTableError::empty_table);
+}
+
+TEST_CASE("PARG-001-RESERVED-PRIMITIVE-DESCRIPTOR") {
+  const std::array<ValueType, 1> parameters{{scalar_int}};
+  const std::array<PrimitiveSignature, 1> signatures{{PrimitiveSignature{
+      parameters.data(), parameters.size(), scalar_int,
+      PrimitiveImplementation::inc_integer}}};
+  const std::array<PrimitiveDescriptor, 1> descriptors{{PrimitiveDescriptor{
+      PrimitiveId::inc, "parameters", LiftingMode::elementwise,
+      signatures.data(), signatures.size()}}};
+
+  const PrimitiveTableValidationResult result =
+      validate_primitive_table(descriptors);
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.error == PrimitiveTableError::reserved_name);
+  CHECK(result.descriptor_index == 0U);
 }
 
 TEST_CASE("overload selection is Cartesian deterministic and exact-first") {

@@ -115,7 +115,7 @@ inc 5
 > > 6
 > > 6
 > ]=])
-  set(expected_stderr [=[<repl>:1:1: SyntaxError: primitive name requires bracketed or unary prefix application
+  set(expected_stderr [=[<repl>:1:1: UnknownPrimitive: unknown primitive 'wat'
 <repl>:1:1: ArityError: add received 1 argument(s); accepted arity 2
 <repl>:1:7: TypeError: add arguments do not match an accepted signature; first unsupported argument is 2
 <repl>:1:1: DomainError: inc failed: integer_overflow

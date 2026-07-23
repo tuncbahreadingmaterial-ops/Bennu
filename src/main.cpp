@@ -43,12 +43,16 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
     return "SyntaxError";
   case bennu::ErrorKind::unknown_name:
     return "UnknownPrimitive";
+  case bennu::ErrorKind::invalid_parameter_declaration:
+    return "ParameterError";
   case bennu::ErrorKind::type_mismatch:
     return "TypeError";
   case bennu::ErrorKind::empty_expression:
     return "EmptyExpression";
   case bennu::ErrorKind::arity_error:
     return "ArityError";
+  case bennu::ErrorKind::argument_error:
+    return "ArgumentError";
   case bennu::ErrorKind::shape_mismatch:
     return "ShapeMismatch";
   case bennu::ErrorKind::invalid_execution_profile:
