@@ -5,10 +5,41 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
 namespace bennu {
+
+EvaluationResources::EvaluationResources(
+    ExecutionProfile profile_value, ResourceLimits limits_value,
+    AllocationFailureInjection allocation_failure_value,
+    std::size_t live_evaluation_bytes_value, std::size_t work_units_value,
+    std::size_t reservation_ordinal_value)
+    : profile(profile_value), limits(std::move(limits_value)),
+      allocation_failure(allocation_failure_value),
+      live_evaluation_accounting(
+          std::make_shared<std::size_t>(live_evaluation_bytes_value)),
+      live_evaluation_bytes(*live_evaluation_accounting),
+      work_units(work_units_value),
+      reservation_ordinal(reservation_ordinal_value) {}
+
+EvaluationResources::EvaluationResources(const EvaluationResources &other)
+    : profile(other.profile), limits(other.limits),
+      allocation_failure(other.allocation_failure),
+      live_evaluation_accounting(other.live_evaluation_accounting),
+      live_evaluation_bytes(*live_evaluation_accounting),
+      work_units(other.work_units),
+      reservation_ordinal(other.reservation_ordinal) {}
+
+EvaluationResources::EvaluationResources(EvaluationResources &&other) noexcept
+    : profile(other.profile), limits(other.limits),
+      allocation_failure(other.allocation_failure),
+      live_evaluation_accounting(other.live_evaluation_accounting),
+      live_evaluation_bytes(*live_evaluation_accounting),
+      work_units(other.work_units),
+      reservation_ordinal(other.reservation_ordinal) {}
 
 namespace {
 
@@ -325,6 +356,15 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
                                   ValueInvariant::none, no_error()};
   }
 
+  if (resources.reservation_ordinal ==
+      std::numeric_limits<std::size_t>::max()) {
+    return allocation_failure(
+        std::move(candidate),
+        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+                              location, producer_name, element_count,
+                              byte_count, std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt));
+  }
   const std::size_t ordinal = resources.reservation_ordinal;
   ++resources.reservation_ordinal;
   if (resources.allocation_failure.fail_at_reservation_ordinal.has_value() &&
@@ -366,6 +406,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
   }
   candidate.vector.canonical_bytes = byte_count;
   candidate.vector.accounting_active = true;
+  candidate.vector.accounting_owner = resources.live_evaluation_accounting;
   commit_admission(resources, admission);
   return VectorAllocationResult{true, std::move(candidate), ValueInvariant::none,
                                 no_error()};
@@ -441,6 +482,17 @@ WorkspaceReservationResult reserve_workspace(
     return WorkspaceReservationResult{true, empty_workspace(), no_error()};
   }
 
+  if (resources.reservation_ordinal ==
+      std::numeric_limits<std::size_t>::max()) {
+    return WorkspaceReservationResult{
+        false,
+        empty_workspace(),
+        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+                              location, producer_name, std::nullopt, byte_count,
+                              std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt),
+    };
+  }
   const std::size_t ordinal = resources.reservation_ordinal;
   ++resources.reservation_ordinal;
   if (resources.allocation_failure.fail_at_reservation_ordinal.has_value() &&
@@ -545,6 +597,17 @@ TupleReservationResult reserve_tuple_table(
     return TupleReservationResult{true, std::move(reservation), no_error()};
   }
 
+  if (resources.reservation_ordinal ==
+      std::numeric_limits<std::size_t>::max()) {
+    return TupleReservationResult{
+        false,
+        TupleTableReservation{},
+        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+                              location, producer_name, element_count,
+                              byte_count, std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt),
+    };
+  }
   const std::size_t ordinal = resources.reservation_ordinal;
   ++resources.reservation_ordinal;
   if (resources.allocation_failure.fail_at_reservation_ordinal.has_value() &&
@@ -575,12 +638,22 @@ TupleReservationResult reserve_tuple_table(
   reservation.element_count = element_count;
   reservation.canonical_bytes = byte_count;
   reservation.accounting_active = true;
+  reservation.accounting_owner = resources.live_evaluation_accounting;
   return TupleReservationResult{true, std::move(reservation), no_error()};
 }
 
 TupleConstructionResult make_tuple_value(
     EvaluationResources &resources, std::span<Value> elements,
     SourceLocation location, std::string_view producer_name) {
+  HostAllocationFailureInjection allocation_failure{std::nullopt, 0U};
+  return make_tuple_value(resources, elements, location, producer_name,
+                          allocation_failure);
+}
+
+TupleConstructionResult make_tuple_value(
+    EvaluationResources &resources, std::span<Value> elements,
+    SourceLocation location, std::string_view producer_name,
+    HostAllocationFailureInjection &allocation_failure) {
   std::optional<Error> configuration_error =
       validate_profile_configuration(resources, location, producer_name);
   if (configuration_error.has_value()) {
@@ -606,8 +679,22 @@ TupleConstructionResult make_tuple_value(
   std::size_t payload_count = 0U;
   std::size_t reservation_count = 0U;
   for (const Value &element : elements) {
-    const ValueValidationResult validation = validate_value(element);
+    const ValueValidationResult validation =
+        validate_value(element, allocation_failure);
     if (!validation.ok) {
+      if (validation.resource_error != HostResourceErrorReason::none) {
+        const ResourceErrorReason reason =
+            validation.resource_error == HostResourceErrorReason::size_overflow
+                ? ResourceErrorReason::size_overflow
+                : ResourceErrorReason::allocation_unavailable;
+        Error error = make_resource_failure(
+            resources, reason, location, producer_name, elements.size(),
+            std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+            std::nullopt);
+        return TupleConstructionResult{false, make_int_value(0),
+                                       ValueInvariant::none,
+                                       std::move(error)};
+      }
       return TupleConstructionResult{false, make_int_value(0),
                                      validation.invariant, no_error()};
     }
@@ -639,6 +726,38 @@ TupleConstructionResult make_tuple_value(
     reservation_count += element.tuple.reservations.size() + 1U;
   }
 
+  const std::size_t tuple_ordinal = resources.reservation_ordinal;
+  TupleReservationResult reserved = reserve_tuple_table(
+      resources, elements.size(), location, producer_name);
+  if (!reserved.ok) {
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none,
+                                   std::move(reserved.error)};
+  }
+
+  const auto rollback_reservation = [&resources, &reserved]() {
+    TupleTableReservation &reservation = reserved.reservation;
+    if (reservation.accounting_active &&
+        reservation.accounting_owner == resources.live_evaluation_accounting &&
+        reservation.canonical_bytes <= resources.live_evaluation_bytes) {
+      resources.live_evaluation_bytes -= reservation.canonical_bytes;
+    }
+    reservation.accounting_active = false;
+    reservation.accounting_owner = nullptr;
+    reservation.storage.reset();
+  };
+  const auto metadata_failure = [&]() {
+    rollback_reservation();
+    Error error = make_resource_failure(
+        resources, ResourceErrorReason::allocation_unavailable, location,
+        producer_name, elements.size(), reserved.reservation.canonical_bytes,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        elements.empty() ? std::nullopt
+                         : std::optional<std::size_t>{tuple_ordinal});
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none, std::move(error)};
+  };
+
   Value result{ContainerKind::tuple,
                ScalarValue{ScalarType::boolean, false, 0, 0.0},
                VectorValue{ScalarType::boolean,
@@ -648,19 +767,31 @@ TupleConstructionResult make_tuple_value(
                            0U,
                            {nullptr, &std::free},
                            0U}};
-  result.tuple.nodes.reserve(node_count);
-  result.tuple.child_indexes.reserve(edge_count);
-  result.tuple.vector_payloads.reserve(payload_count);
-  result.tuple.reservations.reserve(reservation_count);
   std::vector<std::size_t> roots;
-  roots.reserve(elements.size());
-
-  TupleReservationResult reserved = reserve_tuple_table(
-      resources, elements.size(), location, producer_name);
-  if (!reserved.ok) {
-    return TupleConstructionResult{false, make_int_value(0),
-                                   ValueInvariant::none,
-                                   std::move(reserved.error)};
+  if (node_count != 0U || edge_count != 0U || payload_count != 0U ||
+      reservation_count != 0U || !elements.empty()) {
+    const std::size_t host_ordinal = allocation_failure.allocation_ordinal;
+    if (host_ordinal == std::numeric_limits<std::size_t>::max() ||
+        (allocation_failure.fail_at_allocation_ordinal.has_value() &&
+         host_ordinal == *allocation_failure.fail_at_allocation_ordinal)) {
+      return metadata_failure();
+    }
+    ++allocation_failure.allocation_ordinal;
+#if defined(__cpp_exceptions)
+    try {
+#endif
+      result.tuple.nodes.reserve(node_count);
+      result.tuple.child_indexes.reserve(edge_count);
+      result.tuple.vector_payloads.reserve(payload_count);
+      result.tuple.reservations.reserve(reservation_count);
+      roots.reserve(elements.size());
+#if defined(__cpp_exceptions)
+    } catch (const std::bad_alloc &) {
+      return metadata_failure();
+    } catch (const std::length_error &) {
+      return metadata_failure();
+    }
+#endif
   }
 
   for (Value &element : elements) {
@@ -726,9 +857,29 @@ TupleConstructionResult make_tuple_value(
                                  no_error()};
 }
 
-void release_vector_reservation(EvaluationResources &resources, Value &value) {
+ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
+                                              Value &value) {
+  HostAllocationFailureInjection allocation_failure{std::nullopt, 0U};
+  return release_vector_reservation(resources, value, allocation_failure);
+}
+
+ValueReleaseResult release_vector_reservation(
+    EvaluationResources &resources, Value &value,
+    HostAllocationFailureInjection &allocation_failure) {
   if (value.container != ContainerKind::vector) {
-    return;
+    return ValueReleaseResult{false, ValueInvariant::none};
+  }
+  const ValueValidationResult validation =
+      validate_value(value, allocation_failure);
+  if (!validation.ok) {
+    ValueReleaseResult result{false, validation.invariant};
+    result.resource_error = validation.resource_error;
+    return result;
+  }
+  if (value.vector.accounting_active &&
+      value.vector.accounting_owner != resources.live_evaluation_accounting) {
+    return ValueReleaseResult{false, ValueInvariant::none,
+                              ValueReleaseError::resource_context_mismatch};
   }
   std::size_t element_count = 0;
   switch (value.vector.element_type) {
@@ -748,13 +899,16 @@ void release_vector_reservation(EvaluationResources &resources, Value &value) {
       element_count <= std::numeric_limits<std::size_t>::max() / *width) {
     const std::size_t bytes = element_count * *width;
     if (value.vector.accounting_active &&
+        value.vector.accounting_owner == resources.live_evaluation_accounting &&
         bytes == value.vector.canonical_bytes &&
         bytes <= resources.live_evaluation_bytes) {
       resources.live_evaluation_bytes -= bytes;
     }
   }
   value.vector.accounting_active = false;
+  value.vector.accounting_owner = nullptr;
   value = make_int_value(0);
+  return ValueReleaseResult{true, ValueInvariant::none};
 }
 
 void release_workspace(EvaluationResources &resources,
@@ -768,14 +922,54 @@ void release_workspace(EvaluationResources &resources,
 
 ValueReleaseResult release_value_reservations(EvaluationResources &resources,
                                               Value &value) {
-  const ValueValidationResult validation = validate_value(value);
+  HostAllocationFailureInjection allocation_failure{std::nullopt, 0U};
+  return release_value_reservations(resources, value, allocation_failure);
+}
+
+ValueReleaseResult release_value_reservations(
+    EvaluationResources &resources, Value &value,
+    HostAllocationFailureInjection &allocation_failure) {
+  const ValueValidationResult validation =
+      validate_value(value, allocation_failure);
   if (!validation.ok) {
-    return ValueReleaseResult{false, validation.invariant};
+    ValueReleaseResult result{false, validation.invariant};
+    result.resource_error = validation.resource_error;
+    return result;
+  }
+  const std::shared_ptr<std::size_t> &expected_owner =
+      resources.live_evaluation_accounting;
+  if (value.container == ContainerKind::vector &&
+      value.vector.accounting_active &&
+      value.vector.accounting_owner != expected_owner) {
+    return ValueReleaseResult{false, ValueInvariant::none,
+                              ValueReleaseError::resource_context_mismatch};
+  }
+  if (value.container == ContainerKind::tuple) {
+    for (const VectorValue &payload : value.tuple.vector_payloads) {
+      if (payload.accounting_active &&
+          payload.accounting_owner != expected_owner) {
+        return ValueReleaseResult{false, ValueInvariant::none,
+                                  ValueReleaseError::resource_context_mismatch};
+      }
+    }
+    for (const TupleTableReservation &reservation :
+         value.tuple.reservations) {
+      if (reservation.accounting_active &&
+          reservation.canonical_bytes != 0U &&
+          reservation.accounting_owner != expected_owner) {
+        return ValueReleaseResult{false, ValueInvariant::none,
+                                  ValueReleaseError::resource_context_mismatch};
+      }
+    }
+    if (value.tuple.root_reservation.accounting_active &&
+        value.tuple.root_reservation.canonical_bytes != 0U &&
+        value.tuple.root_reservation.accounting_owner != expected_owner) {
+      return ValueReleaseResult{false, ValueInvariant::none,
+                                ValueReleaseError::resource_context_mismatch};
+    }
   }
   if (value.container == ContainerKind::vector) {
-    release_vector_reservation(resources, value);
-    (void)destroy_value(value);
-    return ValueReleaseResult{true, ValueInvariant::none};
+    return release_vector_reservation(resources, value);
   }
   if (value.container == ContainerKind::scalar) {
     (void)destroy_value(value);
@@ -833,6 +1027,7 @@ ValueReleaseResult release_value_reservations(EvaluationResources &resources,
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
       }
       reservation.accounting_active = false;
+      reservation.accounting_owner = nullptr;
     } else if (container == ContainerKind::vector) {
       VectorValue &vector =
           value.tuple.vector_payloads[node->vector_payload_index];
@@ -857,6 +1052,7 @@ ValueReleaseResult release_value_reservations(EvaluationResources &resources,
           resources.live_evaluation_bytes -= bytes;
         }
         vector.accounting_active = false;
+        vector.accounting_owner = nullptr;
       }
     }
 
@@ -1414,9 +1610,15 @@ TEST_CASE("vector release refunds live bytes but not work") {
   malformed.vector.integer_count =
       std::numeric_limits<std::size_t>::max();
   resources.live_evaluation_bytes = 7;
-  release_vector_reservation(resources, malformed);
+  const ValueReleaseResult malformed_release =
+      release_vector_reservation(resources, malformed);
+  CHECK_FALSE(malformed_release.ok);
+  CHECK(malformed_release.invariant ==
+        ValueInvariant::inactive_scalar_field);
   CHECK(resources.live_evaluation_bytes == 7);
-  CHECK(malformed.container == ContainerKind::scalar);
+  CHECK(malformed.container == ContainerKind::vector);
+  CHECK(malformed.vector.integer_count ==
+        std::numeric_limits<std::size_t>::max());
 }
 
 TEST_CASE("trusted profile omits policy limits but retains mandatory safety") {

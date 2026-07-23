@@ -35,9 +35,20 @@ struct EvaluationResources {
   ExecutionProfile profile;
   ResourceLimits limits;
   AllocationFailureInjection allocation_failure;
-  std::size_t live_evaluation_bytes;
+  std::shared_ptr<std::size_t> live_evaluation_accounting;
+  std::size_t &live_evaluation_bytes;
   std::size_t work_units;
   std::size_t reservation_ordinal;
+
+  EvaluationResources(ExecutionProfile profile, ResourceLimits limits,
+                      AllocationFailureInjection allocation_failure,
+                      std::size_t live_evaluation_bytes,
+                      std::size_t work_units,
+                      std::size_t reservation_ordinal);
+  EvaluationResources(const EvaluationResources &other);
+  EvaluationResources(EvaluationResources &&other) noexcept;
+  EvaluationResources &operator=(const EvaluationResources &other) = delete;
+  EvaluationResources &operator=(EvaluationResources &&other) = delete;
 };
 
 using WorkspaceStorage =
@@ -79,9 +90,16 @@ struct TupleConstructionResult {
   Error error;
 };
 
+enum class ValueReleaseError {
+  none,
+  resource_context_mismatch,
+};
+
 struct ValueReleaseResult {
   bool ok;
   ValueInvariant invariant;
+  ValueReleaseError error{ValueReleaseError::none};
+  HostResourceErrorReason resource_error{HostResourceErrorReason::none};
 };
 
 EvaluationResources make_trusted_local_resources(
@@ -123,12 +141,22 @@ TupleReservationResult reserve_tuple_table(
 TupleConstructionResult make_tuple_value(
     EvaluationResources &resources, std::span<Value> elements,
     SourceLocation location, std::string_view producer_name);
-void release_vector_reservation(EvaluationResources &resources,
-                                Value &value);
+TupleConstructionResult make_tuple_value(
+    EvaluationResources &resources, std::span<Value> elements,
+    SourceLocation location, std::string_view producer_name,
+    HostAllocationFailureInjection &allocation_failure);
+ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
+                                              Value &value);
+ValueReleaseResult release_vector_reservation(
+    EvaluationResources &resources, Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 void release_workspace(EvaluationResources &resources,
                        WorkspaceReservation &reservation);
 ValueReleaseResult release_value_reservations(EvaluationResources &resources,
                                               Value &value);
+ValueReleaseResult release_value_reservations(
+    EvaluationResources &resources, Value &value,
+    HostAllocationFailureInjection &allocation_failure);
 
 } // namespace bennu
 
