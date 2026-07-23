@@ -2,6 +2,7 @@
 
 #include "doctest/doctest.h"
 
+#include <ostream>
 #include <utility>
 
 namespace bennu {

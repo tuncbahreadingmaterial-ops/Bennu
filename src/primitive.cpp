@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <ostream>
 #include <string>
 
 #if defined(__x86_64__) || defined(_M_X64)
