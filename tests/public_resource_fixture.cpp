@@ -513,11 +513,12 @@ static int bennu_probe_shape_context(void) {
 }
 
 int main(void) {
-  if (BENNU_PRIMITIVE_INC != 0 || BENNU_PRIMITIVE_ADD != 1 ||
-      BENNU_PRIMITIVE_EQUALS != 2 || BENNU_PRIMITIVE_NOT != 3 ||
-      BENNU_PRIMITIVE_IOTA != 4) {
-    return 2;
-  }
+  _Static_assert(BENNU_PRIMITIVE_NONE == -1, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_INC == 0, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_ADD == 1, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_EQUALS == 2, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_NOT == 3, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_IOTA == 4, "primitive id mismatch");
   {
     size_t iteration = 0U;
     for (iteration = 0U; iteration < 2U; ++iteration) {
