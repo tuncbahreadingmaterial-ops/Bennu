@@ -8,8 +8,13 @@ file(MAKE_DIRECTORY "${mutation_root}/tests")
 
 set(traceability_record "${BENNU_SOURCE_DIR}/tests/spec-traceability.tsv")
 set(traceability_validator "${BENNU_SOURCE_DIR}/tests/spec_traceability.cmake")
-file(COPY "${traceability_record}" "${traceability_validator}"
-     DESTINATION "${mutation_root}/tests")
+file(COPY "${traceability_record}" DESTINATION "${mutation_root}/tests")
+file(COPY "${BENNU_SOURCE_DIR}/tests/spec_traceability.cmake"
+  DESTINATION "${mutation_root}/tests")
+file(COPY "${BENNU_SOURCE_DIR}/tests/required_tuple_traceability.cmake"
+  DESTINATION "${mutation_root}/tests")
+file(COPY "${BENNU_SOURCE_DIR}/CMakeLists.txt"
+  DESTINATION "${mutation_root}")
 file(STRINGS "${traceability_record}" traceability_rows)
 foreach(row IN LISTS traceability_rows)
   if(row STREQUAL "" OR row MATCHES "^#")
@@ -58,6 +63,7 @@ file(WRITE "${contract}" "${contract_text}")
 
 execute_process(
   COMMAND "${CMAKE_COMMAND}" "-DBENNU_SOURCE_DIR=${mutation_root}"
+          "-DBENNU_BINARY_DIR=${BENNU_BINARY_DIR}"
           -P "${mutation_root}/tests/spec_traceability.cmake"
   RESULT_VARIABLE mutation_exit OUTPUT_VARIABLE mutation_stdout
   ERROR_VARIABLE mutation_stderr)

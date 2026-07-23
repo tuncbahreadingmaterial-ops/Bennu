@@ -127,6 +127,36 @@ const void *vector_storage_address(const VectorValue &vector) {
   return nullptr;
 }
 
+void observe_lifetime(const ResourceLifetimeObserver &observer,
+                      ResourceLifetimeEventKind kind,
+                      ResourceStorageKind storage_kind,
+                      std::optional<std::size_t> allocation_ordinal,
+                      const void *storage, std::size_t canonical_bytes) {
+  if (observer.record != nullptr) {
+    observer.record(observer.context,
+                    ResourceLifetimeEvent{kind, storage_kind,
+                                          allocation_ordinal, storage,
+                                          canonical_bytes});
+  }
+}
+
+void reset_vector_storage(VectorValue &vector) {
+  switch (vector.element_type) {
+  case ScalarType::boolean:
+    vector.booleans.reset();
+    vector.boolean_count = 0U;
+    break;
+  case ScalarType::integer:
+    vector.integers.reset();
+    vector.integer_count = 0U;
+    break;
+  case ScalarType::double_precision:
+    vector.doubles.reset();
+    vector.double_count = 0U;
+    break;
+  }
+}
+
 bool append_double(std::string &formatted, double value) {
   const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
   if ((bits & binary64_exponent_mask) == binary64_exponent_mask) {
@@ -272,6 +302,9 @@ ValueValidationResult validate_value(
            tuple.root_reservation.canonical_bytes == 0U &&
            !tuple.root_reservation.accounting_active &&
            tuple.root_reservation.accounting_owner == nullptr &&
+           !tuple.root_reservation.allocation_ordinal.has_value() &&
+           tuple.root_reservation.lifetime_observer.context == nullptr &&
+           tuple.root_reservation.lifetime_observer.record == nullptr &&
            tuple.first_child == 0U && tuple.child_count == 0U;
   };
   const auto vector_validation = [&invalid](const VectorValue &vector,
@@ -288,6 +321,9 @@ ValueValidationResult validate_value(
       if (payload.canonical_bytes != bytes ||
           (bytes == 0U && payload.accounting_active) ||
           (payload.accounting_active && payload.accounting_owner == nullptr) ||
+          (bytes != 0U && payload.accounting_active &&
+           !payload.allocation_ordinal.has_value()) ||
+          (bytes == 0U && payload.allocation_ordinal.has_value()) ||
           (!payload.accounting_active && payload.accounting_owner != nullptr)) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
                        node_index);
@@ -347,7 +383,10 @@ ValueValidationResult validate_value(
         value.vector.double_count != 0U ||
         value.vector.canonical_bytes != 0U ||
         value.vector.accounting_active ||
-        value.vector.accounting_owner != nullptr) {
+        value.vector.accounting_owner != nullptr ||
+        value.vector.allocation_ordinal.has_value() ||
+        value.vector.lifetime_observer.context != nullptr ||
+        value.vector.lifetime_observer.record != nullptr) {
       return invalid(ValueInvariant::inactive_vector_payload, 0U);
     }
     if (!tuple_fields_empty(value.tuple)) {
@@ -396,9 +435,25 @@ ValueValidationResult validate_value(
       value.vector.doubles.get() != nullptr ||
       value.vector.double_count != 0U || value.vector.canonical_bytes != 0U ||
       value.vector.accounting_active ||
-      value.vector.accounting_owner != nullptr) {
+      value.vector.accounting_owner != nullptr ||
+      value.vector.allocation_ordinal.has_value() ||
+      value.vector.lifetime_observer.context != nullptr ||
+      value.vector.lifetime_observer.record != nullptr) {
     return invalid(ValueInvariant::inactive_vector_payload,
                    value.tuple.root_index);
+  }
+
+  if (allocation_failure.max_container_elements.has_value()) {
+    const std::size_t maximum = *allocation_failure.max_container_elements;
+    if (node_count > maximum || value.tuple.child_indexes.size() > maximum ||
+        value.tuple.vector_payloads.size() > maximum ||
+        value.tuple.reservations.size() ==
+            std::numeric_limits<std::size_t>::max() ||
+        value.tuple.reservations.size() + 1U > maximum) {
+      ValueValidationResult result{false, ValueInvariant::none};
+      result.resource_error = HostResourceErrorReason::size_overflow;
+      return result;
+    }
   }
 
   const std::size_t allocation_ordinal = allocation_failure.allocation_ordinal;
@@ -608,6 +663,9 @@ ValueValidationResult validate_value(
         (expected_bytes != 0U && reservation.storage.get() == nullptr) ||
         (expected_bytes != 0U && reservation.accounting_active &&
          reservation.accounting_owner == nullptr) ||
+        (expected_bytes != 0U && reservation.accounting_active &&
+         !reservation.allocation_ordinal.has_value()) ||
+        (expected_bytes == 0U && reservation.allocation_ordinal.has_value()) ||
         (expected_bytes == 0U &&
          reservation.accounting_owner != nullptr) ||
         (!reservation.accounting_active &&
@@ -1075,21 +1133,53 @@ ValueDestructionResult destroy_value(
   }
 
   const auto release_vector_accounting = [](VectorValue &vector) {
+    const void *storage = vector_storage_address(vector);
     if (vector.accounting_active && vector.accounting_owner != nullptr &&
         vector.canonical_bytes <= *vector.accounting_owner) {
       *vector.accounting_owner -= vector.canonical_bytes;
+      observe_lifetime(vector.lifetime_observer,
+                       ResourceLifetimeEventKind::logical_release,
+                       ResourceStorageKind::vector_payload,
+                       vector.allocation_ordinal, storage,
+                       vector.canonical_bytes);
     }
     vector.accounting_active = false;
     vector.accounting_owner = nullptr;
+    if (storage != nullptr) {
+      observe_lifetime(vector.lifetime_observer,
+                       ResourceLifetimeEventKind::physical_release,
+                       ResourceStorageKind::vector_payload,
+                       vector.allocation_ordinal, storage,
+                       vector.canonical_bytes);
+      reset_vector_storage(vector);
+    }
+    vector.allocation_ordinal = std::nullopt;
+    vector.lifetime_observer = ResourceLifetimeObserver{};
   };
   const auto release_tuple_accounting = [](TupleTableReservation &reservation) {
+    const void *storage = reservation.storage.get();
     if (reservation.accounting_active &&
         reservation.accounting_owner != nullptr &&
         reservation.canonical_bytes <= *reservation.accounting_owner) {
       *reservation.accounting_owner -= reservation.canonical_bytes;
+      observe_lifetime(reservation.lifetime_observer,
+                       ResourceLifetimeEventKind::logical_release,
+                       ResourceStorageKind::tuple_table,
+                       reservation.allocation_ordinal, storage,
+                       reservation.canonical_bytes);
     }
     reservation.accounting_active = false;
     reservation.accounting_owner = nullptr;
+    if (storage != nullptr) {
+      observe_lifetime(reservation.lifetime_observer,
+                       ResourceLifetimeEventKind::physical_release,
+                       ResourceStorageKind::tuple_table,
+                       reservation.allocation_ordinal, storage,
+                       reservation.canonical_bytes);
+      reservation.storage.reset();
+    }
+    reservation.allocation_ordinal = std::nullopt;
+    reservation.lifetime_observer = ResourceLifetimeObserver{};
   };
 
   if (value.container == ContainerKind::vector) {

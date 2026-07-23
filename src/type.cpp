@@ -61,6 +61,10 @@ try_reserve(Container &container, std::size_t capacity,
   if (capacity <= container.capacity()) {
     return HostResourceErrorReason::none;
   }
+  if (failure.max_container_elements.has_value() &&
+      capacity > *failure.max_container_elements) {
+    return HostResourceErrorReason::size_overflow;
+  }
   if (capacity > container.max_size()) {
     return HostResourceErrorReason::size_overflow;
   }
