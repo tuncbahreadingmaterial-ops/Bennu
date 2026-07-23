@@ -2,16 +2,37 @@
 
 #include <array>
 #include <charconv>
+#include <limits>
 #include <ostream>
+#include <streambuf>
 
 namespace {
 
 bennu_cli::OutputWriteResult write_stream(void *context,
                                           std::string_view text) {
   auto &output = *static_cast<std::ostream *>(context);
-  output.write(text.data(), static_cast<std::streamsize>(text.size()));
-  return bennu_cli::OutputWriteResult{output.good(),
-                                      output.good() ? text.size() : 0};
+  if (!output.good() || output.rdbuf() == nullptr) {
+    return bennu_cli::OutputWriteResult{false, 0U};
+  }
+  std::size_t accepted_count = 0U;
+  const std::size_t maximum_chunk =
+      static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max());
+  while (accepted_count < text.size()) {
+    const std::size_t remaining = text.size() - accepted_count;
+    const std::size_t chunk_size =
+        remaining < maximum_chunk ? remaining : maximum_chunk;
+    const std::streamsize accepted = output.rdbuf()->sputn(
+        text.data() + accepted_count,
+        static_cast<std::streamsize>(chunk_size));
+    if (accepted <= 0) {
+      return bennu_cli::OutputWriteResult{false, accepted_count};
+    }
+    accepted_count += static_cast<std::size_t>(accepted);
+    if (static_cast<std::size_t>(accepted) != chunk_size) {
+      return bennu_cli::OutputWriteResult{false, accepted_count};
+    }
+  }
+  return bennu_cli::OutputWriteResult{true, accepted_count};
 }
 
 bool flush_stream(void *context) {
