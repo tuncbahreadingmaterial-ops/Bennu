@@ -6,6 +6,7 @@
 # TEST-ID: GENERATED-RUNTIME-STRUCTURED-CONTEXT
 # TEST-ID: GENERATED-RUNTIME-SAME-PROCESS-RESET
 # TEST-ID: PUBLIC-PROFILE-LIMIT-DIAGNOSTIC-MATRIX
+# TEST-ID: ISSUE54-RESOURCE-CROSS-BACKEND
 foreach(required BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
@@ -78,6 +79,18 @@ set(live_refusal_emitted
 set(live_refusal_native
   "${work_directory}/profile-live-refusal-native${BENNU_EXECUTABLE_SUFFIX}")
 set(live_refusal_expected "${work_directory}/profile-live-refusal.expected")
+set(issue54_work_c "${work_directory}/issue54-work-cleanup.c")
+set(issue54_work_emitted
+  "${work_directory}/issue54-work-cleanup-emitted${BENNU_EXECUTABLE_SUFFIX}")
+set(issue54_work_native
+  "${work_directory}/issue54-work-cleanup-native${BENNU_EXECUTABLE_SUFFIX}")
+set(issue54_work_expected
+  "${work_directory}/issue54-work-cleanup.expected")
+set(issue54_allocation_c "${work_directory}/issue54-allocation-cleanup.c")
+set(issue54_allocation_emitted
+  "${work_directory}/issue54-allocation-cleanup-emitted${BENNU_EXECUTABLE_SUFFIX}")
+set(issue54_allocation_native
+  "${work_directory}/issue54-allocation-cleanup-native${BENNU_EXECUTABLE_SUFFIX}")
 
 execute_process(
   COMMAND "${BENNU_PUBLIC_RESOURCE_FIXTURE}" "${BENNU_C_COMPILER}"
@@ -97,6 +110,9 @@ execute_process(
           "${size_probe_c}" "${size_probe_native}"
           "${shape_resource_probe_c}" "${shape_resource_probe_native}"
           "${resource_domain_probe_c}" "${resource_domain_probe_native}"
+          "${issue54_work_c}" "${issue54_work_native}"
+          "${issue54_work_expected}"
+          "${issue54_allocation_c}" "${issue54_allocation_native}"
   RESULT_VARIABLE fixture_exit OUTPUT_VARIABLE fixture_stdout
   ERROR_VARIABLE fixture_stderr)
 if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
@@ -109,7 +125,7 @@ endif()
 
 foreach(c_file profile refusal iota lifted late context_probe size_probe
                shape_resource_probe resource_domain_probe vector_refusal
-               live_refusal)
+               live_refusal issue54_work issue54_allocation)
   set(source "${${c_file}_c}")
   set(executable "${${c_file}_emitted}")
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
@@ -208,6 +224,8 @@ function(check_profile_refusal name executable invocation)
     set(expected_file "${vector_refusal_expected}")
   elseif(name MATCHES "^live-refusal")
     set(expected_file "${live_refusal_expected}")
+  elseif(name MATCHES "^issue54-work")
+    set(expected_file "${issue54_work_expected}")
   endif()
   file(READ "${expected_file}" expected_stderr)
   set(expected_stderr "${expected_stderr}${expected_stderr}")
@@ -267,6 +285,14 @@ foreach(profile_context_iteration RANGE 1 2)
 endforeach()
 check_generated_context_probe("${context_probe_emitted}")
 check_generated_context_probe("${context_probe_native}")
+check_profile_refusal(issue54-work-emitted "${issue54_work_emitted}" 1)
+check_profile_refusal(issue54-work-native "${issue54_work_native}" 1)
+check_allocation_failure(issue54-allocation-emitted
+  "${issue54_allocation_emitted}"
+  "bennu-source:1:1: ResourceError: greater_than resource request failed: allocation_unavailable\n")
+check_allocation_failure(issue54-allocation-native
+  "${issue54_allocation_native}"
+  "bennu-source:1:1: ResourceError: greater_than resource request failed: allocation_unavailable\n")
 check_allocation_failure(size-probe-emitted "${size_probe_emitted}"
   "bennu-source:1:1: ResourceError: iota resource request failed: size_overflow\n")
 check_allocation_failure(size-probe-native "${size_probe_native}"

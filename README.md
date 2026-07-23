@@ -119,6 +119,13 @@ rank-1 literals, and requires an explicit type for empty vectors. The initial
 language has no variables, user functions, trains, effects, reductions,
 multidimensional arrays, `length`, or `divide`.
 
+Issue #54 deliberately does not copy three Anka predicate details. Bennu defines
+parity mathematically, so `odd[-3]` is true rather than rejecting negative odd
+integers. Ordering preserves written operand order: `less_than[left right]`
+means `left < right`, and `greater_than[left right]` means `left > right`.
+Ordering remains numeric-only; Bool ordering and Bool/numeric conversions are
+rejected instead of adding comparison or conversion overloads.
+
 ## Version and release provenance
 
 The tracked root `VERSION` file is the sole product-version input. The current

@@ -6,12 +6,17 @@ foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR)
 endforeach()
 
 file(READ "${BENNU_SOURCE_DIR}/README.md" readme)
+file(READ
+  "${BENNU_SOURCE_DIR}/doc/decisions/issue-54-boolean-predicates-ordering.md"
+  issue54_decision)
 file(READ "${BENNU_SOURCE_DIR}/VERSION" product_version)
 string(REGEX REPLACE "\n$" "" product_version "${product_version}")
 foreach(required_text IN ITEMS
     "inc" "add" "equals" "not" "iota"
     "examples/rewrite.bennu" "trusted-local-v1"
     "Deliberate differences from Anka"
+    "`odd[-3]` is true" "`less_than[left right]`"
+    "`greater_than[left right]`" "Bool ordering and Bool/numeric conversions"
     "`${product_version}`;" "VERSION does not authorize a release"
     "CLOSED NOT_PLANNED by the owner"
     "not Authenticode or Apple Developer ID/notarization"
@@ -23,6 +28,17 @@ foreach(required_text IN ITEMS
   string(FIND "${readme}" "${required_text}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR "README is missing shipped rewrite text: ${required_text}")
+  endif()
+endforeach()
+
+foreach(required_decision_text IN ITEMS
+    "Issue #54 conformance evidence correction"
+    "negative odd parity" "written operand order"
+    "Bool ordering or Bool/numeric conversion")
+  string(FIND "${issue54_decision}" "${required_decision_text}" found_at)
+  if(found_at EQUAL -1)
+    message(FATAL_ERROR
+      "Issue #54 decision evidence is missing: ${required_decision_text}")
   endif()
 endforeach()
 
