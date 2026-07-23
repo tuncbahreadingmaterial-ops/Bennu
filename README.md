@@ -76,6 +76,38 @@ It prints:
 (1 2 3 4 5)
 ```
 
+Programs may declare ordered scalar parameters in a leading header and receive
+their values from the runner after an explicit `--` boundary:
+
+```bennu
+parameters[count Int scale Double enabled Bool]
+count
+scale
+enabled
+```
+
+```sh
+./build/bennu run example.bennu -- -5 2.5 true
+```
+
+Runner arguments use Bennu's exact ASCII scalar spellings. `Bool` accepts only
+`true` or `false`. `Int` accepts canonical signed decimal integers without `+`,
+leading zeroes, or `-0`. `Double` accepts canonical decimal/exponent forms that
+contain a decimal point or exponent, plus exactly `inf`, `-inf`, and `nan`;
+finite overflow is rejected and finite underflow becomes signed zero. Conversion
+is whole-token and locale-independent. A program with no parameters may be run
+with no boundary or with a bare `--`; every token after the first boundary is
+program data, including negative values and a second `--`.
+
+Argument failures write one stable `bennu_argument_error` record to stderr. The
+record contains the reason, required and supplied counts, one-based position,
+declared parameter identity/type/span when applicable, and no raw argument text.
+All arguments are decoded only after static source validation and before any
+evaluation. The runner publishes the complete output batch only after decoding,
+evaluation, and formatting all succeed, so failures leave stdout empty.
+Formatting and stdout-device failures use the stable `bennu_formatting_error`
+and `bennu_output_error` records defined by the language specification.
+
 Emit deterministic, self-contained standard C11 and run it:
 
 ```sh

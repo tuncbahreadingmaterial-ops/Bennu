@@ -4,6 +4,7 @@
 #include "bennu/primitive.hpp"
 #include "bennu/resources.hpp"
 #include "bennu/value.hpp"
+#include "runner_arguments.hpp"
 #include "rewrite_c_runtime.hpp"
 #include "typed_application.hpp"
 
@@ -1734,6 +1735,7 @@ struct RewriteEvaluationDiagnostic {
   RewriteSpan primitive_name;
   RewriteSpan call;
   std::vector<RewriteSpan> arguments;
+  std::size_t formatting_root_position;
   ValueInvariant formatting_invariant;
   ValueFormatError formatting_error;
 };
@@ -1939,6 +1941,138 @@ Error validate_parameter_values(const RewriteProgram &program,
   return make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U});
 }
 
+struct ScalarTextDecodeResult {
+  bool ok;
+  ArgumentErrorReason reason;
+  Value value;
+};
+
+ScalarTextDecodeResult decode_scalar_text(
+    ScalarType type, std::string_view spelling,
+    const RewriteDoubleParser &double_parser) {
+  if (type == ScalarType::boolean) {
+    if (spelling == "true") {
+      return ScalarTextDecodeResult{
+          true, ArgumentErrorReason::invalid_literal, make_bool_value(true)};
+    }
+    if (spelling == "false") {
+      return ScalarTextDecodeResult{
+          true, ArgumentErrorReason::invalid_literal, make_bool_value(false)};
+    }
+    return ScalarTextDecodeResult{
+        false, ArgumentErrorReason::invalid_literal, make_bool_value(false)};
+  }
+
+  if (type == ScalarType::integer) {
+    if (!canonical_integer_grammar(spelling)) {
+      return ScalarTextDecodeResult{
+          false, ArgumentErrorReason::invalid_literal, make_int_value(0)};
+    }
+    std::int64_t value = 0;
+    const std::from_chars_result converted =
+        std::from_chars(spelling.data(), spelling.data() + spelling.size(), value);
+    if (converted.ec == std::errc::result_out_of_range) {
+      return ScalarTextDecodeResult{
+          false, ArgumentErrorReason::out_of_range, make_int_value(0)};
+    }
+    if (converted.ec != std::errc{} ||
+        converted.ptr != spelling.data() + spelling.size()) {
+      return ScalarTextDecodeResult{
+          false, ArgumentErrorReason::invalid_literal, make_int_value(0)};
+    }
+    return ScalarTextDecodeResult{
+        true, ArgumentErrorReason::invalid_literal, make_int_value(value)};
+  }
+
+  if (spelling == "inf") {
+    return ScalarTextDecodeResult{
+        true, ArgumentErrorReason::invalid_literal,
+        make_double_value(std::numeric_limits<double>::infinity())};
+  }
+  if (spelling == "-inf") {
+    return ScalarTextDecodeResult{
+        true, ArgumentErrorReason::invalid_literal,
+        make_double_value(-std::numeric_limits<double>::infinity())};
+  }
+  if (spelling == "nan") {
+    return ScalarTextDecodeResult{
+        true, ArgumentErrorReason::invalid_literal,
+        make_double_value(std::numeric_limits<double>::quiet_NaN())};
+  }
+  if (!finite_double_grammar(spelling)) {
+    return ScalarTextDecodeResult{
+        false, ArgumentErrorReason::invalid_literal, make_double_value(0.0)};
+  }
+
+  double value = 0.0;
+  const std::from_chars_result converted =
+      parse_finite_double(spelling, double_parser, value);
+  if (converted.ec == std::errc::result_out_of_range &&
+      decimal_rounds_to_zero(spelling)) {
+    value = spelling.front() == '-' ? -0.0 : 0.0;
+    return ScalarTextDecodeResult{
+        true, ArgumentErrorReason::invalid_literal, make_double_value(value)};
+  }
+  if (converted.ec != std::errc{} ||
+      converted.ptr != spelling.data() + spelling.size() ||
+      !std::isfinite(value)) {
+    return ScalarTextDecodeResult{
+        false, ArgumentErrorReason::out_of_range, make_double_value(0.0)};
+  }
+  return ScalarTextDecodeResult{
+      true, ArgumentErrorReason::invalid_literal, make_double_value(value)};
+}
+
+struct TextArgumentsDecodeResult {
+  bool ok;
+  std::vector<Value> values;
+  Error error;
+};
+
+TextArgumentsDecodeResult decode_parameter_texts(
+    const RewriteProgram &program,
+    std::span<const std::string_view> arguments) {
+  const std::size_t required_count =
+      program.parameter_header.declarations.size();
+  if (arguments.size() < required_count) {
+    return TextArgumentsDecodeResult{
+        false, {},
+        argument_error(program, ArgumentErrorReason::missing, arguments.size(),
+                       arguments.size() + 1U)};
+  }
+  if (arguments.size() > required_count) {
+    return TextArgumentsDecodeResult{
+        false, {},
+        argument_error(program, ArgumentErrorReason::extra, arguments.size(),
+                       required_count + 1U)};
+  }
+
+  std::vector<Value> values;
+  values.reserve(arguments.size());
+  RewriteDoubleParser double_parser{};
+  bool has_double_parser = false;
+  for (std::size_t index = 0U; index < arguments.size(); ++index) {
+    const ScalarType type = program.parameter_header.declarations[index].type;
+    if (type == ScalarType::double_precision && !has_double_parser) {
+      double_parser = make_rewrite_double_parser();
+      has_double_parser = true;
+    }
+    ScalarTextDecodeResult decoded =
+        decode_scalar_text(type, arguments[index], double_parser);
+    if (!decoded.ok) {
+      destroy_rewrite_double_parser(double_parser);
+      return TextArgumentsDecodeResult{
+          false, {},
+          argument_error(program, decoded.reason, arguments.size(), index + 1U)};
+    }
+    values.push_back(std::move(decoded.value));
+  }
+  destroy_rewrite_double_parser(double_parser);
+  return TextArgumentsDecodeResult{
+      true, std::move(values),
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
+}
+
 RewriteEvaluationDiagnostic empty_rewrite_evaluation_diagnostic() {
   const RewriteSpan empty =
       insertion_span(RewritePosition{1U, 1U, 1U});
@@ -1952,6 +2086,7 @@ RewriteEvaluationDiagnostic empty_rewrite_evaluation_diagnostic() {
       empty,
       empty,
       {},
+      0U,
       ValueInvariant::none,
       ValueFormatError::none};
 }
@@ -2460,6 +2595,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
       diagnostic.stage = RewriteEvaluationStage::formatting;
       diagnostic.primary = program.nodes[program.roots[index]].span;
       diagnostic.context = diagnostic.primary;
+      diagnostic.formatting_root_position = index + 1U;
       diagnostic.formatting_invariant = result.invariant;
       diagnostic.formatting_error = result.error;
       return false;
@@ -2675,9 +2811,18 @@ Error public_error_from_diagnostic(
   }
 
   if (diagnostic.stage == RewriteEvaluationStage::formatting) {
-    return make_error(ErrorKind::formatting_error,
-                      rewrite_source_location(diagnostic.primary.begin),
-                      "evaluated value cannot be formatted canonically");
+    Error error = make_error(
+        ErrorKind::formatting_error,
+        rewrite_source_location(diagnostic.primary.begin),
+        "evaluated value cannot be formatted canonically");
+    error.formatting = FormattingErrorContext{
+        diagnostic.formatting_error, diagnostic.formatting_root_position,
+        rewrite_source_span(diagnostic.primary),
+        diagnostic.formatting_error == ValueFormatError::invalid_value
+            ? std::optional<ValueInvariant>{diagnostic.formatting_invariant}
+            : std::nullopt};
+    error.primary_span = error.formatting->root_span;
+    return error;
   }
   return make_error(ErrorKind::invalid_primitive_table,
                     rewrite_source_location(diagnostic.primary.begin),
@@ -2709,7 +2854,9 @@ CBackendConfiguration c_backend_configuration(
 
 RewriteEvaluationResult evaluate_rewrite_source_impl(
     std::string_view source, const RewriteEvaluationCreationData &creation,
-    bool require_single_root, std::span<const Value> parameter_values) {
+    bool require_single_root, std::span<const Value> parameter_values,
+    std::span<const std::string_view> text_parameter_values,
+    bool decode_text_parameters) {
   EvaluationResources resources = make_rewrite_resources(creation);
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
@@ -2793,8 +2940,17 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
                                       0U);
   }
 
+  std::vector<Value> decoded_parameter_values;
   Error parameter_error =
-      validate_parameter_values(parsed.program, parameter_values);
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U});
+  if (decode_text_parameters) {
+    TextArgumentsDecodeResult decoded =
+        decode_parameter_texts(parsed.program, text_parameter_values);
+    parameter_error = std::move(decoded.error);
+    decoded_parameter_values = std::move(decoded.values);
+  } else {
+    parameter_error = validate_parameter_values(parsed.program, parameter_values);
+  }
   if (parameter_error.kind != ErrorKind::none) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -2807,6 +2963,10 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.error = std::move(parameter_error);
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
+  const std::span<const Value> bound_parameter_values =
+      decode_text_parameters
+          ? std::span<const Value>(decoded_parameter_values)
+          : parameter_values;
 
   WorkChargeResult resource_admission = charge_work(
       resources, 0U, SourceLocation{1U, 1U, 1U}, "rewrite-evaluator");
@@ -2854,7 +3014,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       continue;
     }
     if (node.kind == RewriteNodeKind::parameter_reference) {
-      const ScalarValue &parameter = parameter_values[node.first_element].scalar;
+      const ScalarValue &parameter =
+          bound_parameter_values[node.first_element].scalar;
       if (parameter.type == ScalarType::boolean) {
         node_values[node_index] = make_bool_value(parameter.boolean);
       } else if (parameter.type == ScalarType::integer) {
@@ -2998,7 +3159,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
 
 RewriteEvaluationResult evaluate_rewrite_source(
     std::string_view source, const RewriteEvaluationCreationData &creation) {
-  return evaluate_rewrite_source_impl(source, creation, false, {});
+  return evaluate_rewrite_source_impl(source, creation, false, {}, {}, false);
 }
 
 void append_c_unsigned(std::string &source, std::size_t value) {
@@ -5515,13 +5676,78 @@ TEST_CASE("rewrite evaluator clears formatted roots after a formatting failure")
   CHECK_FALSE(formatted_ok);
   CHECK(formatted.empty());
   CHECK(diagnostic.stage == RewriteEvaluationStage::formatting);
+  CHECK(diagnostic.formatting_root_position == 2U);
   CHECK(diagnostic.formatting_error == ValueFormatError::invalid_value);
   CHECK(diagnostic.formatting_invariant ==
         ValueInvariant::inactive_scalar_field);
   CHECK(span_is(diagnostic.primary, 3U, 2U, 1U, 4U, 2U, 2U));
+  const Error public_error = public_error_from_diagnostic("1\n2", diagnostic);
+  CHECK(public_error.kind == ErrorKind::formatting_error);
+  REQUIRE(public_error.formatting.has_value());
+  CHECK(public_error.formatting->reason == ValueFormatError::invalid_value);
+  CHECK(public_error.formatting->root_position == 2U);
+  CHECK(public_error.formatting->root_span.begin.offset == 3U);
+  CHECK(public_error.formatting->root_span.end.offset == 4U);
+  CHECK(public_error.formatting->invalid_value_invariant ==
+        std::optional<ValueInvariant>{ValueInvariant::inactive_scalar_field});
   EvaluationResources resources =
       make_trusted_local_resources(AllocationFailureInjection{std::nullopt});
   release_rewrite_values(resources, values);
+}
+
+TEST_CASE("runner scalar text decoding agrees with typed public evaluation") {
+  constexpr std::string_view source =
+      "parameters[count Int ratio Double enabled Bool]\n"
+      "count\nratio\nenabled\n";
+  const std::array<std::string_view, 3> text{{"-5", "-0e0", "true"}};
+  RunnerEvaluationResult decoded = evaluate_runner_source(source, text);
+
+  std::array<Value, 3> typed{{make_int_value(-5), make_double_value(-0.0),
+                              make_bool_value(true)}};
+  ProgramResult direct = evaluate_source(source, typed);
+  REQUIRE(decoded.ok);
+  REQUIRE(direct.ok);
+  REQUIRE(decoded.values.size() == direct.values.size());
+  for (std::size_t index = 0U; index < decoded.values.size(); ++index) {
+    const ValueFormattingResult decoded_format = format_value(decoded.values[index]);
+    const ValueFormattingResult direct_format = format_value(direct.values[index]);
+    REQUIRE(decoded_format.ok);
+    REQUIRE(direct_format.ok);
+    CHECK(decoded_format.formatted == direct_format.formatted);
+    destroy_value(decoded.values[index]);
+    destroy_value(direct.values[index]);
+  }
+}
+
+TEST_CASE("runner scalar text failures preserve structured argument context") {
+  constexpr std::string_view source =
+      "parameters[value Int]\nvalue\n";
+  const std::array<std::string_view, 1> malformed{{"9223372036854775808"}};
+  RunnerEvaluationResult result = evaluate_runner_source(source, malformed);
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.values.empty());
+  CHECK(result.error.kind == ErrorKind::argument_error);
+  REQUIRE(result.error.argument.has_value());
+  CHECK(result.error.argument->reason == ArgumentErrorReason::out_of_range);
+  CHECK(result.error.argument->required_count == 1U);
+  CHECK(result.error.argument->supplied_count == 1U);
+  CHECK(result.error.argument->position == 1U);
+  CHECK(result.error.argument->parameter_name == std::optional<std::string>{"value"});
+  CHECK(result.error.argument->expected_type ==
+        std::optional<ScalarType>{ScalarType::integer});
+  REQUIRE(result.error.argument->declaration_span.has_value());
+  CHECK(result.error.argument->declaration_span->begin.offset == 12U);
+  CHECK(result.error.argument->declaration_span->end.offset == 21U);
+
+  constexpr std::string_view invalid_program =
+      "parameters[value Int]\nvalue\nwat[1]\n";
+  const std::array<std::string_view, 1> invalid_text{{"bad"}};
+  RunnerEvaluationResult static_failure =
+      evaluate_runner_source(invalid_program, invalid_text);
+  REQUIRE_FALSE(static_failure.ok);
+  CHECK(static_failure.error.kind == ErrorKind::unknown_name);
+  CHECK_FALSE(static_failure.error.argument.has_value());
+  CHECK(static_failure.error.location.line == 3U);
 }
 
 } // namespace
@@ -5538,7 +5764,7 @@ ValueResult evaluate_expression(
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
-      evaluate_rewrite_source_impl(source, creation, true, {});
+      evaluate_rewrite_source_impl(source, creation, true, {}, {}, false);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
@@ -5584,7 +5810,7 @@ ProgramResult evaluate_source(
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
-      evaluate_rewrite_source_impl(source, creation, false, arguments);
+      evaluate_rewrite_source_impl(source, creation, false, arguments, {}, false);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
@@ -5595,6 +5821,29 @@ ProgramResult evaluate_source(
   evaluated.formatted.clear();
   return ProgramResult{
       true, std::move(values),
+      make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
+}
+
+RunnerEvaluationResult evaluate_runner_source(
+    std::string_view source, std::span<const std::string_view> arguments) {
+  const EvaluationConfiguration configuration =
+      trusted_local_evaluation_configuration();
+  const RewriteEvaluationCreationData creation{
+      configuration.profile, configuration.limits,
+      configuration.allocation_failure};
+  RewriteEvaluationResult evaluated = evaluate_rewrite_source_impl(
+      source, creation, false, {}, arguments, true);
+  if (!evaluated.ok) {
+    Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
+    release_rewrite_evaluation_result(evaluated);
+    return RunnerEvaluationResult{false, {}, {}, std::move(error)};
+  }
+  std::vector<Value> values = std::move(evaluated.values);
+  std::vector<std::string> formatted = std::move(evaluated.formatted);
+  evaluated.values.clear();
+  evaluated.formatted.clear();
+  return RunnerEvaluationResult{
+      true, std::move(values), std::move(formatted),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
 }
 

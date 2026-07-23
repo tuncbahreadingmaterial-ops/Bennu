@@ -315,6 +315,14 @@ if(BUILD_TESTING)
   endif()
   add_cli_contract_test(run_evaluator_errors run_evaluator_errors)
   add_cli_contract_test(run_batch_no_partial_output run_batch_no_partial_output)
+  add_test(
+    NAME cli.runner_arguments
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/runner_arguments_contract.cmake"
+  )
   add_cli_contract_test(emit_c_example emit_c_example)
   add_cli_contract_test(emit_c_empty_program emit_c_empty_program)
   add_test(

@@ -61,8 +61,13 @@ BENNU-SPEC-0005 section 6.3 static and dynamic shape analysis|tests/public_cutov
 BENNU-SPEC-0005 sections 7 and 13.1 ordered typed API and borrowed scalar ownership|tests/public_cutover_conformance.cpp|PARG-004-TYPED-API
 BENNU-SPEC-0005 sections 5, 6.1, and 12.1 parameter-reference lowering metadata|src/rewrite.cpp|PARG-004-PARAMETER-LOWERING-METADATA
 BENNU-SPEC-0005 section 8 structured typed argument failures and lowest position|tests/public_cutover_conformance.cpp|PARG-005-ARGUMENT-ERROR
+BENNU-SPEC-0005 section 9 portable runner scalar text grammar and range|tests/runner_arguments_contract.cmake|PARG-006-TEXT-GRAMMAR
+BENNU-SPEC-0005 section 10 runner separator and command-shape precedence|tests/runner_arguments_contract.cmake|PARG-007-RUNNER-SEPARATOR
 BENNU-SPEC-0005 sections 3.3 and 3.4 empty header and zero-root binding|tests/public_cutover_conformance.cpp|PARG-008-ZERO-ROOTS
 BENNU-SPEC-0005 sections 6.3 and 11.4 parameter-driven iota and dynamic shape|tests/public_cutover_conformance.cpp|PARG-009-DYNAMIC-IOTA-SHAPE
 BENNU-SPEC-0005 section 11.1 multi-root and postorder dynamic failure order|tests/public_cutover_conformance.cpp|PARG-010-RUNTIME-ORDER
 BENNU-SPEC-0005 section 13.1 unchanged profile accounting for scalar binding|tests/public_cutover_conformance.cpp|PARG-011-PROFILES
+BENNU-SPEC-0005 sections 8.4 and 12.2 runner argument records and raw-text omission|tests/runner_arguments_contract.cmake|PARG-014-DIAGNOSTICS
+BENNU-SPEC-0005 sections 11.2 and 12.3 runner transactional stdout|tests/runner_arguments_contract.cmake|PARG-015-ATOMIC-STDOUT
 BENNU-SPEC-0005 sections 4.2 and 15 zero-input compatibility and program-only rejection|tests/public_cutover_conformance.cpp|PARG-017-REGRESSION
+BENNU-SPEC-0005 section 17 target-native runner argument boundary matrix|tests/runner_arguments_contract.cmake|PARG-018-PLATFORMS
