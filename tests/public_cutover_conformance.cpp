@@ -606,7 +606,7 @@ TEST_CASE("PARG-001-NAMES") {
     const std::string source =
         "parameters[" + std::string(name) + " Int]\n1\n";
     bennu::ProgramResult reserved = bennu::evaluate_source(source);
-    INFO(name);
+    INFO(std::string(name));
     REQUIRE_FALSE(reserved.ok);
     CHECK(reserved.error.kind ==
           bennu::ErrorKind::invalid_parameter_declaration);
