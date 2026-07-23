@@ -1988,8 +1988,8 @@ Error lowering_primitive_error(ErrorKind kind,
                                const PrimitiveDescriptor &descriptor,
                                SourceLocation location) {
   Error error = make_error(kind, location);
-  error.primitive = PrimitiveErrorContext{
-      std::string(descriptor.name), std::optional<PrimitiveId>{descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
   return error;
 }
 
@@ -2469,7 +2469,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
       diagnostic.formatting_error = result.error;
       return false;
     }
-    formatted.push_back(std::move(result.formatted));
+    formatted.push_back(std::string(result.formatted));
   }
   return true;
 }
@@ -2562,7 +2562,9 @@ ErrorKind parse_error_kind(RewriteParseError error) {
 
 std::string semantic_error_message(const Error &error) {
   const std::string primitive =
-      error.primitive.has_value() ? error.primitive->name : "evaluation";
+      error.primitive.has_value()
+          ? std::string(error.primitive->name)
+          : std::string("evaluation");
   if (error.kind == ErrorKind::arity_error && error.arity.has_value()) {
     std::string message = primitive + " received " +
                           std::to_string(error.arity->supplied) +
@@ -2616,13 +2618,14 @@ std::string semantic_error_message(const Error &error) {
 }
 
 Error public_error_from_diagnostic(
-    std::string_view source, const RewriteEvaluationDiagnostic &diagnostic) {
+    std::string_view source, RewriteEvaluationDiagnostic &diagnostic) {
   if (diagnostic.error.kind != ErrorKind::none) {
-    Error error = diagnostic.error;
+    Error error = std::move(diagnostic.error);
     if (error.kind == ErrorKind::unknown_name &&
         !error.primitive.has_value()) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message = "unknown primitive '" + name + "'";
     }
     if (error.message.empty()) {
@@ -2670,7 +2673,8 @@ Error public_error_from_diagnostic(
         parse_error_message(parse_error));
     if (parse_error == RewriteParseError::unknown_primitive) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message += " '" + name + "'";
     }
     error.primary_span = rewrite_source_span(diagnostic.primary);

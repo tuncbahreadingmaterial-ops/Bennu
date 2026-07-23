@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bennu {
@@ -61,7 +62,7 @@ struct ResourceErrorContext {
   ResourceErrorReason reason;
   std::optional<std::size_t> requested_elements;
   std::optional<std::size_t> requested_bytes;
-  std::string profile;
+  std::string_view profile;
   std::optional<ResourceLimitKind> limit_kind;
   std::optional<std::size_t> configured_limit;
   std::optional<std::size_t> usage_before;
@@ -95,7 +96,8 @@ struct DomainErrorContext {
 };
 
 struct PrimitiveErrorContext {
-  std::string name;
+  HostArray<char> name_storage{};
+  std::string_view name{};
   std::optional<PrimitiveId> id{};
 };
 
@@ -210,6 +212,8 @@ struct Error {
 
 Error make_error(ErrorKind kind, SourceLocation location, std::string message);
 Error make_error(ErrorKind kind, SourceLocation location);
+std::optional<PrimitiveErrorContext> make_primitive_error_context(
+    std::string_view name, std::optional<PrimitiveId> id);
 
 } // namespace bennu
 

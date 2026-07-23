@@ -140,13 +140,14 @@ Error make_resource_failure(
     std::optional<std::size_t> allocation_ordinal = std::nullopt) {
   Error error = make_error(ErrorKind::resource_error, location);
   if (!producer_name.empty()) {
-    error.primitive = PrimitiveErrorContext{std::string(producer_name)};
+    error.primitive =
+        make_primitive_error_context(producer_name, std::nullopt);
   }
   error.resource = ResourceErrorContext{
       reason,
       requested_elements,
       requested_bytes,
-      std::string(execution_profile_name(resources.profile)),
+      execution_profile_name(resources.profile),
       limit_kind,
       configured_limit,
       usage_before,
@@ -203,7 +204,8 @@ validate_profile_configuration(const EvaluationResources &resources,
       make_error(ErrorKind::invalid_execution_profile, location,
                  std::string(message));
   if (!producer_name.empty()) {
-    error.primitive = PrimitiveErrorContext{std::string(producer_name)};
+    error.primitive =
+        make_primitive_error_context(producer_name, std::nullopt);
   }
   return error;
 }
@@ -721,7 +723,8 @@ TupleConstructionResult make_tuple_value(
       resources.profile == ExecutionProfile::bounded_v1) {
     Error error = make_error(ErrorKind::profile_error, location);
     if (!producer_name.empty()) {
-      error.primitive = PrimitiveErrorContext{std::string(producer_name)};
+      error.primitive =
+          make_primitive_error_context(producer_name, std::nullopt);
     }
     error.profile = ProfileErrorContext{
         ProfileErrorReason::unsupported_value_kind,
@@ -761,13 +764,13 @@ TupleConstructionResult make_tuple_value(
     if (element.container != ContainerKind::tuple) {
       continue;
     }
-    if (element.tuple.nodes.size() >
+    if (element.tuple.nodes.size >
             std::numeric_limits<std::size_t>::max() - node_count ||
-        element.tuple.child_indexes.size() >
+        element.tuple.child_indexes.size >
             std::numeric_limits<std::size_t>::max() - edge_count ||
-        element.tuple.vector_payloads.size() >
+        element.tuple.vector_payloads.size >
             std::numeric_limits<std::size_t>::max() - payload_count ||
-        element.tuple.reservations.size() + 1U >
+        element.tuple.reservations.size + 1U >
             std::numeric_limits<std::size_t>::max() - reservation_count) {
       Error error = make_resource_failure(
           resources, ResourceErrorReason::size_overflow, location,
@@ -776,10 +779,10 @@ TupleConstructionResult make_tuple_value(
       return TupleConstructionResult{false, make_int_value(0),
                                      ValueInvariant::none, std::move(error)};
     }
-    node_count += element.tuple.nodes.size();
-    edge_count += element.tuple.child_indexes.size();
-    payload_count += element.tuple.vector_payloads.size();
-    reservation_count += element.tuple.reservations.size() + 1U;
+    node_count += element.tuple.nodes.size;
+    edge_count += element.tuple.child_indexes.size;
+    payload_count += element.tuple.vector_payloads.size;
+    reservation_count += element.tuple.reservations.size + 1U;
   }
 
   const std::size_t tuple_ordinal = resources.reservation_ordinal;
@@ -817,10 +820,15 @@ TupleConstructionResult make_tuple_value(
     reservation.allocation_ordinal = std::nullopt;
     reservation.lifetime_observer = ResourceLifetimeObserver{};
   };
-  const auto metadata_failure = [&]() {
+  const auto metadata_failure =
+      [&](HostResourceErrorReason host_reason) {
     rollback_reservation();
+    const ResourceErrorReason reason =
+        host_reason == HostResourceErrorReason::size_overflow
+            ? ResourceErrorReason::size_overflow
+            : ResourceErrorReason::allocation_unavailable;
     Error error = make_resource_failure(
-        resources, ResourceErrorReason::allocation_unavailable, location,
+        resources, reason, location,
         producer_name, elements.size(), reserved.reservation.canonical_bytes,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         elements.empty() ? std::nullopt
@@ -838,76 +846,135 @@ TupleConstructionResult make_tuple_value(
                            0U,
                            {nullptr, &std::free},
                            0U}};
-  std::vector<std::size_t> roots;
+  HostArray<std::size_t> roots;
   if (node_count != 0U || edge_count != 0U || payload_count != 0U ||
       reservation_count != 0U || !elements.empty()) {
-    const std::size_t host_ordinal = allocation_failure.allocation_ordinal;
-    if (host_ordinal == std::numeric_limits<std::size_t>::max() ||
-        (allocation_failure.fail_at_allocation_ordinal.has_value() &&
-         host_ordinal == *allocation_failure.fail_at_allocation_ordinal)) {
-      return metadata_failure();
+    HostResourceErrorReason allocated =
+        begin_host_allocation(allocation_failure);
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(
+          result.tuple.nodes, node_count,
+          allocation_failure.max_container_elements);
     }
-    ++allocation_failure.allocation_ordinal;
-#if defined(__cpp_exceptions)
-    try {
-#endif
-      result.tuple.nodes.reserve(node_count);
-      result.tuple.child_indexes.reserve(edge_count);
-      result.tuple.vector_payloads.reserve(payload_count);
-      result.tuple.reservations.reserve(reservation_count);
-      roots.reserve(elements.size());
-#if defined(__cpp_exceptions)
-    } catch (const std::bad_alloc &) {
-      return metadata_failure();
-    } catch (const std::length_error &) {
-      return metadata_failure();
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(
+          result.tuple.child_indexes, edge_count,
+          allocation_failure.max_container_elements);
     }
-#endif
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(
+          result.tuple.vector_payloads, payload_count,
+          allocation_failure.max_container_elements);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(
+          result.tuple.reservations, reservation_count,
+          allocation_failure.max_container_elements);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(
+          roots, elements.size(),
+          allocation_failure.max_container_elements);
+    }
+    if (allocated != HostResourceErrorReason::none) {
+      return metadata_failure(allocated);
+    }
+    if (!host_array_has_capacity(result.tuple.nodes, node_count) ||
+        !host_array_has_capacity(result.tuple.child_indexes, edge_count) ||
+        !host_array_has_capacity(result.tuple.vector_payloads,
+                                 payload_count) ||
+        !host_array_has_capacity(result.tuple.reservations,
+                                 reservation_count) ||
+        !host_array_has_capacity(roots, elements.size())) {
+      return metadata_failure(HostResourceErrorReason::size_overflow);
+    }
   }
 
   for (Value &element : elements) {
     Value moved = move_value(element);
     if (moved.container != ContainerKind::tuple) {
-      roots.push_back(result.tuple.nodes.size());
+      HostResourceErrorReason pushed =
+          host_array_push(roots, result.tuple.nodes.size);
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
       std::size_t payload_index = 0U;
       if (moved.container == ContainerKind::vector) {
-        payload_index = result.tuple.vector_payloads.size();
-        result.tuple.vector_payloads.push_back(std::move(moved.vector));
+        payload_index = result.tuple.vector_payloads.size;
+        pushed = host_array_push(result.tuple.vector_payloads,
+                                 std::move(moved.vector));
+        if (pushed != HostResourceErrorReason::none) {
+          return metadata_failure(pushed);
+        }
       }
-      result.tuple.nodes.push_back(ValueNode{moved.container, moved.scalar, 0U,
-                                             0U, 0U, payload_index});
+      pushed = host_array_push(
+          result.tuple.nodes,
+          ValueNode{moved.container, moved.scalar, 0U, 0U, 0U,
+                    payload_index});
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
       moved.claimed = false;
       continue;
     }
 
-    const std::size_t node_offset = result.tuple.nodes.size();
-    const std::size_t edge_offset = result.tuple.child_indexes.size();
-    const std::size_t payload_offset = result.tuple.vector_payloads.size();
-    const std::size_t reservation_offset = result.tuple.reservations.size();
-    for (ValueNode &source_node : moved.tuple.nodes) {
+    const std::size_t node_offset = result.tuple.nodes.size;
+    const std::size_t edge_offset = result.tuple.child_indexes.size;
+    const std::size_t payload_offset =
+        result.tuple.vector_payloads.size;
+    const std::size_t reservation_offset =
+        result.tuple.reservations.size;
+    for (ValueNode &source_node :
+         host_array_span(moved.tuple.nodes)) {
       if (source_node.container == ContainerKind::tuple) {
         source_node.first_child += edge_offset;
         source_node.tuple_reservation_index += reservation_offset;
       } else if (source_node.container == ContainerKind::vector) {
         source_node.vector_payload_index += payload_offset;
       }
-      result.tuple.nodes.push_back(std::move(source_node));
+      const HostResourceErrorReason pushed =
+          host_array_push(result.tuple.nodes, std::move(source_node));
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
     }
-    for (const std::size_t child_index : moved.tuple.child_indexes) {
-      result.tuple.child_indexes.push_back(child_index + node_offset);
+    for (const std::size_t child_index :
+         host_array_span(moved.tuple.child_indexes)) {
+      const HostResourceErrorReason pushed = host_array_push(
+          result.tuple.child_indexes, child_index + node_offset);
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
     }
-    for (VectorValue &payload : moved.tuple.vector_payloads) {
-      result.tuple.vector_payloads.push_back(std::move(payload));
+    for (VectorValue &payload :
+         host_array_span(moved.tuple.vector_payloads)) {
+      const HostResourceErrorReason pushed = host_array_push(
+          result.tuple.vector_payloads, std::move(payload));
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
     }
-    for (TupleTableReservation &reservation : moved.tuple.reservations) {
-      result.tuple.reservations.push_back(std::move(reservation));
+    for (TupleTableReservation &reservation :
+         host_array_span(moved.tuple.reservations)) {
+      const HostResourceErrorReason pushed = host_array_push(
+          result.tuple.reservations, std::move(reservation));
+      if (pushed != HostResourceErrorReason::none) {
+        return metadata_failure(pushed);
+      }
     }
     const std::size_t root_reservation_index =
-        result.tuple.reservations.size();
-    result.tuple.reservations.push_back(
+        result.tuple.reservations.size;
+    HostResourceErrorReason pushed = host_array_push(
+        result.tuple.reservations,
         std::move(moved.tuple.root_reservation));
-    roots.push_back(result.tuple.nodes.size());
-    result.tuple.nodes.push_back(ValueNode{
+    if (pushed != HostResourceErrorReason::none) {
+      return metadata_failure(pushed);
+    }
+    pushed = host_array_push(roots, result.tuple.nodes.size);
+    if (pushed != HostResourceErrorReason::none) {
+      return metadata_failure(pushed);
+    }
+    pushed = host_array_push(result.tuple.nodes, ValueNode{
         ContainerKind::tuple,
         moved.scalar,
         moved.tuple.first_child + edge_offset,
@@ -915,14 +982,22 @@ TupleConstructionResult make_tuple_value(
         root_reservation_index,
         0U,
     });
+    if (pushed != HostResourceErrorReason::none) {
+      return metadata_failure(pushed);
+    }
     moved.claimed = false;
   }
 
-  result.tuple.first_child = result.tuple.child_indexes.size();
-  result.tuple.child_indexes.insert(result.tuple.child_indexes.end(),
-                                    roots.begin(), roots.end());
-  result.tuple.child_count = roots.size();
-  result.tuple.root_index = result.tuple.nodes.size();
+  result.tuple.first_child = result.tuple.child_indexes.size;
+  for (const std::size_t root : host_array_span(roots)) {
+    const HostResourceErrorReason pushed =
+        host_array_push(result.tuple.child_indexes, root);
+    if (pushed != HostResourceErrorReason::none) {
+      return metadata_failure(pushed);
+    }
+  }
+  result.tuple.child_count = roots.size;
+  result.tuple.root_index = result.tuple.nodes.size;
   result.tuple.root_reservation = std::move(reserved.reservation);
   return TupleConstructionResult{true, std::move(result), ValueInvariant::none,
                                  no_error()};
@@ -942,7 +1017,8 @@ TupleConstructionResult execute_tuple_construction(
   if (execute_element == nullptr) {
     Error error = make_error(ErrorKind::domain_error, location,
                              "tuple element executor is null");
-    error.primitive = PrimitiveErrorContext{std::string(producer_name), {}};
+    error.primitive =
+        make_primitive_error_context(producer_name, std::nullopt);
     return TupleConstructionResult{false, make_int_value(0),
                                    ValueInvariant::none, std::move(error)};
   }
@@ -1076,7 +1152,8 @@ ValueReleaseResult release_value_reservations(
                               ValueReleaseError::resource_context_mismatch};
   }
   if (value.container == ContainerKind::tuple) {
-    for (const VectorValue &payload : value.tuple.vector_payloads) {
+    for (const VectorValue &payload :
+         host_array_span(value.tuple.vector_payloads)) {
       if (payload.accounting_active &&
           payload.accounting_owner != expected_owner) {
         return ValueReleaseResult{false, ValueInvariant::none,
@@ -1084,7 +1161,7 @@ ValueReleaseResult release_value_reservations(
       }
     }
     for (const TupleTableReservation &reservation :
-         value.tuple.reservations) {
+         host_array_span(value.tuple.reservations)) {
       if (reservation.accounting_active &&
           reservation.canonical_bytes != 0U &&
           reservation.accounting_owner != expected_owner) {
@@ -1109,33 +1186,36 @@ ValueReleaseResult release_value_reservations(
 
   const auto set_parent = [&value](std::size_t child_index,
                                    std::size_t parent_index) {
-    ValueNode &child = value.tuple.nodes[child_index];
+    ValueNode &child = value.tuple.nodes.storage.get()[child_index];
     if (child.container == ContainerKind::tuple) {
       child.vector_payload_index = parent_index;
     } else {
       child.first_child = parent_index;
     }
   };
-  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size();
+  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size;
        ++node_index) {
-    const ValueNode &node = value.tuple.nodes[node_index];
+    const ValueNode &node = value.tuple.nodes.storage.get()[node_index];
     if (node.container != ContainerKind::tuple) {
       continue;
     }
     for (std::size_t offset = 0U; offset < node.child_count; ++offset) {
-      set_parent(value.tuple.child_indexes[node.first_child + offset],
+      set_parent(value.tuple.child_indexes.storage.get()[
+                     node.first_child + offset],
                  node_index);
     }
   }
   for (std::size_t offset = 0U; offset < value.tuple.child_count; ++offset) {
-    set_parent(value.tuple.child_indexes[value.tuple.first_child + offset],
+    set_parent(value.tuple.child_indexes.storage.get()[
+                   value.tuple.first_child + offset],
                value.tuple.root_index);
   }
 
   std::size_t node_index = value.tuple.root_index;
   while (true) {
     const bool root = node_index == value.tuple.root_index;
-    ValueNode *node = root ? nullptr : &value.tuple.nodes[node_index];
+    ValueNode *node =
+        root ? nullptr : &value.tuple.nodes.storage.get()[node_index];
     const ContainerKind container =
         root ? ContainerKind::tuple : node->container;
     if (container == ContainerKind::tuple) {
@@ -1146,13 +1226,15 @@ ValueReleaseResult release_value_reservations(
       if (remaining_children != 0U) {
         --remaining_children;
         node_index =
-            value.tuple.child_indexes[first_child + remaining_children];
+            value.tuple.child_indexes.storage.get()[
+                first_child + remaining_children];
         continue;
       }
 
       TupleTableReservation &reservation =
           root ? value.tuple.root_reservation
-               : value.tuple.reservations[node->tuple_reservation_index];
+               : value.tuple.reservations.storage.get()[
+                     node->tuple_reservation_index];
       if (reservation.accounting_active &&
           reservation.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
@@ -1178,7 +1260,8 @@ ValueReleaseResult release_value_reservations(
       reservation.lifetime_observer = ResourceLifetimeObserver{};
     } else if (container == ContainerKind::vector) {
       VectorValue &vector =
-          value.tuple.vector_payloads[node->vector_payload_index];
+          value.tuple.vector_payloads.storage.get()[
+              node->vector_payload_index];
       std::size_t element_count = 0U;
       switch (vector.element_type) {
       case ScalarType::boolean:
@@ -1266,13 +1349,15 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
     return ValueReleaseResult{true, ValueInvariant::none};
   }
 
-  for (const VectorValue &payload : value.tuple.vector_payloads) {
+  for (const VectorValue &payload :
+       host_array_span(value.tuple.vector_payloads)) {
     if (payload.accounting_active && payload.accounting_owner != expected_owner) {
       return ValueReleaseResult{false, ValueInvariant::none,
                                 ValueReleaseError::resource_context_mismatch};
     }
   }
-  for (const TupleTableReservation &reservation : value.tuple.reservations) {
+  for (const TupleTableReservation &reservation :
+       host_array_span(value.tuple.reservations)) {
     if (reservation.accounting_active &&
         reservation.canonical_bytes != 0U &&
         reservation.accounting_owner != expected_owner) {
@@ -1289,33 +1374,36 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
 
   const auto set_parent = [&value](std::size_t child_index,
                                    std::size_t parent_index) {
-    ValueNode &child = value.tuple.nodes[child_index];
+    ValueNode &child = value.tuple.nodes.storage.get()[child_index];
     if (child.container == ContainerKind::tuple) {
       child.vector_payload_index = parent_index;
     } else {
       child.first_child = parent_index;
     }
   };
-  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size();
+  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size;
        ++node_index) {
-    const ValueNode &node = value.tuple.nodes[node_index];
+    const ValueNode &node = value.tuple.nodes.storage.get()[node_index];
     if (node.container != ContainerKind::tuple) {
       continue;
     }
     for (std::size_t offset = 0U; offset < node.child_count; ++offset) {
-      set_parent(value.tuple.child_indexes[node.first_child + offset],
+      set_parent(value.tuple.child_indexes.storage.get()[
+                     node.first_child + offset],
                  node_index);
     }
   }
   for (std::size_t offset = 0U; offset < value.tuple.child_count; ++offset) {
-    set_parent(value.tuple.child_indexes[value.tuple.first_child + offset],
+    set_parent(value.tuple.child_indexes.storage.get()[
+                   value.tuple.first_child + offset],
                value.tuple.root_index);
   }
 
   std::size_t node_index = value.tuple.root_index;
   while (true) {
     const bool root = node_index == value.tuple.root_index;
-    ValueNode *node = root ? nullptr : &value.tuple.nodes[node_index];
+    ValueNode *node =
+        root ? nullptr : &value.tuple.nodes.storage.get()[node_index];
     const ContainerKind container =
         root ? ContainerKind::tuple : node->container;
     if (container == ContainerKind::tuple) {
@@ -1326,12 +1414,14 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
       if (remaining_children != 0U) {
         --remaining_children;
         node_index =
-            value.tuple.child_indexes[first_child + remaining_children];
+            value.tuple.child_indexes.storage.get()[
+                first_child + remaining_children];
         continue;
       }
       TupleTableReservation &reservation =
           root ? value.tuple.root_reservation
-               : value.tuple.reservations[node->tuple_reservation_index];
+               : value.tuple.reservations.storage.get()[
+                     node->tuple_reservation_index];
       if (reservation.accounting_active &&
           reservation.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
@@ -1346,7 +1436,8 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
       reservation.accounting_owner = nullptr;
     } else if (container == ContainerKind::vector) {
       VectorValue &vector =
-          value.tuple.vector_payloads[node->vector_payload_index];
+          value.tuple.vector_payloads.storage.get()[
+              node->vector_payload_index];
       if (vector.accounting_active &&
           vector.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= vector.canonical_bytes;
@@ -1368,10 +1459,12 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
   }
 
   value.tuple.child_count = value.tuple.root_reservation.element_count;
-  for (ValueNode &node : value.tuple.nodes) {
+  for (ValueNode &node : host_array_span(value.tuple.nodes)) {
     if (node.container == ContainerKind::tuple) {
       node.child_count =
-          value.tuple.reservations[node.tuple_reservation_index].element_count;
+          value.tuple.reservations.storage
+              .get()[node.tuple_reservation_index]
+              .element_count;
       node.vector_payload_index = 0U;
     } else {
       node.first_child = 0U;

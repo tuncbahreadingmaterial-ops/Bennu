@@ -580,9 +580,8 @@ ScalarKernelResult integer_overflow(
     std::span<const ScalarValue> operands,
     SourceLocation call_location) {
   Error error = make_error(ErrorKind::domain_error, call_location);
-  error.primitive = PrimitiveErrorContext{std::string(descriptor.name),
-                                          std::optional<PrimitiveId>{
-                                              descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
   ScalarSignatureContext signature_context;
   signature_context.parameter_types.reserve(signature.parameter_count);
   for (std::size_t index = 0; index < signature.parameter_count; ++index) {

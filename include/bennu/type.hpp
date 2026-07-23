@@ -1,11 +1,12 @@
 #ifndef BENNU_TYPE_HPP
 #define BENNU_TYPE_HPP
 
+#include "bennu/host_storage.hpp"
+
 #include <cstddef>
 #include <optional>
 #include <span>
-#include <string>
-#include <vector>
+#include <string_view>
 
 namespace bennu {
 
@@ -25,10 +26,14 @@ struct TypeNode {
 };
 
 struct TypeArena {
-  std::vector<TypeNode> nodes;
-  std::vector<std::size_t> child_indexes;
-  std::size_t root_index;
+  HostArray<TypeNode> nodes{};
+  HostArray<std::size_t> child_indexes{};
+  std::size_t root_index{0U};
+  std::optional<TypeNode> inline_leaf{};
 };
+
+std::span<TypeNode> type_nodes(TypeArena &type);
+std::span<const TypeNode> type_nodes(const TypeArena &type);
 
 enum class TypeInvariant {
   none,
@@ -44,18 +49,6 @@ enum class TypeInvariant {
   aliased_tuple_child,
   orphan_type_node,
   orphan_tuple_edge,
-};
-
-enum class HostResourceErrorReason {
-  none,
-  size_overflow,
-  allocation_unavailable,
-};
-
-struct HostAllocationFailureInjection {
-  std::optional<std::size_t> fail_at_allocation_ordinal;
-  std::size_t allocation_ordinal{0U};
-  std::optional<std::size_t> max_container_elements{};
 };
 
 struct TypeValidationResult {
@@ -88,7 +81,8 @@ enum class TypeFormatError {
 
 struct TypeFormattingResult {
   bool ok;
-  std::string formatted;
+  HostArray<char> formatted_storage{};
+  std::string_view formatted{};
   TypeInvariant invariant;
   TypeFormatError error;
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
@@ -96,6 +90,10 @@ struct TypeFormattingResult {
 
 TypeArena make_scalar_type(ScalarType type);
 TypeArena make_vector_type(ScalarType element_type);
+TypeConstructionResult clone_type(const TypeArena &type);
+TypeConstructionResult clone_type(
+    const TypeArena &type,
+    HostAllocationFailureInjection &allocation_failure);
 TypeConstructionResult make_tuple_type(std::span<const TypeArena> elements);
 TypeConstructionResult make_tuple_type(
     std::span<const TypeArena> elements,

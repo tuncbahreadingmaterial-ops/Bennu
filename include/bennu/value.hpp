@@ -8,8 +8,8 @@
 #include <cstdlib>
 #include <memory>
 #include <optional>
-#include <string>
-#include <vector>
+#include <span>
+#include <string_view>
 
 namespace bennu {
 
@@ -96,11 +96,11 @@ struct ValueNode {
 };
 
 struct TupleValue {
-  std::vector<ValueNode> nodes{};
-  std::vector<std::size_t> child_indexes{};
+  HostArray<ValueNode> nodes{};
+  HostArray<std::size_t> child_indexes{};
   std::size_t root_index{0U};
-  std::vector<VectorValue> vector_payloads{};
-  std::vector<TupleTableReservation> reservations{};
+  HostArray<VectorValue> vector_payloads{};
+  HostArray<TupleTableReservation> reservations{};
   TupleTableReservation root_reservation{};
   std::size_t first_child{0U};
   std::size_t child_count{0U};
@@ -153,10 +153,11 @@ struct ValueValidationResult {
   bool ok;
   ValueInvariant invariant;
   ValueAccessError error{ValueAccessError::none};
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
 };
 
 struct ScalarProjectionResult {
@@ -173,13 +174,15 @@ enum class ValueFormatError {
 
 struct ValueFormattingResult {
   bool ok;
-  std::string formatted;
+  std::string_view formatted;
   ValueInvariant invariant;
   ValueFormatError error;
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
+  HostArray<char> formatted_storage{};
 };
 
 struct BorrowedValueView {
@@ -192,10 +195,11 @@ struct ValueTypeResult {
   TypeArena type;
   ValueInvariant invariant;
   ValueAccessError error;
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
 };
 
 struct ValueTupleArityResult {
@@ -203,10 +207,11 @@ struct ValueTupleArityResult {
   std::size_t arity;
   ValueInvariant invariant;
   ValueAccessError error;
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
 };
 
 struct ValueTupleElementResult {
@@ -214,19 +219,21 @@ struct ValueTupleElementResult {
   BorrowedValueView view;
   ValueInvariant invariant;
   ValueAccessError error;
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
 };
 
 struct ValueDestructionResult {
   bool ok;
   ValueInvariant invariant;
-  std::vector<std::size_t> path{};
+  std::span<const std::size_t> path{};
   std::optional<std::size_t> node_index{};
   std::optional<std::size_t> edge_index{};
   HostResourceErrorReason resource_error{HostResourceErrorReason::none};
+  HostArray<std::size_t> path_storage{};
 };
 
 Value make_bool_value(bool value);
