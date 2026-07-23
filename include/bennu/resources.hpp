@@ -16,12 +16,15 @@ namespace bennu {
 enum class ExecutionProfile {
   trusted_local_v1,
   bounded_v1,
+  trusted_local_v2,
+  bounded_v2,
 };
 
 struct ResourceLimits {
   std::optional<std::size_t> max_vector_bytes;
   std::optional<std::size_t> max_live_evaluation_bytes;
   std::optional<std::size_t> max_work_units;
+  std::optional<std::size_t> max_tuple_table_bytes{};
 };
 
 struct AllocationFailureInjection {
@@ -63,10 +66,33 @@ struct WorkChargeResult {
   Error error;
 };
 
+struct TupleReservationResult {
+  bool ok;
+  TupleTableReservation reservation;
+  Error error;
+};
+
+struct TupleConstructionResult {
+  bool ok;
+  Value value;
+  ValueInvariant invariant;
+  Error error;
+};
+
+struct ValueReleaseResult {
+  bool ok;
+  ValueInvariant invariant;
+};
+
 EvaluationResources make_trusted_local_resources(
     AllocationFailureInjection allocation_failure);
 EvaluationResources make_bounded_resources(
     ResourceLimits limits, AllocationFailureInjection allocation_failure);
+EvaluationResources make_trusted_local_v2_resources(
+    AllocationFailureInjection allocation_failure);
+EvaluationResources make_bounded_v2_resources(
+    ResourceLimits limits, AllocationFailureInjection allocation_failure);
+std::string_view execution_profile_name(ExecutionProfile profile);
 
 VectorAllocationResult allocate_vector(EvaluationResources &resources,
                                        ScalarType element_type,
@@ -91,10 +117,18 @@ WorkChargeResult charge_work(EvaluationResources &resources,
                              std::size_t work_units,
                              SourceLocation location,
                              std::string_view producer_name);
+TupleReservationResult reserve_tuple_table(
+    EvaluationResources &resources, std::size_t element_count,
+    SourceLocation location, std::string_view producer_name);
+TupleConstructionResult make_tuple_value(
+    EvaluationResources &resources, std::span<Value> elements,
+    SourceLocation location, std::string_view producer_name);
 void release_vector_reservation(EvaluationResources &resources,
                                 Value &value);
 void release_workspace(EvaluationResources &resources,
                        WorkspaceReservation &reservation);
+ValueReleaseResult release_value_reservations(EvaluationResources &resources,
+                                              Value &value);
 
 } // namespace bennu
 

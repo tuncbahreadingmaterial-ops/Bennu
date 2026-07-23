@@ -15,6 +15,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace bennu {
 
@@ -63,7 +64,9 @@ VectorValue empty_vector() {
 }
 
 Value invalid_construction_value() {
-  return Value{ContainerKind::scalar, empty_scalar(), empty_vector()};
+  Value value{ContainerKind::scalar, empty_scalar(), empty_vector()};
+  value.claimed = false;
+  return value;
 }
 
 ValueValidationResult validate_scalar(const ScalarValue &scalar) {
@@ -217,77 +220,324 @@ Value make_double_value(double value) {
                empty_vector()};
 }
 
+Value move_value(Value &source) {
+  if (!source.claimed) {
+    return invalid_construction_value();
+  }
+  Value result{source.container, source.scalar, std::move(source.vector),
+               std::move(source.tuple), true};
+  source = invalid_construction_value();
+  return result;
+}
+
 ValueValidationResult validate_value(const Value &value) {
-  switch (value.container) {
-  case ContainerKind::scalar:
+  std::vector<std::size_t> current_path;
+  const auto invalid = [&current_path](
+                           ValueInvariant invariant, std::size_t node_index,
+                           std::optional<std::size_t> edge_index = std::nullopt) {
+    ValueValidationResult result{false, invariant,
+                                 ValueAccessError::invalid_value};
+    result.path = current_path;
+    result.node_index = node_index;
+    result.edge_index = edge_index;
+    return result;
+  };
+  const auto tuple_fields_empty = [](const TupleValue &tuple) {
+    return tuple.nodes.empty() && tuple.child_indexes.empty() &&
+           tuple.root_index == 0U && tuple.vector_payloads.empty() &&
+           tuple.reservations.empty() &&
+           tuple.root_reservation.storage.get() == nullptr &&
+           tuple.root_reservation.element_count == 0U &&
+           tuple.root_reservation.canonical_bytes == 0U &&
+           !tuple.root_reservation.accounting_active &&
+           tuple.first_child == 0U && tuple.child_count == 0U;
+  };
+  const auto vector_validation = [&invalid](const VectorValue &vector,
+                                             std::size_t node_index) {
+    const auto accounting_valid = [&invalid, node_index](
+                                      const VectorValue &payload,
+                                      std::size_t count,
+                                      std::size_t width) {
+      if (count > std::numeric_limits<std::size_t>::max() / width) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
+      }
+      const std::size_t bytes = count * width;
+      if (payload.canonical_bytes != bytes ||
+          (bytes == 0U && payload.accounting_active)) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
+      }
+      return ValueValidationResult{true, ValueInvariant::none};
+    };
+    switch (vector.element_type) {
+    case ScalarType::boolean:
+      if (vector.integers.get() != nullptr || vector.integer_count != 0U ||
+          vector.doubles.get() != nullptr || vector.double_count != 0U ||
+          (vector.boolean_count == 0U) !=
+              (vector.booleans.get() == nullptr)) {
+        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+      }
+      for (std::size_t index = 0U; index < vector.boolean_count; ++index) {
+        if (vector.booleans.get()[index] > 1U) {
+          return invalid(ValueInvariant::invalid_boolean_element, node_index);
+        }
+      }
+      return accounting_valid(vector, vector.boolean_count, 1U);
+    case ScalarType::integer:
+      if (vector.booleans.get() != nullptr || vector.boolean_count != 0U ||
+          vector.doubles.get() != nullptr || vector.double_count != 0U ||
+          (vector.integer_count == 0U) !=
+              (vector.integers.get() == nullptr)) {
+        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+      }
+      return accounting_valid(vector, vector.integer_count,
+                              sizeof(std::int64_t));
+    case ScalarType::double_precision:
+      if (vector.booleans.get() != nullptr || vector.boolean_count != 0U ||
+          vector.integers.get() != nullptr || vector.integer_count != 0U ||
+          (vector.double_count == 0U) !=
+              (vector.doubles.get() == nullptr)) {
+        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+      }
+      for (std::size_t index = 0U; index < vector.double_count; ++index) {
+        if (!is_canonical_double(vector.doubles.get()[index])) {
+          return invalid(ValueInvariant::noncanonical_nan, node_index);
+        }
+      }
+      return accounting_valid(vector, vector.double_count, sizeof(double));
+    }
+    return invalid(ValueInvariant::unknown_scalar_type, node_index);
+  };
+
+  if (!value.claimed) {
+    return invalid(ValueInvariant::empty_owner, 0U);
+  }
+  if (value.container == ContainerKind::scalar) {
     if (value.vector.element_type != ScalarType::boolean ||
         value.vector.booleans.get() != nullptr ||
-        value.vector.boolean_count != 0 ||
+        value.vector.boolean_count != 0U ||
         value.vector.integers.get() != nullptr ||
-        value.vector.integer_count != 0 ||
+        value.vector.integer_count != 0U ||
         value.vector.doubles.get() != nullptr ||
-        value.vector.double_count != 0) {
-      return ValueValidationResult{false,
-                                   ValueInvariant::inactive_vector_payload};
+        value.vector.double_count != 0U ||
+        value.vector.canonical_bytes != 0U ||
+        value.vector.accounting_active) {
+      return invalid(ValueInvariant::inactive_vector_payload, 0U);
     }
-    return validate_scalar(value.scalar);
-  case ContainerKind::vector:
-    if (!is_empty_scalar(value.scalar)) {
-      return ValueValidationResult{false,
-                                   ValueInvariant::inactive_scalar_field};
+    if (!tuple_fields_empty(value.tuple)) {
+      return invalid(ValueInvariant::inactive_tuple_field, 0U);
     }
-    switch (value.vector.element_type) {
-    case ScalarType::boolean:
-      if (value.vector.integers.get() != nullptr ||
-          value.vector.integer_count != 0 ||
-          value.vector.doubles.get() != nullptr ||
-          value.vector.double_count != 0 ||
-          (value.vector.boolean_count != 0 &&
-           value.vector.booleans.get() == nullptr)) {
-        return ValueValidationResult{
-            false, ValueInvariant::inactive_vector_payload};
-      }
-      for (std::size_t index = 0; index < value.vector.boolean_count; ++index) {
-        const std::uint8_t element = value.vector.booleans.get()[index];
-        if (element > 1U) {
-          return ValueValidationResult{
-              false, ValueInvariant::invalid_boolean_element};
-        }
-      }
-      return ValueValidationResult{true, ValueInvariant::none};
-    case ScalarType::integer:
-      if (value.vector.booleans.get() != nullptr ||
-          value.vector.boolean_count != 0 ||
-          value.vector.doubles.get() != nullptr ||
-          value.vector.double_count != 0 ||
-          (value.vector.integer_count != 0 &&
-           value.vector.integers.get() == nullptr)) {
-        return ValueValidationResult{
-            false, ValueInvariant::inactive_vector_payload};
-      }
-      return ValueValidationResult{true, ValueInvariant::none};
-    case ScalarType::double_precision:
-      if (value.vector.booleans.get() != nullptr ||
-          value.vector.boolean_count != 0 ||
-          value.vector.integers.get() != nullptr ||
-          value.vector.integer_count != 0 ||
-          (value.vector.double_count != 0 &&
-           value.vector.doubles.get() == nullptr)) {
-        return ValueValidationResult{
-            false, ValueInvariant::inactive_vector_payload};
-      }
-      for (std::size_t index = 0; index < value.vector.double_count; ++index) {
-        const double element = value.vector.doubles.get()[index];
-        if (!is_canonical_double(element)) {
-          return ValueValidationResult{false,
-                                       ValueInvariant::noncanonical_nan};
-        }
-      }
-      return ValueValidationResult{true, ValueInvariant::none};
-    }
-    return ValueValidationResult{false, ValueInvariant::unknown_scalar_type};
+    const ValueValidationResult scalar_validation = validate_scalar(value.scalar);
+    return scalar_validation.ok
+               ? scalar_validation
+               : invalid(scalar_validation.invariant, 0U);
   }
-  return ValueValidationResult{false, ValueInvariant::unknown_container};
+  if (value.container == ContainerKind::vector) {
+    if (!is_empty_scalar(value.scalar)) {
+      return invalid(ValueInvariant::inactive_scalar_field, 0U);
+    }
+    if (!tuple_fields_empty(value.tuple)) {
+      return invalid(ValueInvariant::inactive_tuple_field, 0U);
+    }
+    return vector_validation(value.vector, 0U);
+  }
+  if (value.container != ContainerKind::tuple) {
+    return invalid(ValueInvariant::unknown_container, 0U);
+  }
+  if (!is_empty_scalar(value.scalar)) {
+    return invalid(ValueInvariant::inactive_scalar_field,
+                   value.tuple.root_index);
+  }
+  if (value.vector.element_type != ScalarType::boolean ||
+      value.vector.booleans.get() != nullptr ||
+      value.vector.boolean_count != 0U ||
+      value.vector.integers.get() != nullptr ||
+      value.vector.integer_count != 0U ||
+      value.vector.doubles.get() != nullptr ||
+      value.vector.double_count != 0U || value.vector.canonical_bytes != 0U ||
+      value.vector.accounting_active) {
+    return invalid(ValueInvariant::inactive_vector_payload,
+                   value.tuple.root_index);
+  }
+
+  const std::size_t root_index = value.tuple.root_index;
+  const std::size_t node_count = value.tuple.nodes.size() + 1U;
+  if (root_index >= node_count) {
+    return invalid(ValueInvariant::invalid_value_root, root_index);
+  }
+  if (root_index != node_count - 1U) {
+    return invalid(ValueInvariant::nonfinal_value_root, root_index);
+  }
+
+  std::vector<std::uint8_t> visited(node_count, 0U);
+  std::vector<std::uint8_t> edge_owners(value.tuple.child_indexes.size(), 0U);
+  std::vector<std::size_t> parent_count(node_count, 0U);
+  std::vector<std::uint8_t> payload_owners(
+      value.tuple.vector_payloads.size(), 0U);
+  std::vector<std::uint8_t> reservation_owners(
+      value.tuple.reservations.size() + 1U, 0U);
+  struct ValidationWork {
+    std::size_t node_index;
+    std::vector<std::size_t> path;
+  };
+  std::vector<ValidationWork> stack{
+      ValidationWork{root_index, std::vector<std::size_t>{}}};
+  while (!stack.empty()) {
+    ValidationWork work = std::move(stack.back());
+    stack.pop_back();
+    const std::size_t node_index = work.node_index;
+    current_path = std::move(work.path);
+    if (visited[node_index] != 0U) {
+      return invalid(ValueInvariant::aliased_tuple_child, node_index);
+    }
+    visited[node_index] = 1U;
+
+    const bool root = node_index == root_index;
+    const ContainerKind container =
+        root ? ContainerKind::tuple
+             : value.tuple.nodes[node_index].container;
+    if (container == ContainerKind::scalar) {
+      const ValueNode &node = value.tuple.nodes[node_index];
+      if (node.first_child != 0U || node.child_count != 0U ||
+          node.tuple_reservation_index != 0U ||
+          node.vector_payload_index != 0U) {
+        return invalid(ValueInvariant::inactive_tuple_field, node_index);
+      }
+      const ValueValidationResult scalar_validation = validate_scalar(node.scalar);
+      if (!scalar_validation.ok) {
+        return invalid(scalar_validation.invariant, node_index);
+      }
+      continue;
+    }
+    if (container == ContainerKind::vector) {
+      const ValueNode &node = value.tuple.nodes[node_index];
+      if (!is_empty_scalar(node.scalar)) {
+        return invalid(ValueInvariant::inactive_scalar_field, node_index);
+      }
+      if (node.first_child != 0U || node.child_count != 0U ||
+          node.tuple_reservation_index != 0U) {
+        return invalid(ValueInvariant::inactive_tuple_field, node_index);
+      }
+      if (node.vector_payload_index >= value.tuple.vector_payloads.size()) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
+      }
+      if (payload_owners[node.vector_payload_index] != 0U) {
+        return invalid(ValueInvariant::aliased_vector_payload, node_index);
+      }
+      payload_owners[node.vector_payload_index] = 1U;
+      const ValueValidationResult vector_result =
+          vector_validation(
+              value.tuple.vector_payloads[node.vector_payload_index],
+              node_index);
+      if (!vector_result.ok) {
+        return vector_result;
+      }
+      continue;
+    }
+    if (container != ContainerKind::tuple) {
+      return invalid(ValueInvariant::unknown_container, node_index);
+    }
+
+    const ScalarValue &scalar = root ? value.scalar
+                                     : value.tuple.nodes[node_index].scalar;
+    if (!is_empty_scalar(scalar)) {
+      return invalid(ValueInvariant::inactive_scalar_field, node_index);
+    }
+    if (!root && value.tuple.nodes[node_index].vector_payload_index != 0U) {
+      return invalid(ValueInvariant::inactive_vector_payload, node_index);
+    }
+    const std::size_t first_child =
+        root ? value.tuple.first_child
+             : value.tuple.nodes[node_index].first_child;
+    const std::size_t child_count =
+        root ? value.tuple.child_count
+             : value.tuple.nodes[node_index].child_count;
+    if (first_child > value.tuple.child_indexes.size() ||
+        child_count > value.tuple.child_indexes.size() - first_child) {
+      return invalid(ValueInvariant::invalid_tuple_range, node_index,
+                     first_child);
+    }
+    for (std::size_t offset = 0U; offset < child_count; ++offset) {
+      const std::size_t edge_index = first_child + offset;
+      if (edge_owners[edge_index] != 0U) {
+        return invalid(ValueInvariant::overlapping_tuple_range, node_index,
+                       edge_index);
+      }
+      edge_owners[edge_index] = 1U;
+      const std::size_t child_index = value.tuple.child_indexes[edge_index];
+      if (child_index >= node_count) {
+        return invalid(ValueInvariant::invalid_tuple_child_index, node_index,
+                       edge_index);
+      }
+      if (child_index >= node_index) {
+        return invalid(ValueInvariant::non_postorder_tuple_child, node_index,
+                       edge_index);
+      }
+      ++parent_count[child_index];
+      if (parent_count[child_index] != 1U) {
+        return invalid(ValueInvariant::aliased_tuple_child, child_index,
+                       edge_index);
+      }
+    }
+
+    const std::size_t reservation_index =
+        root ? value.tuple.reservations.size()
+             : value.tuple.nodes[node_index].tuple_reservation_index;
+    if (reservation_index > value.tuple.reservations.size()) {
+      return invalid(ValueInvariant::missing_tuple_reservation, node_index);
+    }
+    if (reservation_owners[reservation_index] != 0U) {
+      return invalid(ValueInvariant::aliased_tuple_reservation, node_index);
+    }
+    reservation_owners[reservation_index] = 1U;
+    const TupleTableReservation &reservation =
+        root ? value.tuple.root_reservation
+             : value.tuple.reservations[reservation_index];
+    if (child_count > std::numeric_limits<std::size_t>::max() / 16U) {
+      return invalid(ValueInvariant::invalid_tuple_reservation_count,
+                     node_index);
+    }
+    const std::size_t expected_bytes = child_count * 16U;
+    if (reservation.element_count != child_count ||
+        reservation.canonical_bytes != expected_bytes ||
+        (expected_bytes == 0U && reservation.storage.get() != nullptr) ||
+        (expected_bytes != 0U && reservation.storage.get() == nullptr)) {
+      return invalid(ValueInvariant::invalid_tuple_reservation_count,
+                     node_index);
+    }
+    for (std::size_t offset = child_count; offset > 0U; --offset) {
+      const std::size_t child_offset = offset - 1U;
+      std::vector<std::size_t> child_path = current_path;
+      child_path.push_back(child_offset);
+      stack.push_back(ValidationWork{
+          value.tuple.child_indexes[first_child + child_offset],
+          std::move(child_path)});
+    }
+  }
+
+  for (std::size_t index = 0U; index < visited.size(); ++index) {
+    if (visited[index] == 0U) {
+      return invalid(ValueInvariant::orphan_value_node, index);
+    }
+  }
+  for (std::size_t index = 0U; index < edge_owners.size(); ++index) {
+    if (edge_owners[index] == 0U) {
+      return invalid(ValueInvariant::orphan_tuple_edge, root_index, index);
+    }
+  }
+  for (std::size_t index = 0U; index < payload_owners.size(); ++index) {
+    if (payload_owners[index] == 0U) {
+      return invalid(ValueInvariant::orphan_vector_payload_handle, root_index);
+    }
+  }
+  for (std::size_t index = 0U; index < reservation_owners.size(); ++index) {
+    if (reservation_owners[index] == 0U) {
+      return invalid(ValueInvariant::orphan_tuple_reservation, root_index);
+    }
+  }
+  return ValueValidationResult{true, ValueInvariant::none};
 }
 
 ValueValidationResult value_element_type(const Value &value,
@@ -296,6 +546,10 @@ ValueValidationResult value_element_type(const Value &value,
   const ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     return validation;
+  }
+  if (value.container == ContainerKind::tuple) {
+    return ValueValidationResult{false, ValueInvariant::none,
+                                 ValueAccessError::container_mismatch};
   }
   element_type = value.container == ContainerKind::scalar
                      ? value.scalar.type
@@ -309,6 +563,10 @@ ValueValidationResult value_rank(const Value &value, std::size_t &rank) {
   if (!validation.ok) {
     return validation;
   }
+  if (value.container == ContainerKind::tuple) {
+    return ValueValidationResult{false, ValueInvariant::none,
+                                 ValueAccessError::container_mismatch};
+  }
   rank = value.container == ContainerKind::scalar ? 0 : 1;
   return validation;
 }
@@ -318,6 +576,10 @@ ValueValidationResult value_length(const Value &value, std::size_t &length) {
   const ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     return validation;
+  }
+  if (value.container == ContainerKind::tuple) {
+    return ValueValidationResult{false, ValueInvariant::none,
+                                 ValueAccessError::container_mismatch};
   }
   length = value.container == ContainerKind::scalar
                ? 1
@@ -332,6 +594,10 @@ ScalarProjectionResult project_scalar(const Value &value, std::size_t index) {
   }
   if (value.container == ContainerKind::scalar) {
     return ScalarProjectionResult{true, value.scalar, ValueAccessError::none};
+  }
+  if (value.container == ContainerKind::tuple) {
+    return ScalarProjectionResult{false, empty_scalar(),
+                                  ValueAccessError::container_mismatch};
   }
   switch (value.vector.element_type) {
   case ScalarType::boolean:
@@ -371,15 +637,238 @@ ScalarProjectionResult project_scalar(const Value &value, std::size_t index) {
                                 ValueAccessError::invalid_value};
 }
 
-void destroy_value(Value &value) {
+namespace {
+
+TypeArena type_for_value_node(const Value &value, std::size_t requested_root) {
+  if (value.container != ContainerKind::tuple) {
+    return value.container == ContainerKind::scalar
+               ? make_scalar_type(value.scalar.type)
+               : make_vector_type(value.vector.element_type);
+  }
+
+  const std::size_t logical_count = value.tuple.nodes.size() + 1U;
+  std::vector<std::uint8_t> reachable(logical_count, 0U);
+  std::vector<std::size_t> stack{requested_root};
+  while (!stack.empty()) {
+    const std::size_t node_index = stack.back();
+    stack.pop_back();
+    if (reachable[node_index] != 0U) {
+      continue;
+    }
+    reachable[node_index] = 1U;
+    const bool root = node_index == value.tuple.root_index;
+    const ContainerKind container =
+        root ? ContainerKind::tuple
+             : value.tuple.nodes[node_index].container;
+    if (container != ContainerKind::tuple) {
+      continue;
+    }
+    const std::size_t first_child =
+        root ? value.tuple.first_child
+             : value.tuple.nodes[node_index].first_child;
+    const std::size_t child_count =
+        root ? value.tuple.child_count
+             : value.tuple.nodes[node_index].child_count;
+    for (std::size_t offset = 0U; offset < child_count; ++offset) {
+      stack.push_back(value.tuple.child_indexes[first_child + offset]);
+    }
+  }
+
+  TypeArena type;
+  std::vector<std::size_t> index_map(logical_count, 0U);
+  for (std::size_t node_index = 0U; node_index <= requested_root; ++node_index) {
+    if (reachable[node_index] == 0U) {
+      continue;
+    }
+    const bool root = node_index == value.tuple.root_index;
+    const ContainerKind container =
+        root ? ContainerKind::tuple
+             : value.tuple.nodes[node_index].container;
+    TypeNode node{TypeKind::scalar, ScalarType::boolean, 0U, 0U};
+    if (container == ContainerKind::scalar) {
+      node.scalar = value.tuple.nodes[node_index].scalar.type;
+    } else if (container == ContainerKind::vector) {
+      node.kind = TypeKind::vector;
+      node.scalar = value
+                        .tuple.vector_payloads[value.tuple.nodes[node_index]
+                                                   .vector_payload_index]
+                        .element_type;
+    } else {
+      node.kind = TypeKind::tuple;
+      const std::size_t first_child =
+          root ? value.tuple.first_child
+               : value.tuple.nodes[node_index].first_child;
+      const std::size_t child_count =
+          root ? value.tuple.child_count
+               : value.tuple.nodes[node_index].child_count;
+      node.first_child = type.child_indexes.size();
+      node.child_count = child_count;
+      for (std::size_t offset = 0U; offset < child_count; ++offset) {
+        type.child_indexes.push_back(index_map[
+            value.tuple.child_indexes[first_child + offset]]);
+      }
+    }
+    index_map[node_index] = type.nodes.size();
+    type.nodes.push_back(node);
+  }
+  type.root_index = index_map[requested_root];
+  return type;
+}
+
+bool append_vector(std::string &formatted, const VectorValue &vector) {
+  const std::size_t length = active_vector_length(vector);
+  formatted += '(';
+  for (std::size_t index = 0U; index < length; ++index) {
+    if (index != 0U) {
+      formatted += ' ';
+    }
+    switch (vector.element_type) {
+    case ScalarType::boolean:
+      formatted += vector.booleans.get()[index] != 0U ? "true" : "false";
+      break;
+    case ScalarType::integer:
+      if (!append_integer(formatted, vector.integers.get()[index])) {
+        return false;
+      }
+      break;
+    case ScalarType::double_precision:
+      if (!append_double(formatted, vector.doubles.get()[index])) {
+        return false;
+      }
+      break;
+    }
+  }
+  formatted += ')';
+  return true;
+}
+
+struct ValueFormatAction {
+  enum class Kind {
+    node,
+    separator,
+    close_tuple,
+  } kind;
+  std::size_t node_index;
+};
+
+} // namespace
+
+ValueTypeResult value_type(const Value &value) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    ValueTypeResult result{false, TypeArena{{}, {}, 0U},
+                           validation.invariant, ValueAccessError::invalid_value};
+    result.path = validation.path;
+    result.node_index = validation.node_index;
+    result.edge_index = validation.edge_index;
+    return result;
+  }
+  const std::size_t root = value.container == ContainerKind::tuple
+                               ? value.tuple.root_index
+                               : 0U;
+  return ValueTypeResult{true, type_for_value_node(value, root),
+                         ValueInvariant::none, ValueAccessError::none};
+}
+
+ValueTypeResult value_type(BorrowedValueView view) {
+  if (view.owner == nullptr) {
+    return ValueTypeResult{false, TypeArena{{}, {}, 0U},
+                           ValueInvariant::invalid_value_root,
+                           ValueAccessError::invalid_value};
+  }
+  const ValueValidationResult validation = validate_value(*view.owner);
+  if (!validation.ok || view.owner->container != ContainerKind::tuple ||
+      view.node_index >= view.owner->tuple.nodes.size()) {
+    ValueTypeResult result{
+        false, TypeArena{{}, {}, 0U},
+        validation.ok ? ValueInvariant::invalid_value_root
+                      : validation.invariant,
+        ValueAccessError::invalid_value};
+    if (!validation.ok) {
+      result.path = validation.path;
+      result.node_index = validation.node_index;
+      result.edge_index = validation.edge_index;
+    } else {
+      result.node_index = view.node_index;
+    }
+    return result;
+  }
+  return ValueTypeResult{true, type_for_value_node(*view.owner, view.node_index),
+                         ValueInvariant::none, ValueAccessError::none};
+}
+
+ValueTupleArityResult value_tuple_arity(const Value &value) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    ValueTupleArityResult result{false, 0U, validation.invariant,
+                                 ValueAccessError::invalid_value};
+    result.path = validation.path;
+    result.node_index = validation.node_index;
+    result.edge_index = validation.edge_index;
+    return result;
+  }
+  if (value.container != ContainerKind::tuple) {
+    return ValueTupleArityResult{false, 0U, ValueInvariant::none,
+                                 ValueAccessError::container_mismatch};
+  }
+  return ValueTupleArityResult{true, value.tuple.child_count,
+                               ValueInvariant::none, ValueAccessError::none};
+}
+
+ValueTupleElementResult value_tuple_element(const Value &value,
+                                            std::size_t index) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    ValueTupleElementResult result{
+        false, BorrowedValueView{nullptr, 0U}, validation.invariant,
+        ValueAccessError::invalid_value};
+    result.path = validation.path;
+    result.node_index = validation.node_index;
+    result.edge_index = validation.edge_index;
+    return result;
+  }
+  if (value.container != ContainerKind::tuple) {
+    return ValueTupleElementResult{
+        false, BorrowedValueView{nullptr, 0U}, ValueInvariant::none,
+        ValueAccessError::container_mismatch};
+  }
+  if (index >= value.tuple.child_count) {
+    return ValueTupleElementResult{
+        false, BorrowedValueView{nullptr, 0U}, ValueInvariant::none,
+        ValueAccessError::index_out_of_bounds};
+  }
+  return ValueTupleElementResult{
+      true,
+      BorrowedValueView{
+          &value, value.tuple.child_indexes[value.tuple.first_child + index]},
+      ValueInvariant::none, ValueAccessError::none};
+}
+
+ValueDestructionResult destroy_value(Value &value) {
+  if (!value.claimed) {
+    return ValueDestructionResult{true, ValueInvariant::none};
+  }
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    ValueDestructionResult result{false, validation.invariant};
+    result.path = validation.path;
+    result.node_index = validation.node_index;
+    result.edge_index = validation.edge_index;
+    return result;
+  }
   value = invalid_construction_value();
+  return ValueDestructionResult{true, ValueInvariant::none};
 }
 
 ValueFormattingResult format_value(const Value &value) {
   const ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
-    return ValueFormattingResult{false, {}, validation.invariant,
+    ValueFormattingResult result{false, {}, validation.invariant,
                                  ValueFormatError::invalid_value};
+    result.path = validation.path;
+    result.node_index = validation.node_index;
+    result.edge_index = validation.edge_index;
+    return result;
   }
 
   std::string formatted;
@@ -391,38 +880,73 @@ ValueFormattingResult format_value(const Value &value) {
     return ValueFormattingResult{true, std::move(formatted),
                                  ValueInvariant::none, ValueFormatError::none};
   }
+  if (value.container == ContainerKind::vector) {
+    if (!append_vector(formatted, value.vector)) {
+      return ValueFormattingResult{false, {}, ValueInvariant::none,
+                                   ValueFormatError::conversion_failure};
+    }
+    return ValueFormattingResult{true, std::move(formatted),
+                                 ValueInvariant::none, ValueFormatError::none};
+  }
 
-  const std::size_t length = active_vector_length(value.vector);
-  constexpr std::size_t maximum_element_bytes = 25;
-  if (length <=
-      (formatted.max_size() - std::size_t{2}) / maximum_element_bytes) {
-    formatted.reserve(std::size_t{2} + length * maximum_element_bytes);
-  }
-  formatted += '(';
-  for (std::size_t index = 0; index < length; ++index) {
-    if (index != 0) {
+  std::vector<ValueFormatAction> stack;
+  stack.push_back(ValueFormatAction{ValueFormatAction::Kind::node,
+                                    value.tuple.root_index});
+  while (!stack.empty()) {
+    const ValueFormatAction action = stack.back();
+    stack.pop_back();
+    if (action.kind == ValueFormatAction::Kind::separator) {
       formatted += ' ';
+      continue;
     }
-    switch (value.vector.element_type) {
-    case ScalarType::boolean:
-      formatted +=
-          value.vector.booleans.get()[index] != 0 ? "true" : "false";
-      break;
-    case ScalarType::integer:
-      if (!append_integer(formatted, value.vector.integers.get()[index])) {
+    if (action.kind == ValueFormatAction::Kind::close_tuple) {
+      formatted += ']';
+      continue;
+    }
+
+    const bool root = action.node_index == value.tuple.root_index;
+    const ContainerKind container =
+        root ? ContainerKind::tuple
+             : value.tuple.nodes[action.node_index].container;
+    if (container == ContainerKind::scalar) {
+      if (!append_scalar(formatted,
+                         value.tuple.nodes[action.node_index].scalar)) {
         return ValueFormattingResult{false, {}, ValueInvariant::none,
                                      ValueFormatError::conversion_failure};
       }
-      break;
-    case ScalarType::double_precision:
-      if (!append_double(formatted, value.vector.doubles.get()[index])) {
+      continue;
+    }
+    if (container == ContainerKind::vector) {
+      if (!append_vector(
+              formatted,
+              value.tuple.vector_payloads[
+                  value.tuple.nodes[action.node_index].vector_payload_index])) {
         return ValueFormattingResult{false, {}, ValueInvariant::none,
                                      ValueFormatError::conversion_failure};
       }
-      break;
+      continue;
+    }
+
+    formatted += '[';
+    stack.push_back(
+        ValueFormatAction{ValueFormatAction::Kind::close_tuple, 0U});
+    const std::size_t first_child =
+        root ? value.tuple.first_child
+             : value.tuple.nodes[action.node_index].first_child;
+    const std::size_t child_count =
+        root ? value.tuple.child_count
+             : value.tuple.nodes[action.node_index].child_count;
+    for (std::size_t offset = child_count; offset > 0U; --offset) {
+      const std::size_t child_offset = offset - 1U;
+      stack.push_back(ValueFormatAction{
+          ValueFormatAction::Kind::node,
+          value.tuple.child_indexes[first_child + child_offset]});
+      if (child_offset != 0U) {
+        stack.push_back(
+            ValueFormatAction{ValueFormatAction::Kind::separator, 0U});
+      }
     }
   }
-  formatted += ')';
   return ValueFormattingResult{true, std::move(formatted), ValueInvariant::none,
                                ValueFormatError::none};
 }
@@ -718,13 +1242,14 @@ TEST_CASE("public value consumers reject malformed plain records") {
   }
 }
 
-TEST_CASE("explicit destruction releases owned payload and leaves a valid value") {
+TEST_CASE("explicit destruction releases owned payload and leaves an empty owner") {
   Value value = make_double_vector({1.0, 2.0, 3.0}).value;
   REQUIRE(value.vector.double_count == 3);
 
   destroy_value(value);
 
-  CHECK(validate_value(value).ok);
+  CHECK_FALSE(validate_value(value).ok);
+  CHECK_FALSE(value.claimed);
   CHECK(value.container == ContainerKind::scalar);
   CHECK(value.scalar.type == ScalarType::boolean);
   CHECK_FALSE(value.scalar.boolean);

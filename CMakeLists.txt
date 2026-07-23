@@ -46,6 +46,7 @@ set(bennu_implementation_sources
   src/rewrite.cpp
   src/rewrite_c_runtime.cpp
   src/resources.cpp
+  src/type.cpp
   src/value.cpp
 )
 
@@ -197,6 +198,7 @@ if(BUILD_TESTING)
     tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
     tests/public_cutover_conformance.cpp
+    tests/tuple_foundation_conformance.cpp
   )
   target_include_directories(bennu_tests PRIVATE include)
   target_include_directories(bennu_tests SYSTEM PRIVATE third_party/doctest)

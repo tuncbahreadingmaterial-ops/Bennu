@@ -2036,7 +2036,9 @@ Error lowering_type_error(const RewriteProgram &program,
     const RewriteLoweringNode &argument =
         lowering.nodes[program.arguments[call.first_argument + index]];
     context.actual_arguments.push_back(
-        ErrorValueType{lowering_container(argument), argument.element_type});
+        lowering_container(argument) == ContainerKind::scalar
+            ? make_scalar_type(argument.element_type)
+            : make_vector_type(argument.element_type));
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -2051,12 +2053,15 @@ Error lowering_type_error(const RewriteProgram &program,
     accepted.parameters.reserve(signature.parameter_count);
     for (std::size_t parameter_index = 0U;
          parameter_index < signature.parameter_count; ++parameter_index) {
-      accepted.parameters.push_back(ErrorValueType{
-          signature.parameters[parameter_index].container,
-          signature.parameters[parameter_index].element});
+      accepted.parameters.push_back(
+          signature.parameters[parameter_index].container ==
+                  ContainerKind::scalar
+              ? make_scalar_type(signature.parameters[parameter_index].element)
+              : make_vector_type(signature.parameters[parameter_index].element));
     }
-    accepted.result = ErrorValueType{signature.result.container,
-                                     signature.result.element};
+    accepted.result = signature.result.container == ContainerKind::scalar
+                          ? make_scalar_type(signature.result.element)
+                          : make_vector_type(signature.result.element);
     context.accepted_signatures.push_back(std::move(accepted));
     candidates.push_back(&signature);
   }
@@ -3627,8 +3632,9 @@ struct RewriteEvaluatorErrorFixture {
   std::optional<std::size_t> element_index;
 };
 
-bool error_value_type_equal(ErrorValueType left, ErrorValueType right) {
-  return left.container == right.container && left.element == right.element;
+bool error_value_type_equal(const ErrorValueType &left,
+                            const ErrorValueType &right) {
+  return structural_type_equal(left, right);
 }
 
 bool scalar_value_equal(const ScalarValue &left, const ScalarValue &right) {

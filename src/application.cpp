@@ -67,6 +67,9 @@ bool type_accepts(const PrimitiveDescriptor &descriptor,
                   std::size_t argument_index, const Value &argument,
                   ScalarType actual_type) {
   const ValueType parameter = signature.parameters[argument_index];
+  if (argument.container == ContainerKind::tuple) {
+    return false;
+  }
   if (descriptor.lifting == LiftingMode::none) {
     return parameter.container == argument.container &&
            parameter.element == actual_type;
@@ -84,8 +87,10 @@ Error type_error(const PrimitiveDescriptor &descriptor,
   TypeErrorContext context;
   context.actual_arguments.reserve(arguments.size());
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    context.actual_arguments.push_back(
-        ErrorValueType{arguments[index].container, actual_types[index]});
+    ValueTypeResult actual = value_type(arguments[index]);
+    if (actual.ok) {
+      context.actual_arguments.push_back(std::move(actual.type));
+    }
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -100,12 +105,16 @@ Error type_error(const PrimitiveDescriptor &descriptor,
     accepted.parameters.reserve(signature.parameter_count);
     for (std::size_t parameter_index = 0;
          parameter_index < signature.parameter_count; ++parameter_index) {
-      accepted.parameters.push_back(ErrorValueType{
-          signature.parameters[parameter_index].container,
-          signature.parameters[parameter_index].element});
+      accepted.parameters.push_back(
+          signature.parameters[parameter_index].container ==
+                  ContainerKind::scalar
+              ? make_scalar_type(signature.parameters[parameter_index].element)
+              : make_vector_type(signature.parameters[parameter_index].element));
     }
     accepted.result =
-        ErrorValueType{signature.result.container, signature.result.element};
+        signature.result.container == ContainerKind::scalar
+            ? make_scalar_type(signature.result.element)
+            : make_vector_type(signature.result.element);
     context.accepted_signatures.push_back(std::move(accepted));
     candidates.push_back(&signature);
   }
@@ -207,6 +216,16 @@ PrimitiveApplicationResult apply_primitive_impl(
 
   std::array<ScalarType, maximum_application_arity> actual_types{};
   for (std::size_t index = 0; index < arguments.size(); ++index) {
+    const ValueValidationResult validation = validate_value(arguments[index]);
+    if (!validation.ok) {
+      Error error = primitive_error(ErrorKind::invalid_value, descriptor,
+                                    call_location);
+      error.argument_position = index + 1U;
+      error.value = ValueErrorContext{validation.invariant, validation.path,
+                                      validation.node_index,
+                                      validation.edge_index};
+      return application_failure(std::move(error));
+    }
     ScalarType element_type = ScalarType::boolean;
     if (!value_element_type(arguments[index], element_type).ok) {
       return application_failure(type_error(
@@ -603,14 +622,14 @@ TEST_CASE("application errors carry deterministic arity type and shape context")
   if (type.error.type.has_value()) {
     REQUIRE(type.error.type->actual_arguments.size() == 2);
     if (type.error.type->actual_arguments.size() == 2) {
-      CHECK(type.error.type->actual_arguments[0].container ==
-            ContainerKind::vector);
-      CHECK(type.error.type->actual_arguments[0].element ==
-            ScalarType::integer);
-      CHECK(type.error.type->actual_arguments[1].container ==
-            ContainerKind::vector);
-      CHECK(type.error.type->actual_arguments[1].element ==
-            ScalarType::boolean);
+      const TypeArena &left = type.error.type->actual_arguments[0];
+      const TypeArena &right = type.error.type->actual_arguments[1];
+      REQUIRE(left.nodes.size() == 1U);
+      REQUIRE(right.nodes.size() == 1U);
+      CHECK(left.nodes[left.root_index].kind == TypeKind::vector);
+      CHECK(left.nodes[left.root_index].scalar == ScalarType::integer);
+      CHECK(right.nodes[right.root_index].kind == TypeKind::vector);
+      CHECK(right.nodes[right.root_index].scalar == ScalarType::boolean);
     }
     CHECK(type.error.type->accepted_signatures.size() == 2);
   }
