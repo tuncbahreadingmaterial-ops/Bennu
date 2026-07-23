@@ -99,9 +99,9 @@ if(NOT profile_source MATCHES "1, 1, 1, 8U, 24U, 2U" OR
 endif()
 string(FIND "${refusal_source}" "return fflush(stdout) == 0 ? 0 : 1;"
        refusal_success_epilogue)
-if(NOT refusal_success_epilogue EQUAL -1)
+if(refusal_success_epilogue EQUAL -1)
   message(FATAL_ERROR
-    "PUBLIC-RESOURCE-MATRIX refusal artifact retained an unreachable success epilogue")
+    "PUBLIC-RESOURCE-MATRIX refusal artifact was constant-folded during lowering")
 endif()
 
 function(check_success name executable expected_stdout invocation)

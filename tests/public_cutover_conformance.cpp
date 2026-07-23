@@ -227,3 +227,27 @@ TEST_CASE("PUBLIC-RESOURCE-01 allocation injection reaches evaluation and genera
   CHECK(emitted.source.find("0U, 0U, 0U, 1, 0U, BENNU_FAILURE_NONE") !=
         std::string::npos);
 }
+
+TEST_CASE("LOWERING-01 emission defers value-dependent failures to runtime") {
+  const bennu::CEmissionResult domain =
+      bennu::emit_c_source("inc[9223372036854775807]");
+  REQUIRE(domain.ok);
+  CHECK(domain.source.find("BENNU_IMPL_INC_INT") != std::string::npos);
+
+  const bennu::CEmissionResult dynamic_shape =
+      bennu::emit_c_source("add[iota[2] iota[3]]");
+  REQUIRE(dynamic_shape.ok);
+  CHECK(dynamic_shape.source.find("BENNU_IMPL_ADD_INT") != std::string::npos);
+
+  const bennu::CEmissionResult static_shape =
+      bennu::emit_c_source("add[(1 2) (3)]");
+  CHECK_FALSE(static_shape.ok);
+  CHECK(static_shape.error.kind == bennu::ErrorKind::shape_mismatch);
+  CHECK(static_shape.error.argument_position == 2U);
+
+  const bennu::CEmissionResult static_container =
+      bennu::emit_c_source("iota[(1 2)]");
+  CHECK_FALSE(static_container.ok);
+  CHECK(static_container.error.kind == bennu::ErrorKind::type_mismatch);
+  CHECK(static_container.error.argument_position == 1U);
+}

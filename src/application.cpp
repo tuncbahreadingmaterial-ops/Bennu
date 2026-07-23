@@ -1,5 +1,7 @@
 #include "bennu/application.hpp"
 
+#include "typed_application.hpp"
+
 #include "doctest/doctest.h"
 
 #include <algorithm>
@@ -180,11 +182,13 @@ std::size_t validated_vector_length(const Value &value) {
 
 } // namespace
 
-PrimitiveApplicationResult
-apply_primitive(PrimitiveApplicationContext &context,
-                const PrimitiveDescriptor &descriptor,
-                std::span<const Value> arguments,
-                SourceLocation call_location) {
+namespace {
+
+PrimitiveApplicationResult apply_primitive_impl(
+    PrimitiveApplicationContext &context,
+    const PrimitiveDescriptor &descriptor,
+    const PrimitiveSignature *typed_signature,
+    std::span<const Value> arguments, SourceLocation call_location) {
   bool arity_exists = false;
   for (std::size_t index = 0; index < descriptor.signature_count; ++index) {
     if (descriptor.signatures[index].parameter_count == arguments.size()) {
@@ -216,28 +220,36 @@ apply_primitive(PrimitiveApplicationContext &context,
                                                       arguments.size());
 
   if (descriptor.lifting == LiftingMode::none) {
-    const PrimitiveSignature *selected_structural = nullptr;
-    for (std::size_t signature_index = 0;
-         signature_index < descriptor.signature_count; ++signature_index) {
-      const PrimitiveSignature &signature =
-          descriptor.signatures[signature_index];
+    const auto matches_arguments =
+        [&arguments, actual_type_span](const PrimitiveSignature &signature) {
       if (signature.parameter_count != arguments.size()) {
-        continue;
+        return false;
       }
-      bool exact = true;
       for (std::size_t argument_index = 0;
            argument_index < arguments.size(); ++argument_index) {
         if (signature.parameters[argument_index].container !=
                 arguments[argument_index].container ||
             signature.parameters[argument_index].element !=
                 actual_type_span[argument_index]) {
-          exact = false;
-          break;
+          return false;
         }
       }
-      if (exact) {
-        selected_structural = &signature;
-        break;
+      return true;
+    };
+    const PrimitiveSignature *selected_structural = nullptr;
+    if (typed_signature != nullptr) {
+      if (matches_arguments(*typed_signature)) {
+        selected_structural = typed_signature;
+      }
+    } else {
+      for (std::size_t signature_index = 0U;
+           signature_index < descriptor.signature_count; ++signature_index) {
+        const PrimitiveSignature &signature =
+            descriptor.signatures[signature_index];
+        if (matches_arguments(signature)) {
+          selected_structural = &signature;
+          break;
+        }
       }
     }
     if (selected_structural == nullptr) {
@@ -275,16 +287,32 @@ apply_primitive(PrimitiveApplicationContext &context,
                                       no_application_error()};
   }
 
-  const SignatureSelectionResult selected =
-      select_primitive_signature(descriptor, actual_type_span);
-  if (selected.status == SignatureSelectionStatus::arity_mismatch) {
-    return application_failure(
-        arity_error(descriptor, arguments.size(), call_location));
-  }
-  if (selected.status != SignatureSelectionStatus::success ||
-      selected.signature == nullptr) {
-    return application_failure(
-        type_error(descriptor, arguments, actual_type_span, call_location));
+  const PrimitiveSignature *selected_signature = typed_signature;
+  if (selected_signature == nullptr) {
+    const SignatureSelectionResult selected =
+        select_primitive_signature(descriptor, actual_type_span);
+    if (selected.status == SignatureSelectionStatus::arity_mismatch) {
+      return application_failure(
+          arity_error(descriptor, arguments.size(), call_location));
+    }
+    if (selected.status != SignatureSelectionStatus::success ||
+        selected.signature == nullptr) {
+      return application_failure(
+          type_error(descriptor, arguments, actual_type_span, call_location));
+    }
+    selected_signature = selected.signature;
+  } else {
+    bool accepts = selected_signature->parameter_count == arguments.size();
+    for (std::size_t index = 0U; accepts && index < arguments.size(); ++index) {
+      const ScalarType expected = selected_signature->parameters[index].element;
+      accepts = actual_type_span[index] == expected ||
+                (actual_type_span[index] == ScalarType::integer &&
+                 expected == ScalarType::double_precision);
+    }
+    if (!accepts) {
+      return application_failure(
+          type_error(descriptor, arguments, actual_type_span, call_location));
+    }
   }
 
   bool vector_result = false;
@@ -311,7 +339,7 @@ apply_primitive(PrimitiveApplicationContext &context,
   Value vector_value = make_int_value(0);
   if (vector_result) {
     VectorAllocationResult allocated = allocate_vector(
-        context.resources, selected.signature->result.element,
+        context.resources, selected_signature->result.element,
         static_cast<std::uint64_t>(result_length), result_length, call_location,
         descriptor.name);
     if (!allocated.ok) {
@@ -343,7 +371,7 @@ apply_primitive(PrimitiveApplicationContext &context,
           project_validated_scalar(arguments[argument_index], result_index);
       const ScalarConversionResult converted = convert_scalar(
           projected,
-          selected.signature->parameters[argument_index].element);
+          selected_signature->parameters[argument_index].element);
       if (converted.status != ScalarConversionStatus::success) {
         if (vector_result) {
           release_vector_reservation(context.resources, vector_value);
@@ -356,7 +384,7 @@ apply_primitive(PrimitiveApplicationContext &context,
 
     ++context.scalar_kernel_invocations;
     ScalarKernelResult kernel = invoke_scalar_kernel(
-        descriptor, *selected.signature,
+        descriptor, *selected_signature,
         std::span<const ScalarValue>(operands.data(), arguments.size()),
         call_location);
     if (kernel.status != ScalarKernelStatus::success) {
@@ -381,6 +409,40 @@ apply_primitive(PrimitiveApplicationContext &context,
 
   return PrimitiveApplicationResult{true, std::move(vector_value),
                                     no_application_error()};
+}
+
+} // namespace
+
+PrimitiveApplicationResult
+apply_primitive(PrimitiveApplicationContext &context,
+                const PrimitiveDescriptor &descriptor,
+                std::span<const Value> arguments,
+                SourceLocation call_location) {
+  return apply_primitive_impl(context, descriptor, nullptr, arguments,
+                              call_location);
+}
+
+PrimitiveApplicationResult apply_typed_primitive(
+    PrimitiveApplicationContext &context,
+    const PrimitiveDescriptor &descriptor,
+    PrimitiveImplementation implementation, std::span<const Value> arguments,
+    SourceLocation call_location) {
+  const PrimitiveSignature *selected = nullptr;
+  for (std::size_t index = 0U; index < descriptor.signature_count; ++index) {
+    if (descriptor.signatures[index].implementation == implementation) {
+      if (selected != nullptr) {
+        return application_failure(primitive_error(
+            ErrorKind::invalid_primitive_table, descriptor, call_location));
+      }
+      selected = &descriptor.signatures[index];
+    }
+  }
+  if (selected == nullptr || implementation == PrimitiveImplementation::none) {
+    return application_failure(primitive_error(
+        ErrorKind::invalid_primitive_table, descriptor, call_location));
+  }
+  return apply_primitive_impl(context, descriptor, selected, arguments,
+                              call_location);
 }
 
 namespace {
@@ -436,6 +498,24 @@ TEST_CASE("shared application preserves scalar kernel behavior") {
   CHECK(context.scalar_kernel_invocations == 1);
   CHECK(resources.live_evaluation_bytes == 0);
   CHECK(resources.work_units == 1);
+}
+
+TEST_CASE("typed application executes the lowered implementation without redispatch") {
+  EvaluationResources resources = make_trusted_local_resources({std::nullopt});
+  PrimitiveApplicationContext context{resources, 0};
+  const PrimitiveDescriptor &add = *find_primitive(PrimitiveId::add);
+  const std::array<Value, 2> arguments{{make_int_value(1), make_int_value(2)}};
+
+  const PrimitiveApplicationResult result = apply_typed_primitive(
+      context, add, PrimitiveImplementation::add_double, arguments,
+      SourceLocation{4, 2, 3});
+
+  REQUIRE(result.ok);
+  CHECK(result.value.container == ContainerKind::scalar);
+  CHECK(result.value.scalar.type == ScalarType::double_precision);
+  CHECK(result.value.scalar.double_precision == doctest::Approx(3.0));
+  CHECK(context.scalar_kernel_invocations == 1U);
+  CHECK(resources.work_units == 1U);
 }
 
 TEST_CASE("shared application broadcasts a scalar over a vector") {
