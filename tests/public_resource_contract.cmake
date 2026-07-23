@@ -2,6 +2,7 @@
 # TEST-ID: PUBLIC-RESOURCE-ALLOCATION
 # TEST-ID: PUBLIC-DIRECT-SUCCESS-CORPUS
 # TEST-ID: PUBLIC-DIRECT-ERROR-MATRIX
+# TEST-ID: PARG-012-RESOURCE-DIAGNOSTICS
 foreach(required BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
@@ -137,7 +138,7 @@ function(check_profile_refusal name executable invocation)
   endif()
 endfunction()
 
-function(check_allocation_failure name executable)
+function(check_allocation_failure name executable expected_stderr)
   foreach(invocation RANGE 1 2)
     execute_process(
       COMMAND "${executable}"
@@ -146,8 +147,7 @@ function(check_allocation_failure name executable)
     string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
     string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
     if("${run_exit}" STREQUAL "0" OR NOT run_stdout STREQUAL "" OR
-       NOT run_stderr STREQUAL
-           "ResourceError: allocation_unavailable\n")
+       NOT run_stderr STREQUAL expected_stderr)
       message(FATAL_ERROR
         "PUBLIC-RESOURCE-MATRIX ${name} invocation ${invocation} was not atomic\n"
         "exit: ${run_exit}\nstdout: [${run_stdout}]\nstderr: [${run_stderr}]")
@@ -167,8 +167,20 @@ foreach(bounded_reset_iteration RANGE 1 2)
                         "${bounded_reset_iteration}")
 endforeach()
 foreach(path iota lifted late)
-  check_allocation_failure("${path}-emitted" "${${path}_emitted}")
-  check_allocation_failure("${path}-native" "${${path}_native}")
+  if(path STREQUAL "iota")
+    set(allocation_expected
+      "bennu-source:1:1: ResourceError: iota resource request failed: allocation_unavailable\n")
+  elseif(path STREQUAL "lifted")
+    set(allocation_expected
+      "bennu-source:1:1: ResourceError: inc resource request failed: allocation_unavailable\n")
+  else()
+    set(allocation_expected
+      "bennu-source:2:1: ResourceError: iota resource request failed: allocation_unavailable\n")
+  endif()
+  check_allocation_failure("${path}-emitted" "${${path}_emitted}"
+                           "${allocation_expected}")
+  check_allocation_failure("${path}-native" "${${path}_native}"
+                           "${allocation_expected}")
 endforeach()
 
 file(REMOVE_RECURSE "${work_directory}")

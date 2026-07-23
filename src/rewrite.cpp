@@ -2588,7 +2588,11 @@ void append_resource_initialization(
   source += configuration.profile == ExecutionProfile::bounded_v1
                 ? "BENNU_PROFILE_BOUNDED_V1, "
                 : "BENNU_PROFILE_TRUSTED_LOCAL_V1, ";
-  source += "BENNU_LIMIT_NONE, 0U, 0U, 0U, NULL, {0U, 1U, 1U}};\n";
+  source +=
+      "BENNU_LIMIT_NONE, 0U, 0U, 0U, NULL, {0U, 1U, 1U}, "
+      "0, 0U, 0, 0U, 0, 0U, BENNU_IMPL_NONE, "
+      "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
+      "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}};\n";
 }
 
 void append_source_location(std::string &source, SourceLocation location) {

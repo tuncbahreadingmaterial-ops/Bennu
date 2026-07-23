@@ -23,6 +23,7 @@ typedef enum BennuContainer {
 } BennuContainer;
 
 typedef enum BennuImplementation {
+  BENNU_IMPL_NONE = 0,
   BENNU_IMPL_INC_INT = 1,
   BENNU_IMPL_INC_DOUBLE = 2,
   BENNU_IMPL_ADD_INT = 3,
@@ -99,6 +100,15 @@ typedef struct BennuResources {
   size_t failure_refused_charge;
   const char *failure_admission_point;
   BennuSourceLocation failure_source_location;
+  int failure_has_requested_elements;
+  size_t failure_requested_elements;
+  int failure_has_requested_bytes;
+  size_t failure_requested_bytes;
+  int failure_has_element_index;
+  size_t failure_element_index;
+  BennuImplementation failure_implementation;
+  BennuScalar failure_left_operand;
+  BennuScalar failure_right_operand;
 } BennuResources;
 
 static BennuSourceLocation bennu_source_location(size_t offset, size_t line,
@@ -140,9 +150,27 @@ static void bennu_set_failure(BennuResources *resources,
   }
 }
 
+static void bennu_set_resource_failure(
+    BennuResources *resources, BennuFailure failure,
+    int has_requested_elements, size_t requested_elements,
+    int has_requested_bytes, size_t requested_bytes,
+    const char *admission_point, BennuSourceLocation source_location) {
+  if (resources->failure == BENNU_FAILURE_NONE) {
+    resources->failure = failure;
+    resources->failure_has_requested_elements = has_requested_elements;
+    resources->failure_requested_elements = requested_elements;
+    resources->failure_has_requested_bytes = has_requested_bytes;
+    resources->failure_requested_bytes = requested_bytes;
+    resources->failure_admission_point = admission_point;
+    resources->failure_source_location = source_location;
+  }
+}
+
 static void bennu_set_profile_failure(
     BennuResources *resources, BennuLimitKind limit_kind,
     size_t configured_limit, size_t usage_before, size_t refused_charge,
+    int has_requested_elements, size_t requested_elements,
+    int has_requested_bytes, size_t requested_bytes,
     const char *admission_point, BennuSourceLocation source_location) {
   if (resources->failure == BENNU_FAILURE_NONE) {
     resources->failure = BENNU_FAILURE_PROFILE;
@@ -150,6 +178,27 @@ static void bennu_set_profile_failure(
     resources->failure_configured_limit = configured_limit;
     resources->failure_usage_before = usage_before;
     resources->failure_refused_charge = refused_charge;
+    resources->failure_has_requested_elements = has_requested_elements;
+    resources->failure_requested_elements = requested_elements;
+    resources->failure_has_requested_bytes = has_requested_bytes;
+    resources->failure_requested_bytes = requested_bytes;
+    resources->failure_admission_point = admission_point;
+    resources->failure_source_location = source_location;
+  }
+}
+
+static void bennu_set_domain_context(
+    BennuResources *resources, BennuImplementation implementation,
+    BennuScalar left, BennuScalar right, int has_element_index,
+    size_t element_index, const char *admission_point,
+    BennuSourceLocation source_location) {
+  if (resources->failure == BENNU_FAILURE_DOMAIN &&
+      resources->failure_admission_point == NULL) {
+    resources->failure_implementation = implementation;
+    resources->failure_left_operand = left;
+    resources->failure_right_operand = right;
+    resources->failure_has_element_index = has_element_index;
+    resources->failure_element_index = element_index;
     resources->failure_admission_point = admission_point;
     resources->failure_source_location = source_location;
   }
@@ -181,14 +230,16 @@ static int bennu_charge_work(BennuResources *resources, size_t work,
                              const char *admission_point,
                              BennuSourceLocation source_location) {
   if (work > SIZE_MAX - resources->work_units) {
-    bennu_set_failure(resources, BENNU_FAILURE_SIZE);
+    bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 0, 0U, 0, 0U,
+                               admission_point, source_location);
     return 0;
   }
   if (resources->has_work_limit != 0 &&
       resources->work_units + work > resources->work_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_WORK_UNITS, resources->work_limit,
-        resources->work_units, work, admission_point, source_location);
+        resources->work_units, work, 0, 0U, 0, 0U, admission_point,
+        source_location);
     return 0;
   }
   resources->work_units += work;
@@ -204,13 +255,16 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
   size_t live_after = 0U;
   size_t work_after = 0U;
   void *data = NULL;
-  if (count > SIZE_MAX / width || work > SIZE_MAX - resources->work_units) {
-    bennu_set_failure(resources, BENNU_FAILURE_SIZE);
+  if (count > SIZE_MAX / width) {
+    bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 0, 0U,
+                               admission_point, source_location);
     return 0;
   }
   bytes = count * width;
-  if (bytes > SIZE_MAX - resources->live_bytes) {
-    bennu_set_failure(resources, BENNU_FAILURE_SIZE);
+  if (work > SIZE_MAX - resources->work_units ||
+      bytes > SIZE_MAX - resources->live_bytes) {
+    bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 1,
+                               bytes, admission_point, source_location);
     return 0;
   }
   live_after = resources->live_bytes + bytes;
@@ -218,20 +272,21 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
   if (resources->has_vector_limit != 0 && bytes > resources->vector_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_VECTOR_BYTES, resources->vector_limit, 0U,
-        bytes, admission_point, source_location);
+        bytes, 1, count, 1, bytes, admission_point, source_location);
     return 0;
   }
   if (resources->has_live_limit != 0 && live_after > resources->live_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES,
-        resources->live_limit, resources->live_bytes, bytes, admission_point,
-        source_location);
+        resources->live_limit, resources->live_bytes, bytes, 1, count, 1,
+        bytes, admission_point, source_location);
     return 0;
   }
   if (resources->has_work_limit != 0 && work_after > resources->work_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_WORK_UNITS, resources->work_limit,
-        resources->work_units, work, admission_point, source_location);
+        resources->work_units, work, 1, count, 1, bytes, admission_point,
+        source_location);
     return 0;
   }
   if (bytes != 0U) {
@@ -239,12 +294,14 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
     resources->reservation_ordinal += 1U;
     if (resources->has_failure_ordinal != 0 &&
         ordinal == resources->failure_ordinal) {
-      bennu_set_failure(resources, BENNU_FAILURE_ALLOCATION);
+      bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
+                                 1, bytes, admission_point, source_location);
       return 0;
     }
     data = malloc(bytes);
     if (data == NULL) {
-      bennu_set_failure(resources, BENNU_FAILURE_ALLOCATION);
+      bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
+                                 1, bytes, admission_point, source_location);
       return 0;
     }
     (void)memset(data, 0, bytes);
@@ -485,7 +542,8 @@ static int bennu_apply(BennuResources *resources,
     if (bound > INT64_C(0)) {
       const uint64_t unsigned_bound = (uint64_t)bound;
       if (unsigned_bound > (uint64_t)SIZE_MAX) {
-        bennu_set_failure(resources, BENNU_FAILURE_SIZE);
+        bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 0, 0U, 0,
+                                   0U, admission_point, source_location);
         return 0;
       }
       count = (size_t)unsigned_bound;
@@ -537,6 +595,9 @@ static int bennu_apply(BennuResources *resources,
     }
     if (!bennu_kernel(resources, implementation, left_scalar, right_scalar,
                       &output)) {
+      bennu_set_domain_context(resources, implementation, left_scalar,
+                               right_scalar, vector_result, index,
+                               admission_point, source_location);
       if (vector_result != 0) {
         bennu_release(resources, result);
       }
@@ -722,17 +783,47 @@ static const char *bennu_limit_name(BennuLimitKind limit) {
   return "none";
 }
 
+static int bennu_failure_context_valid(const BennuResources *resources) {
+  if (resources->failure_admission_point == NULL ||
+      resources->failure_source_location.line == 0U ||
+      resources->failure_source_location.column == 0U) {
+    return 0;
+  }
+  if (resources->failure == BENNU_FAILURE_PROFILE) {
+    return resources->failure_limit != BENNU_LIMIT_NONE &&
+           bennu_profile_name(resources->profile)[0] != '\0' &&
+           bennu_limit_name(resources->failure_limit)[0] != '\0';
+  }
+  if (resources->failure == BENNU_FAILURE_ALLOCATION) {
+    return resources->failure_has_requested_elements != 0 &&
+           resources->failure_has_requested_bytes != 0;
+  }
+  if (resources->failure == BENNU_FAILURE_DOMAIN) {
+    const int valid_implementation =
+        resources->failure_implementation == BENNU_IMPL_INC_INT ||
+        resources->failure_implementation == BENNU_IMPL_ADD_INT;
+    return valid_implementation != 0 &&
+           resources->failure_left_operand.type == BENNU_INT &&
+           resources->failure_right_operand.type == BENNU_INT;
+  }
+  return 1;
+}
+
 static int bennu_report_failure(const BennuResources *resources) {
-  const char *message = "InternalError\n";
-  if (resources->failure == BENNU_FAILURE_SIZE) {
-    message = "ResourceError: size_overflow\n";
-  } else if (resources->failure == BENNU_FAILURE_PROFILE) {
+  const char *reason = NULL;
+  if (resources->failure == BENNU_FAILURE_PROFILE) {
+    if (!bennu_failure_context_valid(resources)) {
+      return fputs("InternalError\n", stderr) == EOF ? 0 : 1;
+    }
     return fprintf(
                stderr,
-               "ResourceError: reason=profile_limit profile=%s limit=%s "
+               "bennu-source:%" PRIuMAX ":%" PRIuMAX
+               ": ResourceError: reason=profile_limit profile=%s limit=%s "
                "configured=%" PRIuMAX " usage-before=%" PRIuMAX
                " refused-charge=%" PRIuMAX " admission=%s source=%" PRIuMAX
                ":%" PRIuMAX ":%" PRIuMAX "\n",
+               (uintmax_t)resources->failure_source_location.line,
+               (uintmax_t)resources->failure_source_location.column,
                bennu_profile_name(resources->profile),
                bennu_limit_name(resources->failure_limit),
                (uintmax_t)resources->failure_configured_limit,
@@ -744,11 +835,55 @@ static int bennu_report_failure(const BennuResources *resources) {
                (uintmax_t)resources->failure_source_location.column) < 0
                ? 0
                : 1;
-  } else if (resources->failure == BENNU_FAILURE_ALLOCATION) {
-    message = "ResourceError: allocation_unavailable\n";
-  } else if (resources->failure == BENNU_FAILURE_DOMAIN) {
-    message = "DomainError: integer_overflow\n";
-  } else if (resources->failure == BENNU_FAILURE_SHAPE) {
+  }
+  if (resources->failure == BENNU_FAILURE_SIZE ||
+      resources->failure == BENNU_FAILURE_ALLOCATION) {
+    if (!bennu_failure_context_valid(resources)) {
+      return fputs("InternalError\n", stderr) == EOF ? 0 : 1;
+    }
+    if (resources->failure == BENNU_FAILURE_SIZE) {
+      reason = "size_overflow";
+    } else {
+      reason = "allocation_unavailable";
+    }
+    return fprintf(
+               stderr,
+               "bennu-source:%" PRIuMAX ":%" PRIuMAX
+               ": ResourceError: %s resource request failed: %s\n",
+               (uintmax_t)resources->failure_source_location.line,
+               (uintmax_t)resources->failure_source_location.column,
+               resources->failure_admission_point, reason) < 0
+               ? 0
+               : 1;
+  }
+  if (resources->failure == BENNU_FAILURE_DOMAIN) {
+    if (!bennu_failure_context_valid(resources)) {
+      return fputs("InternalError\n", stderr) == EOF ? 0 : 1;
+    }
+    if (resources->failure_has_element_index != 0) {
+      return fprintf(
+                 stderr,
+                 "bennu-source:%" PRIuMAX ":%" PRIuMAX
+                 ": DomainError: %s failed: integer_overflow at result index "
+                 "%" PRIuMAX "\n",
+                 (uintmax_t)resources->failure_source_location.line,
+                 (uintmax_t)resources->failure_source_location.column,
+                 resources->failure_admission_point,
+                 (uintmax_t)resources->failure_element_index) < 0
+                 ? 0
+                 : 1;
+    }
+    return fprintf(
+               stderr,
+               "bennu-source:%" PRIuMAX ":%" PRIuMAX
+               ": DomainError: %s failed: integer_overflow\n",
+               (uintmax_t)resources->failure_source_location.line,
+               (uintmax_t)resources->failure_source_location.column,
+               resources->failure_admission_point) < 0
+               ? 0
+               : 1;
+  }
+  if (resources->failure == BENNU_FAILURE_SHAPE) {
     return fprintf(
                stderr,
                "bennu-source:%" PRIuMAX ":%" PRIuMAX
@@ -763,7 +898,7 @@ static int bennu_report_failure(const BennuResources *resources) {
                ? 0
                : 1;
   }
-  return fputs(message, stderr) == EOF ? 0 : 1;
+  return fputs("InternalError\n", stderr) == EOF ? 0 : 1;
 }
 
 )bennu_c";

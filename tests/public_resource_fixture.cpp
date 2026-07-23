@@ -91,7 +91,9 @@ std::string refusal_evidence(const bennu::Error &error) {
       *error.resource->limit_kind == bennu::ResourceLimitKind::max_work_units
           ? "max_work_units"
           : "unexpected";
-  return "ResourceError: reason=" + std::string(reason) +
+  return "bennu-source:" + std::to_string(error.location.line) + ":" +
+         std::to_string(error.location.column) + ": ResourceError: reason=" +
+         std::string(reason) +
          " profile=" + error.resource->profile +
          " limit=" + std::string(limit) +
          " configured=" +
@@ -248,7 +250,14 @@ int main(int argument_count, char **arguments) {
       bennu::evaluate_expression("inc[(1 2)]", fail_second);
   if (lifted.ok ||
       !is_resource_error(lifted.error,
-                         bennu::ResourceErrorReason::allocation_unavailable)) {
+                         bennu::ResourceErrorReason::allocation_unavailable) ||
+      lifted.error.resource->requested_elements != std::size_t{2U} ||
+      lifted.error.resource->requested_bytes != std::size_t{16U} ||
+      !lifted.error.primitive.has_value() ||
+      lifted.error.primitive->name != "inc" ||
+      lifted.error.location.offset != std::size_t{1U} ||
+      lifted.error.location.line != std::size_t{1U} ||
+      lifted.error.location.column != std::size_t{1U}) {
     if (lifted.ok) {
       bennu::destroy_value(lifted.value);
     }
@@ -258,7 +267,14 @@ int main(int argument_count, char **arguments) {
       bennu::evaluate_source("iota[2]\niota[2]\n", fail_second);
   if (late.ok || !late.values.empty() ||
       !is_resource_error(late.error,
-                         bennu::ResourceErrorReason::allocation_unavailable)) {
+                         bennu::ResourceErrorReason::allocation_unavailable) ||
+      late.error.resource->requested_elements != std::size_t{2U} ||
+      late.error.resource->requested_bytes != std::size_t{16U} ||
+      !late.error.primitive.has_value() ||
+      late.error.primitive->name != "iota" ||
+      late.error.location.offset != std::size_t{9U} ||
+      late.error.location.line != std::size_t{2U} ||
+      late.error.location.column != std::size_t{1U}) {
     destroy_program(late);
     return 25;
   }
@@ -267,7 +283,16 @@ int main(int argument_count, char **arguments) {
       "iota[2305843009213693952]", exact_profile);
   if (overflow.ok ||
       !is_resource_error(overflow.error,
-                         bennu::ResourceErrorReason::size_overflow)) {
+                         bennu::ResourceErrorReason::size_overflow) ||
+      overflow.error.resource->requested_elements !=
+          std::size_t{2305843009213693952ULL} ||
+      overflow.error.resource->requested_bytes.has_value() ||
+      overflow.error.resource->profile != "bounded-v1" ||
+      !overflow.error.primitive.has_value() ||
+      overflow.error.primitive->name != "iota" ||
+      overflow.error.location.offset != std::size_t{1U} ||
+      overflow.error.location.line != std::size_t{1U} ||
+      overflow.error.location.column != std::size_t{1U}) {
     if (overflow.ok) {
       bennu::destroy_value(overflow.value);
     }
