@@ -613,6 +613,8 @@ static int bennu_probe_checked_double_bits(void) {
   }
   return 0;
 }
+)bennu_c";
+  source += R"bennu_c(
 
 static int bennu_probe_hostile_checked_double_environment(void) {
   static const BennuCheckedDoubleCase cases[] = {
@@ -865,6 +867,8 @@ static int bennu_probe_checked_int_contexts(void) {
   }
   return 0;
 }
+)bennu_c";
+  source += R"bennu_c(
 
 static int bennu_probe_checked_resource_matrix(void) {
   static const BennuCheckedIntCase cases[] = {
