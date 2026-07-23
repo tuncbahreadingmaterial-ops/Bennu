@@ -1908,6 +1908,52 @@ RewriteEvaluationDiagnostic application_rewrite_diagnostic(
   return diagnostic;
 }
 
+std::optional<Error> rewrite_runtime_shape_error(
+    const RewriteLoweringNode &call,
+    const RewriteLoweringProgram &lowering,
+    const PrimitiveDescriptor &descriptor, std::span<const Value> arguments) {
+  if (!call.runtime_shape_check) {
+    return std::nullopt;
+  }
+
+  std::optional<std::size_t> expected_count;
+  for (std::size_t position = 0U; position < call.argument_count; ++position) {
+    const std::size_t argument_node =
+        lowering.arguments[call.first_argument + position];
+    if (lowering.nodes[argument_node].cardinality ==
+        RewriteCardinality::static_vector) {
+      expected_count = call.element_count;
+      break;
+    }
+  }
+
+  for (std::size_t position = 0U; position < call.argument_count; ++position) {
+    const std::size_t argument_node =
+        lowering.arguments[call.first_argument + position];
+    if (lowering.nodes[argument_node].cardinality !=
+        RewriteCardinality::dynamic_vector) {
+      continue;
+    }
+    std::size_t actual_count = 0U;
+    if (!value_length(arguments[position], actual_count).ok) {
+      continue;
+    }
+    if (!expected_count.has_value()) {
+      expected_count = actual_count;
+      continue;
+    }
+    if (actual_count == *expected_count) {
+      continue;
+    }
+    Error error = lowering_primitive_error(
+        ErrorKind::shape_mismatch, descriptor, call.source_location);
+    error.argument_position = position + 1U;
+    error.shape = ShapeErrorContext{{*expected_count}, {actual_count}};
+    return error;
+  }
+  return std::nullopt;
+}
+
 bool format_rewrite_root_values(const RewriteProgram &program,
                                 const std::vector<Value> &values,
                                 std::vector<std::string> &formatted,
@@ -2318,6 +2364,17 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
 
     PrimitiveApplicationContext application_context{
         resources, scalar_kernel_invocations};
+    std::optional<Error> shape_error = rewrite_runtime_shape_error(
+        lowering.nodes[node_index], lowering, *descriptor, arguments);
+    if (shape_error.has_value()) {
+      RewriteEvaluationDiagnostic diagnostic =
+          application_rewrite_diagnostic(parsed.program, call,
+                                         std::move(*shape_error));
+      release_rewrite_values(resources, arguments);
+      release_rewrite_node_values(resources, node_values, node_live);
+      return rewrite_evaluation_failure(
+          resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
     PrimitiveApplicationResult applied = apply_typed_primitive(
         application_context, *descriptor,
         lowering.nodes[node_index].implementation, arguments,
@@ -2579,6 +2636,64 @@ void append_vector_node(std::string &source, std::size_t node_index,
   source += ")) { goto bennu_failure; }\n";
 }
 
+void append_shape_requirement(
+    std::string &source, const RewriteLoweringNode &call,
+    const RewriteLoweringNode &argument, std::size_t argument_node,
+    std::size_t argument_position, std::optional<std::size_t> static_count,
+    std::optional<std::size_t> dynamic_anchor) {
+  source += "  if (!bennu_require_shape(&bennu_resources, \"";
+  source += call.admission_point;
+  source += "\", ";
+  append_c_unsigned(source, argument_position);
+  source += ", ";
+  if (static_count.has_value()) {
+    append_c_unsigned(source, *static_count);
+  } else {
+    source += "bennu_values[" + std::to_string(*dynamic_anchor) + "].count";
+  }
+  source += ", &bennu_values[" + std::to_string(argument_node) + "], ";
+  append_source_location(source, argument.source_location);
+  source += ")) { goto bennu_failure; }\n";
+}
+
+void append_call_shape_checks(std::string &source,
+                              const RewriteLoweringNode &call,
+                              const RewriteLoweringProgram &program) {
+  if (!call.runtime_shape_check) {
+    return;
+  }
+
+  bool has_static_anchor = false;
+  for (std::size_t position = 0U; position < call.argument_count; ++position) {
+    const std::size_t argument_node =
+        program.arguments[call.first_argument + position];
+    if (program.nodes[argument_node].cardinality ==
+        RewriteCardinality::static_vector) {
+      has_static_anchor = true;
+      break;
+    }
+  }
+
+  std::optional<std::size_t> dynamic_anchor;
+  for (std::size_t position = 0U; position < call.argument_count; ++position) {
+    const std::size_t argument_node =
+        program.arguments[call.first_argument + position];
+    const RewriteLoweringNode &argument = program.nodes[argument_node];
+    if (argument.cardinality != RewriteCardinality::dynamic_vector) {
+      continue;
+    }
+    if (!has_static_anchor && !dynamic_anchor.has_value()) {
+      dynamic_anchor = argument_node;
+      continue;
+    }
+    append_shape_requirement(
+        source, call, argument, argument_node, position + 1U,
+        has_static_anchor ? std::optional<std::size_t>{call.element_count}
+                          : std::nullopt,
+        dynamic_anchor);
+  }
+}
+
 void append_call_node(std::string &source, std::size_t node_index,
                       const RewriteLoweringNode &node,
                       const RewriteLoweringProgram &program) {
@@ -2586,6 +2701,7 @@ void append_call_node(std::string &source, std::size_t node_index,
   const std::size_t right = node.argument_count == 2U
                                 ? program.arguments[node.first_argument + 1U]
                                 : 0U;
+  append_call_shape_checks(source, node, program);
   source += "  if (!bennu_apply(&bennu_resources, ";
   source += c_implementation_name(node.implementation);
   source += ", &bennu_values[" + std::to_string(node_index) +
@@ -2671,6 +2787,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
                "  (void)bennu_apply;\n"
+               "  (void)bennu_require_shape;\n"
                "  (void)bennu_source_location;\n"
                "  (void)bennu_print_value;\n";
   if (!lowering.nodes.empty()) {
@@ -3785,6 +3902,22 @@ TEST_CASE("typed lowering applies whole-program phase precedence") {
   CHECK(lowered.diagnostic.primary.begin.line == 2U);
 }
 
+TEST_CASE("typed lowering checks type errors before static shape errors across roots") {
+  RewriteParseResult parsed =
+      parse_rewrite("add[(1 2) (3)]\nadd[true 1]");
+  REQUIRE(parsed.ok);
+  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+
+  const RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  REQUIRE_FALSE(lowered.ok);
+  CHECK(lowered.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(lowered.diagnostic.error.argument_position == 1U);
+  REQUIRE(lowered.diagnostic.error.primitive.has_value());
+  CHECK(lowered.diagnostic.error.primitive->id == PrimitiveId::add);
+  CHECK(lowered.diagnostic.primary.begin.line == 2U);
+  CHECK(lowered.diagnostic.primary.begin.column == 5U);
+}
+
 TEST_CASE("rewrite parser preserves explicit arity before metadata validation") {
   RewriteParseResult parsed =
       parse_rewrite("add[]\nadd 1\nfuture_name[1 2 3]");
@@ -3900,6 +4033,48 @@ TEST_CASE("rewrite evaluator returns formatted scalar roots in source order") {
   CHECK(evaluated.resources.live_evaluation_bytes == 0U);
   CHECK(evaluated.resources.work_units == 0U);
   release_rewrite_evaluation_result(evaluated);
+}
+
+TEST_CASE("typed runtime shape checks honor static anchors and first mismatch order") {
+  struct ShapeCase {
+    std::string_view source;
+    std::size_t argument_position;
+    std::size_t expected_count;
+    std::size_t actual_count;
+    std::size_t column;
+  };
+  const std::array<ShapeCase, 3> cases{{
+      {"add[iota[3] (1 2)]", 1U, 2U, 3U, 5U},
+      {"add[(1 2) iota[3]]", 2U, 2U, 3U, 11U},
+      {"add[iota[2] iota[3]]", 2U, 2U, 3U, 13U},
+  }};
+  const RewriteEvaluationCreationData creation{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+
+  for (const ShapeCase &shape_case : cases) {
+    CAPTURE(shape_case.source);
+    RewriteEvaluationResult evaluated =
+        evaluate_rewrite_source(shape_case.source, creation);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.error.kind == ErrorKind::shape_mismatch);
+    CHECK(evaluated.diagnostic.error.argument_position ==
+          shape_case.argument_position);
+    REQUIRE(evaluated.diagnostic.error.shape.has_value());
+    CHECK(evaluated.diagnostic.error.shape->expected ==
+          std::vector<std::size_t>{shape_case.expected_count});
+    CHECK(evaluated.diagnostic.error.shape->actual ==
+          std::vector<std::size_t>{shape_case.actual_count});
+    CHECK(evaluated.diagnostic.primary.begin.line == 1U);
+    CHECK(evaluated.diagnostic.primary.begin.column == shape_case.column);
+    CHECK(evaluated.diagnostic.error.location.line == 1U);
+    CHECK(evaluated.diagnostic.error.location.column == shape_case.column);
+    CHECK(evaluated.scalar_kernel_invocations == 0U);
+    CHECK(evaluated.values.empty());
+    CHECK(evaluated.formatted.empty());
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  }
 }
 
 TEST_CASE("rewrite evaluator validates every complete execution profile early") {

@@ -1,6 +1,7 @@
 # TEST-ID: PUBLIC-ERROR-CLI-MATRIX
 # TEST-ID: PARG-012-VALUE-INDEPENDENT-EMISSION
-foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_EXECUTABLE_SUFFIX)
+foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_C_COMPILER_ID
+                 BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
   endif()
@@ -77,6 +78,8 @@ function(check_public_dynamic_failure case_name source_text line column
          category message_text artifact_stderr)
   set(source_file "${work_directory}/${case_name}.bennu")
   set(c_output "${work_directory}/${case_name}.c")
+  set(emitted_output
+    "${work_directory}/${case_name}-emitted${BENNU_EXECUTABLE_SUFFIX}")
   set(native_output
     "${work_directory}/${case_name}-native${BENNU_EXECUTABLE_SUFFIX}")
   set(expected
@@ -111,6 +114,40 @@ function(check_public_dynamic_failure case_name source_text line column
       "PUBLIC-ERROR-MATRIX ${case_name} emit-c rejected a dynamic failure\n"
       "exit: ${emit_exit}\nstdout: [${emit_stdout}]\n"
       "stderr: [${emit_stderr}]\norphans: [${c_orphans}]")
+  endif()
+
+  if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+              "${c_output}" "/Fe:${emitted_output}"
+      WORKING_DIRECTORY "${work_directory}"
+      RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr)
+  else()
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+              "${c_output}" -o "${emitted_output}"
+      WORKING_DIRECTORY "${work_directory}"
+      RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
+      ERROR_VARIABLE compile_stderr)
+  endif()
+  if(NOT "${compile_exit}" STREQUAL "0")
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} strict C11 compilation failed\n"
+      "stdout: [${compile_stdout}]\nstderr: [${compile_stderr}]")
+  endif()
+  execute_process(
+    COMMAND "${emitted_output}"
+    RESULT_VARIABLE emitted_exit OUTPUT_VARIABLE emitted_stdout
+    ERROR_VARIABLE emitted_stderr)
+  string(REPLACE "\r\n" "\n" emitted_stdout "${emitted_stdout}")
+  string(REPLACE "\r\n" "\n" emitted_stderr "${emitted_stderr}")
+  if("${emitted_exit}" STREQUAL "0" OR NOT emitted_stdout STREQUAL "" OR
+     NOT emitted_stderr STREQUAL artifact_stderr)
+    message(FATAL_ERROR
+      "PUBLIC-ERROR-MATRIX ${case_name} emitted runtime mismatch\n"
+      "exit: ${emitted_exit}\nstdout: [${emitted_stdout}]\n"
+      "expected stderr: [${artifact_stderr}]\nactual stderr: [${emitted_stderr}]")
   endif()
 
   file(WRITE "${native_output}" "sentinel native bytes\n")
@@ -163,9 +200,18 @@ check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
 check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
   "ResourceError" "iota resource request failed: size_overflow"
   "ResourceError: size_overflow\n")
-check_public_dynamic_failure(dynamic_shape "add[iota[2] iota[3]]" 1 13
+check_public_dynamic_failure(dynamic_shape_dynamic_dynamic
+  "add[iota[2] iota[3]]" 1 13
   "ShapeMismatch" "add argument 2 expected shape [2], got [3]"
-  "ShapeMismatch\n")
+  "bennu-source:1:13: ShapeMismatch: add argument 2 expected shape [2], got [3]\n")
+check_public_dynamic_failure(dynamic_shape_static_dynamic
+  "add[(1 2) iota[3]]" 1 11
+  "ShapeMismatch" "add argument 2 expected shape [2], got [3]"
+  "bennu-source:1:11: ShapeMismatch: add argument 2 expected shape [2], got [3]\n")
+check_public_dynamic_failure(dynamic_shape_dynamic_static
+  "add[iota[3] (1 2)]" 1 5
+  "ShapeMismatch" "add argument 1 expected shape [2], got [3]"
+  "bennu-source:1:5: ShapeMismatch: add argument 1 expected shape [2], got [3]\n")
 check_public_failure(late_transaction "inc 5\nwat[1]" 2 1 "UnknownPrimitive"
   "unknown primitive 'wat'")
 

@@ -42,6 +42,8 @@ WP10 public CLI error and resource atomicity|tests/public_path_error_matrix.cmak
 WP10 documentation|tests/documentation_smoke.cmake|DOCS-SMOKE
 WP10 obsolete-surface deletion|tests/obsolete_surface_contract.cmake|OBSOLETE-SURFACE
 BENNU-SPEC-0005 sections 6.1 and 6.2|src/rewrite.cpp|typed lowering applies whole-program phase precedence
+BENNU-SPEC-0005 section 6.2|src/rewrite.cpp|typed lowering checks type errors before static shape errors across roots
 BENNU-SPEC-0005 section 6.3|src/rewrite.cpp|typed lowering is value independent and retains dynamic shape data
+BENNU-SPEC-0005 sections 6.3 and 11.1|src/rewrite.cpp|typed runtime shape checks honor static anchors and first mismatch order
 BENNU-SPEC-0005 sections 6.4 and 12.1|tests/public_cutover_conformance.cpp|LOWERING-01 emission defers value-dependent failures to runtime
-BENNU-SPEC-0005 sections 11.3 and 12.1|tests/public_path_error_matrix.cmake|PARG-012-VALUE-INDEPENDENT-EMISSION
+BENNU-SPEC-0005 sections 11.3, 12.1, and 12.2|tests/public_path_error_matrix.cmake|PARG-012-VALUE-INDEPENDENT-EMISSION
