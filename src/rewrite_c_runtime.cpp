@@ -35,6 +35,15 @@ typedef enum BennuImplementation {
   BENNU_IMPL_IOTA_INT = 9
 } BennuImplementation;
 
+typedef enum BennuPrimitiveId {
+  BENNU_PRIMITIVE_NONE = -1,
+  BENNU_PRIMITIVE_INC = 0,
+  BENNU_PRIMITIVE_ADD = 1,
+  BENNU_PRIMITIVE_EQUALS = 2,
+  BENNU_PRIMITIVE_NOT = 3,
+  BENNU_PRIMITIVE_IOTA = 4
+} BennuPrimitiveId;
+
 typedef enum BennuFailure {
   BENNU_FAILURE_NONE = 0,
   BENNU_FAILURE_SIZE = 1,
@@ -62,6 +71,17 @@ typedef struct BennuSourceLocation {
   size_t line;
   size_t column;
 } BennuSourceLocation;
+
+typedef struct BennuSourceSpan {
+  BennuSourceLocation begin;
+  BennuSourceLocation end;
+} BennuSourceSpan;
+
+typedef struct BennuScalarSignature {
+  size_t parameter_count;
+  BennuType parameter_types[2];
+  BennuType result_type;
+} BennuScalarSignature;
 
 typedef struct BennuScalar {
   BennuType type;
@@ -109,12 +129,23 @@ typedef struct BennuResources {
   BennuImplementation failure_implementation;
   BennuScalar failure_left_operand;
   BennuScalar failure_right_operand;
+  BennuPrimitiveId failure_primitive_id;
+  BennuScalarSignature failure_signature;
+  size_t failure_operand_count;
+  BennuSourceSpan failure_primary_span;
+  BennuSourceSpan failure_context_span;
 } BennuResources;
 
 static BennuSourceLocation bennu_source_location(size_t offset, size_t line,
                                                  size_t column) {
   BennuSourceLocation location = {offset, line, column};
   return location;
+}
+
+static BennuSourceSpan bennu_source_span(BennuSourceLocation begin,
+                                         BennuSourceLocation end) {
+  BennuSourceSpan span = {begin, end};
+  return span;
 }
 
 static size_t bennu_width(BennuType type) {
@@ -154,7 +185,8 @@ static void bennu_set_resource_failure(
     BennuResources *resources, BennuFailure failure,
     int has_requested_elements, size_t requested_elements,
     int has_requested_bytes, size_t requested_bytes,
-    const char *admission_point, BennuSourceLocation source_location) {
+    const char *admission_point, BennuPrimitiveId primitive_id,
+    BennuSourceSpan primary_span, BennuSourceSpan context_span) {
   if (resources->failure == BENNU_FAILURE_NONE) {
     resources->failure = failure;
     resources->failure_has_requested_elements = has_requested_elements;
@@ -162,7 +194,10 @@ static void bennu_set_resource_failure(
     resources->failure_has_requested_bytes = has_requested_bytes;
     resources->failure_requested_bytes = requested_bytes;
     resources->failure_admission_point = admission_point;
-    resources->failure_source_location = source_location;
+    resources->failure_source_location = primary_span.begin;
+    resources->failure_primitive_id = primitive_id;
+    resources->failure_primary_span = primary_span;
+    resources->failure_context_span = context_span;
   }
 }
 
@@ -171,7 +206,8 @@ static void bennu_set_profile_failure(
     size_t configured_limit, size_t usage_before, size_t refused_charge,
     int has_requested_elements, size_t requested_elements,
     int has_requested_bytes, size_t requested_bytes,
-    const char *admission_point, BennuSourceLocation source_location) {
+    const char *admission_point, BennuPrimitiveId primitive_id,
+    BennuSourceSpan primary_span, BennuSourceSpan context_span) {
   if (resources->failure == BENNU_FAILURE_NONE) {
     resources->failure = BENNU_FAILURE_PROFILE;
     resources->failure_limit = limit_kind;
@@ -183,7 +219,10 @@ static void bennu_set_profile_failure(
     resources->failure_has_requested_bytes = has_requested_bytes;
     resources->failure_requested_bytes = requested_bytes;
     resources->failure_admission_point = admission_point;
-    resources->failure_source_location = source_location;
+    resources->failure_source_location = primary_span.begin;
+    resources->failure_primitive_id = primitive_id;
+    resources->failure_primary_span = primary_span;
+    resources->failure_context_span = context_span;
   }
 }
 
@@ -191,23 +230,31 @@ static void bennu_set_domain_context(
     BennuResources *resources, BennuImplementation implementation,
     BennuScalar left, BennuScalar right, int has_element_index,
     size_t element_index, const char *admission_point,
-    BennuSourceLocation source_location) {
+    BennuPrimitiveId primitive_id, BennuScalarSignature signature,
+    size_t operand_count, BennuSourceSpan primary_span,
+    BennuSourceSpan context_span) {
   if (resources->failure == BENNU_FAILURE_DOMAIN &&
       resources->failure_admission_point == NULL) {
     resources->failure_implementation = implementation;
     resources->failure_left_operand = left;
     resources->failure_right_operand = right;
+    resources->failure_primitive_id = primitive_id;
+    resources->failure_signature = signature;
+    resources->failure_operand_count = operand_count;
     resources->failure_has_element_index = has_element_index;
     resources->failure_element_index = element_index;
     resources->failure_admission_point = admission_point;
-    resources->failure_source_location = source_location;
+    resources->failure_source_location = primary_span.begin;
+    resources->failure_primary_span = primary_span;
+    resources->failure_context_span = context_span;
   }
 }
 
 static int bennu_require_shape(
-    BennuResources *resources, const char *primitive, size_t argument_position,
+    BennuResources *resources, const char *primitive,
+    BennuPrimitiveId primitive_id, size_t argument_position,
     size_t expected_count, const BennuValue *argument,
-    BennuSourceLocation source_location) {
+    BennuSourceSpan primary_span, BennuSourceSpan context_span) {
   if (argument->container != BENNU_VECTOR) {
     bennu_set_failure(resources, BENNU_FAILURE_INTERNAL);
     return 0;
@@ -221,17 +268,22 @@ static int bennu_require_shape(
     resources->failure_usage_before = argument->count;
     resources->failure_refused_charge = argument_position;
     resources->failure_admission_point = primitive;
-    resources->failure_source_location = source_location;
+    resources->failure_source_location = primary_span.begin;
+    resources->failure_primitive_id = primitive_id;
+    resources->failure_primary_span = primary_span;
+    resources->failure_context_span = context_span;
   }
   return 0;
 }
 
-static int bennu_charge_work(BennuResources *resources, size_t work,
-                             const char *admission_point,
-                             BennuSourceLocation source_location) {
+static int bennu_charge_work(
+    BennuResources *resources, size_t work, const char *admission_point,
+    BennuPrimitiveId primitive_id, BennuSourceSpan primary_span,
+    BennuSourceSpan context_span) {
   if (work > SIZE_MAX - resources->work_units) {
     bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 0, 0U, 0, 0U,
-                               admission_point, source_location);
+                               admission_point, primitive_id, primary_span,
+                               context_span);
     return 0;
   }
   if (resources->has_work_limit != 0 &&
@@ -239,7 +291,7 @@ static int bennu_charge_work(BennuResources *resources, size_t work,
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_WORK_UNITS, resources->work_limit,
         resources->work_units, work, 0, 0U, 0, 0U, admission_point,
-        source_location);
+        primitive_id, primary_span, context_span);
     return 0;
   }
   resources->work_units += work;
@@ -249,7 +301,9 @@ static int bennu_charge_work(BennuResources *resources, size_t work,
 static int bennu_allocate(BennuResources *resources, BennuValue *value,
                           BennuType type, size_t count, size_t work,
                           const char *admission_point,
-                          BennuSourceLocation source_location) {
+                          BennuPrimitiveId primitive_id,
+                          BennuSourceSpan primary_span,
+                          BennuSourceSpan context_span) {
   const size_t width = bennu_width(type);
   size_t bytes = 0U;
   size_t live_after = 0U;
@@ -257,14 +311,16 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
   void *data = NULL;
   if (count > SIZE_MAX / width) {
     bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 0, 0U,
-                               admission_point, source_location);
+                               admission_point, primitive_id, primary_span,
+                               context_span);
     return 0;
   }
   bytes = count * width;
   if (work > SIZE_MAX - resources->work_units ||
       bytes > SIZE_MAX - resources->live_bytes) {
     bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 1,
-                               bytes, admission_point, source_location);
+                               bytes, admission_point, primitive_id,
+                               primary_span, context_span);
     return 0;
   }
   live_after = resources->live_bytes + bytes;
@@ -272,21 +328,22 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
   if (resources->has_vector_limit != 0 && bytes > resources->vector_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_VECTOR_BYTES, resources->vector_limit, 0U,
-        bytes, 1, count, 1, bytes, admission_point, source_location);
+        bytes, 1, count, 1, bytes, admission_point, primitive_id, primary_span,
+        context_span);
     return 0;
   }
   if (resources->has_live_limit != 0 && live_after > resources->live_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES,
         resources->live_limit, resources->live_bytes, bytes, 1, count, 1,
-        bytes, admission_point, source_location);
+        bytes, admission_point, primitive_id, primary_span, context_span);
     return 0;
   }
   if (resources->has_work_limit != 0 && work_after > resources->work_limit) {
     bennu_set_profile_failure(
         resources, BENNU_LIMIT_MAX_WORK_UNITS, resources->work_limit,
         resources->work_units, work, 1, count, 1, bytes, admission_point,
-        source_location);
+        primitive_id, primary_span, context_span);
     return 0;
   }
   if (bytes != 0U) {
@@ -295,13 +352,15 @@ static int bennu_allocate(BennuResources *resources, BennuValue *value,
     if (resources->has_failure_ordinal != 0 &&
         ordinal == resources->failure_ordinal) {
       bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
-                                 1, bytes, admission_point, source_location);
+                                 1, bytes, admission_point, primitive_id,
+                                 primary_span, context_span);
       return 0;
     }
     data = malloc(bytes);
     if (data == NULL) {
       bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
-                                 1, bytes, admission_point, source_location);
+                                 1, bytes, admission_point, primitive_id,
+                                 primary_span, context_span);
       return 0;
     }
     (void)memset(data, 0, bytes);
@@ -357,9 +416,11 @@ static BennuValue bennu_scalar_double_bits(uint64_t bits) {
 static int bennu_literal_bool(BennuResources *resources, BennuValue *result,
                               const uint8_t *values, size_t count,
                               const char *admission_point,
-                              BennuSourceLocation source_location) {
+                              BennuSourceSpan primary_span,
+                              BennuSourceSpan context_span) {
   if (!bennu_allocate(resources, result, BENNU_BOOL, count, 0U,
-                      admission_point, source_location)) {
+                      admission_point, BENNU_PRIMITIVE_NONE, primary_span,
+                      context_span)) {
     return 0;
   }
   if (count != 0U) {
@@ -371,9 +432,11 @@ static int bennu_literal_bool(BennuResources *resources, BennuValue *result,
 static int bennu_literal_int(BennuResources *resources, BennuValue *result,
                              const int64_t *values, size_t count,
                              const char *admission_point,
-                             BennuSourceLocation source_location) {
+                             BennuSourceSpan primary_span,
+                             BennuSourceSpan context_span) {
   if (!bennu_allocate(resources, result, BENNU_INT, count, 0U,
-                      admission_point, source_location)) {
+                      admission_point, BENNU_PRIMITIVE_NONE, primary_span,
+                      context_span)) {
     return 0;
   }
   if (count != 0U) {
@@ -385,11 +448,13 @@ static int bennu_literal_int(BennuResources *resources, BennuValue *result,
 static int bennu_literal_double(BennuResources *resources,
                                 BennuValue *result, const uint64_t *values,
                                 size_t count, const char *admission_point,
-                                BennuSourceLocation source_location) {
+                                BennuSourceSpan primary_span,
+                                BennuSourceSpan context_span) {
   size_t index = 0U;
   double *output = NULL;
   if (!bennu_allocate(resources, result, BENNU_DOUBLE, count, 0U,
-                      admission_point, source_location)) {
+                      admission_point, BENNU_PRIMITIVE_NONE, primary_span,
+                      context_span)) {
     return 0;
   }
   output = (double *)result->data;
@@ -402,17 +467,20 @@ static int bennu_literal_double(BennuResources *resources,
 static int bennu_literal(BennuResources *resources, BennuValue *result,
                          BennuType type, const void *values, size_t count,
                          const char *admission_point,
-                         BennuSourceLocation source_location) {
+                         BennuSourceSpan primary_span,
+                         BennuSourceSpan context_span) {
   if (type == BENNU_BOOL) {
     return bennu_literal_bool(resources, result, (const uint8_t *)values,
-                              count, admission_point, source_location);
+                              count, admission_point, primary_span,
+                              context_span);
   }
   if (type == BENNU_INT) {
     return bennu_literal_int(resources, result, (const int64_t *)values, count,
-                             admission_point, source_location);
+                             admission_point, primary_span, context_span);
   }
   return bennu_literal_double(resources, result, (const uint64_t *)values,
-                              count, admission_point, source_location);
+                              count, admission_point, primary_span,
+                              context_span);
 }
 
 static BennuScalar bennu_project(const BennuValue *value, size_t index) {
@@ -531,19 +599,24 @@ static int bennu_apply(BennuResources *resources,
                        BennuValue *result, const BennuValue *left,
                        const BennuValue *right, size_t argument_count,
                        const char *admission_point,
-                       BennuSourceLocation source_location) {
+                       BennuPrimitiveId primitive_id,
+                       BennuSourceSpan primary_span,
+                       BennuSourceSpan context_span) {
   size_t count = 1U;
   size_t index = 0U;
   int vector_result = 0;
   BennuType parameter_type = BENNU_INT;
   BennuScalar empty = {BENNU_INT, 0U, INT64_C(0), 0.0};
+  BennuScalarSignature signature = {
+      0U, {BENNU_INT, BENNU_INT}, BENNU_INT};
   if (implementation == BENNU_IMPL_IOTA_INT) {
     int64_t bound = left->integer;
     if (bound > INT64_C(0)) {
       const uint64_t unsigned_bound = (uint64_t)bound;
       if (unsigned_bound > (uint64_t)SIZE_MAX) {
         bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 0, 0U, 0,
-                                   0U, admission_point, source_location);
+                                   0U, admission_point, primitive_id,
+                                   primary_span, context_span);
         return 0;
       }
       count = (size_t)unsigned_bound;
@@ -551,7 +624,8 @@ static int bennu_apply(BennuResources *resources,
       count = 0U;
     }
     if (!bennu_allocate(resources, result, BENNU_INT, count, count,
-                        admission_point, source_location)) {
+                        admission_point, primitive_id, primary_span,
+                        context_span)) {
       return 0;
     }
     for (index = 0U; index < count; ++index) {
@@ -575,13 +649,18 @@ static int bennu_apply(BennuResources *resources,
              implementation == BENNU_IMPL_NOT_BOOL) {
     parameter_type = BENNU_BOOL;
   }
+  signature.parameter_count = argument_count;
+  signature.parameter_types[0] = parameter_type;
+  signature.parameter_types[1] = parameter_type;
+  signature.result_type = bennu_result_type(implementation);
   if (vector_result != 0) {
     if (!bennu_allocate(resources, result, bennu_result_type(implementation),
-                        count, count, admission_point, source_location)) {
+                        count, count, admission_point, primitive_id,
+                        primary_span, context_span)) {
       return 0;
     }
-  } else if (!bennu_charge_work(resources, 1U, admission_point,
-                                source_location)) {
+  } else if (!bennu_charge_work(resources, 1U, admission_point, primitive_id,
+                                primary_span, context_span)) {
     return 0;
   }
   for (index = 0U; index < count; ++index) {
@@ -597,7 +676,8 @@ static int bennu_apply(BennuResources *resources,
                       &output)) {
       bennu_set_domain_context(resources, implementation, left_scalar,
                                right_scalar, vector_result, index,
-                               admission_point, source_location);
+                               admission_point, primitive_id, signature,
+                               argument_count, primary_span, context_span);
       if (vector_result != 0) {
         bennu_release(resources, result);
       }
@@ -783,10 +863,24 @@ static const char *bennu_limit_name(BennuLimitKind limit) {
   return "none";
 }
 
+static int bennu_source_span_valid(BennuSourceSpan span) {
+  return span.begin.offset != 0U && span.begin.line != 0U &&
+         span.begin.column != 0U && span.end.offset >= span.begin.offset &&
+         span.end.line != 0U && span.end.column != 0U;
+}
+
 static int bennu_failure_context_valid(const BennuResources *resources) {
   if (resources->failure_admission_point == NULL ||
       resources->failure_source_location.line == 0U ||
-      resources->failure_source_location.column == 0U) {
+      resources->failure_source_location.column == 0U ||
+      !bennu_source_span_valid(resources->failure_primary_span) ||
+      !bennu_source_span_valid(resources->failure_context_span) ||
+      resources->failure_source_location.offset !=
+          resources->failure_primary_span.begin.offset ||
+      resources->failure_source_location.line !=
+          resources->failure_primary_span.begin.line ||
+      resources->failure_source_location.column !=
+          resources->failure_primary_span.begin.column) {
     return 0;
   }
   if (resources->failure == BENNU_FAILURE_PROFILE) {
@@ -794,17 +888,34 @@ static int bennu_failure_context_valid(const BennuResources *resources) {
            bennu_profile_name(resources->profile)[0] != '\0' &&
            bennu_limit_name(resources->failure_limit)[0] != '\0';
   }
+  if (resources->failure == BENNU_FAILURE_SHAPE) {
+    return resources->failure_primitive_id != BENNU_PRIMITIVE_NONE &&
+           resources->failure_configured_limit !=
+               resources->failure_usage_before &&
+           resources->failure_refused_charge != 0U;
+  }
   if (resources->failure == BENNU_FAILURE_ALLOCATION) {
     return resources->failure_has_requested_elements != 0 &&
            resources->failure_has_requested_bytes != 0;
   }
   if (resources->failure == BENNU_FAILURE_DOMAIN) {
-    const int valid_implementation =
-        resources->failure_implementation == BENNU_IMPL_INC_INT ||
-        resources->failure_implementation == BENNU_IMPL_ADD_INT;
-    return valid_implementation != 0 &&
+    const int valid_inc =
+        resources->failure_implementation == BENNU_IMPL_INC_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_INC &&
+        resources->failure_signature.parameter_count == 1U &&
+        resources->failure_operand_count == 1U;
+    const int valid_add =
+        resources->failure_implementation == BENNU_IMPL_ADD_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_ADD &&
+        resources->failure_signature.parameter_count == 2U &&
+        resources->failure_operand_count == 2U;
+    return (valid_inc != 0 || valid_add != 0) &&
+           resources->failure_signature.parameter_types[0] == BENNU_INT &&
+           resources->failure_signature.result_type == BENNU_INT &&
            resources->failure_left_operand.type == BENNU_INT &&
-           resources->failure_right_operand.type == BENNU_INT;
+           (resources->failure_operand_count == 1U ||
+            (resources->failure_signature.parameter_types[1] == BENNU_INT &&
+             resources->failure_right_operand.type == BENNU_INT));
   }
   return 1;
 }
@@ -884,6 +995,9 @@ static int bennu_report_failure(const BennuResources *resources) {
                : 1;
   }
   if (resources->failure == BENNU_FAILURE_SHAPE) {
+    if (!bennu_failure_context_valid(resources)) {
+      return fputs("InternalError\n", stderr) == EOF ? 0 : 1;
+    }
     return fprintf(
                stderr,
                "bennu-source:%" PRIuMAX ":%" PRIuMAX

@@ -1,6 +1,8 @@
 # TEST-ID: PUBLIC-ERROR-CLI-MATRIX
 # TEST-ID: PARG-012-VALUE-INDEPENDENT-EMISSION
 # TEST-ID: LOWERING-ARTIFACT-DYNAMIC-DIAGNOSTICS
+# TEST-ID: PUBLIC-DYNAMIC-PRECEDENCE-PAIR-MATRIX
+# TEST-ID: PUBLIC-EVALUATOR-GENERATED-NATIVE-DIAGNOSTIC-EQUIVALENCE
 foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_C_COMPILER_ID
                  BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -128,7 +130,8 @@ function(check_public_dynamic_failure case_name source_text line column
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+              -pedantic-errors
               "${c_output}" -o "${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
@@ -227,6 +230,9 @@ check_public_dynamic_failure(shape_root_before_later_domain
   "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
 check_public_dynamic_failure(resource_root_before_later_domain
   "iota[2305843009213693952]\ninc 9223372036854775807" 1 1
+  "ResourceError" "iota resource request failed: size_overflow")
+check_public_dynamic_failure(resource_root_before_later_shape
+  "iota[2305843009213693952]\nadd[iota[2] iota[3]]" 1 1
   "ResourceError" "iota resource request failed: size_overflow")
 check_public_dynamic_failure(domain_root_before_later_resource
   "inc 9223372036854775807\niota[2305843009213693952]" 1 1

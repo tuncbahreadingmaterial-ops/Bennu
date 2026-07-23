@@ -75,6 +75,237 @@ bool emit_and_build(std::string_view source,
   return built.ok;
 }
 
+std::optional<std::string> generated_runtime_probe() {
+  const bennu::CEmissionResult emitted =
+      bennu::emit_c_source("1\ninc 9223372036854775807\n");
+  if (!emitted.ok) {
+    return std::nullopt;
+  }
+  constexpr std::string_view expected_domain_provenance =
+      "\"inc\", BENNU_PRIMITIVE_INC, "
+      "bennu_source_span(bennu_source_location(3U, 2U, 1U), "
+      "bennu_source_location(6U, 2U, 4U)), "
+      "bennu_source_span(bennu_source_location(3U, 2U, 1U), "
+      "bennu_source_location(26U, 2U, 24U))";
+  const bennu::CEmissionResult shape_emitted =
+      bennu::emit_c_source("add[iota[2] iota[3]]\n");
+  constexpr std::string_view expected_shape_provenance =
+      "\"add\", BENNU_PRIMITIVE_ADD, 2U, bennu_values[1].count, "
+      "&bennu_values[3], "
+      "bennu_source_span(bennu_source_location(13U, 1U, 13U), "
+      "bennu_source_location(20U, 1U, 20U)), "
+      "bennu_source_span(bennu_source_location(1U, 1U, 1U), "
+      "bennu_source_location(21U, 1U, 21U))";
+  if (emitted.source.find(expected_domain_provenance) == std::string::npos ||
+      !shape_emitted.ok ||
+      shape_emitted.source.find(expected_shape_provenance) ==
+          std::string::npos) {
+    return std::nullopt;
+  }
+  std::string source = emitted.source;
+  constexpr std::string_view main_declaration = "int main(void) {";
+  const std::size_t main_position = source.find(main_declaration);
+  if (main_position == std::string::npos) {
+    return std::nullopt;
+  }
+  source.replace(main_position, main_declaration.size(),
+                 "int bennu_original_main(void) {");
+  source += R"bennu_c(
+
+static int bennu_probe_domain_context(void) {
+  BennuResources resources = {0};
+  BennuValue input = {0};
+  BennuValue result = {0};
+  const int64_t values[] = {INT64_MAX};
+  const BennuSourceSpan primary = bennu_source_span(
+      bennu_source_location(5U, 1U, 5U),
+      bennu_source_location(8U, 1U, 8U));
+  const BennuSourceSpan context = bennu_source_span(
+      bennu_source_location(1U, 1U, 1U),
+      bennu_source_location(10U, 1U, 10U));
+  resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+  if (!bennu_literal_int(&resources, &input, values, 1U, "vector-literal",
+                         context, context)) {
+    return 1;
+  }
+  if (bennu_apply(&resources, BENNU_IMPL_INC_INT, &result, &input, NULL, 1U,
+                  "inc", BENNU_PRIMITIVE_INC, primary, context)) {
+    return 2;
+  }
+  if (resources.failure != BENNU_FAILURE_DOMAIN ||
+      resources.failure_implementation != BENNU_IMPL_INC_INT ||
+      resources.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+      resources.failure_signature.parameter_count != 1U ||
+      resources.failure_signature.parameter_types[0] != BENNU_INT ||
+      resources.failure_signature.result_type != BENNU_INT ||
+      resources.failure_operand_count != 1U ||
+      resources.failure_left_operand.integer != INT64_MAX ||
+      resources.failure_has_element_index == 0 ||
+      resources.failure_element_index != 0U ||
+      resources.failure_primary_span.begin.offset != 5U ||
+      resources.failure_primary_span.end.offset != 8U ||
+      resources.failure_context_span.begin.offset != 1U ||
+      resources.failure_context_span.end.offset != 10U ||
+      !bennu_failure_context_valid(&resources) || result.data != NULL ||
+      resources.live_bytes != sizeof(int64_t)) {
+    return 3;
+  }
+  bennu_release(&resources, &input);
+  return resources.live_bytes == 0U ? 0 : 4;
+}
+
+static int bennu_probe_profile_contexts(void) {
+  const BennuSourceSpan span = bennu_source_span(
+      bennu_source_location(1U, 1U, 1U),
+      bennu_source_location(8U, 1U, 8U));
+  BennuResources resources = {0};
+  BennuValue bound = bennu_scalar_int(INT64_C(2));
+  BennuValue result = {0};
+  resources.profile = BENNU_PROFILE_BOUNDED_V1;
+  resources.has_vector_limit = 1;
+  resources.vector_limit = 8U;
+  if (bennu_apply(&resources, BENNU_IMPL_IOTA_INT, &result, &bound, NULL, 1U,
+                  "iota", BENNU_PRIMITIVE_IOTA, span, span)) {
+    return 1;
+  }
+  if (resources.failure != BENNU_FAILURE_PROFILE ||
+      resources.failure_limit != BENNU_LIMIT_MAX_VECTOR_BYTES ||
+      resources.failure_configured_limit != 8U ||
+      resources.failure_usage_before != 0U ||
+      resources.failure_refused_charge != 16U ||
+      resources.failure_requested_elements != 2U ||
+      resources.failure_requested_bytes != 16U ||
+      resources.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+      !bennu_failure_context_valid(&resources) || resources.live_bytes != 0U) {
+    return 2;
+  }
+
+  (void)memset(&resources, 0, sizeof(resources));
+  resources.profile = BENNU_PROFILE_BOUNDED_V1;
+  resources.has_work_limit = 1;
+  if (bennu_apply(&resources, BENNU_IMPL_INC_INT, &result, &bound, NULL, 1U,
+                  "inc", BENNU_PRIMITIVE_INC, span, span)) {
+    return 3;
+  }
+  if (resources.failure != BENNU_FAILURE_PROFILE ||
+      resources.failure_limit != BENNU_LIMIT_MAX_WORK_UNITS ||
+      resources.failure_refused_charge != 1U ||
+      resources.failure_has_requested_elements != 0 ||
+      resources.failure_has_requested_bytes != 0 ||
+      resources.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+      !bennu_failure_context_valid(&resources) || resources.live_bytes != 0U) {
+    return 4;
+  }
+
+  (void)memset(&resources, 0, sizeof(resources));
+  (void)memset(&result, 0, sizeof(result));
+  resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+  resources.has_failure_ordinal = 1;
+  if (bennu_apply(&resources, BENNU_IMPL_IOTA_INT, &result, &bound, NULL, 1U,
+                  "iota", BENNU_PRIMITIVE_IOTA, span, span)) {
+    return 5;
+  }
+  if (resources.failure != BENNU_FAILURE_ALLOCATION ||
+      resources.failure_requested_elements != 2U ||
+      resources.failure_requested_bytes != 16U ||
+      resources.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+      !bennu_failure_context_valid(&resources) || resources.live_bytes != 0U) {
+    return 6;
+  }
+  return 0;
+}
+
+static int bennu_probe_live_context(void) {
+  const BennuSourceSpan span = bennu_source_span(
+      bennu_source_location(1U, 1U, 1U),
+      bennu_source_location(8U, 1U, 8U));
+  const int64_t values[] = {INT64_C(1)};
+  BennuResources resources = {0};
+  BennuValue input = {0};
+  BennuValue result = {0};
+  resources.profile = BENNU_PROFILE_BOUNDED_V1;
+  resources.has_live_limit = 1;
+  resources.live_limit = 8U;
+  if (!bennu_literal_int(&resources, &input, values, 1U, "vector-literal",
+                         span, span)) {
+    return 1;
+  }
+  if (bennu_apply(&resources, BENNU_IMPL_INC_INT, &result, &input, NULL, 1U,
+                  "inc", BENNU_PRIMITIVE_INC, span, span)) {
+    return 2;
+  }
+  if (resources.failure != BENNU_FAILURE_PROFILE ||
+      resources.failure_limit != BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES ||
+      resources.failure_configured_limit != 8U ||
+      resources.failure_usage_before != 8U ||
+      resources.failure_refused_charge != 8U ||
+      resources.failure_requested_elements != 1U ||
+      resources.failure_requested_bytes != 8U ||
+      resources.failure_primitive_id != BENNU_PRIMITIVE_INC ||
+      !bennu_failure_context_valid(&resources) || resources.live_bytes != 8U) {
+    return 3;
+  }
+  bennu_release(&resources, &input);
+  return resources.live_bytes == 0U ? 0 : 4;
+}
+
+static int bennu_probe_shape_context(void) {
+  const BennuSourceSpan primary = bennu_source_span(
+      bennu_source_location(13U, 1U, 13U),
+      bennu_source_location(20U, 1U, 20U));
+  const BennuSourceSpan context = bennu_source_span(
+      bennu_source_location(1U, 1U, 1U),
+      bennu_source_location(21U, 1U, 21U));
+  BennuResources resources = {0};
+  BennuValue argument = {0};
+  resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+  argument.container = BENNU_VECTOR;
+  argument.type = BENNU_INT;
+  argument.count = 3U;
+  if (bennu_require_shape(&resources, "add", BENNU_PRIMITIVE_ADD, 2U, 2U,
+                          &argument, primary, context)) {
+    return 1;
+  }
+  return resources.failure == BENNU_FAILURE_SHAPE &&
+                 resources.failure_configured_limit == 2U &&
+                 resources.failure_usage_before == 3U &&
+                 resources.failure_refused_charge == 2U &&
+                 resources.failure_primitive_id == BENNU_PRIMITIVE_ADD &&
+                 resources.failure_primary_span.begin.offset == 13U &&
+                 resources.failure_context_span.begin.offset == 1U &&
+                 bennu_failure_context_valid(&resources)
+             ? 0
+             : 2;
+}
+
+int main(void) {
+  if (BENNU_PRIMITIVE_INC != 0 || BENNU_PRIMITIVE_ADD != 1 ||
+      BENNU_PRIMITIVE_EQUALS != 2 || BENNU_PRIMITIVE_NOT != 3 ||
+      BENNU_PRIMITIVE_IOTA != 4) {
+    return 2;
+  }
+  if (bennu_original_main() == 0 || bennu_original_main() == 0) {
+    return 1;
+  }
+  const int domain = bennu_probe_domain_context();
+  const int profiles = bennu_probe_profile_contexts();
+  const int live = bennu_probe_live_context();
+  const int shape = bennu_probe_shape_context();
+  if (domain != 0) {
+    return 20 + domain;
+  }
+  if (profiles != 0) {
+    return 30 + profiles;
+  }
+  if (live != 0) {
+    return 40 + live;
+  }
+  return shape == 0 ? 0 : 50 + shape;
+}
+)bennu_c";
+  return source;
+}
+
 std::string refusal_evidence(const bennu::Error &error) {
   if (!error.resource.has_value() || !error.primitive.has_value() ||
       !error.resource->limit_kind.has_value() ||
@@ -87,10 +318,17 @@ std::string refusal_evidence(const bennu::Error &error) {
       error.resource->reason == bennu::ResourceErrorReason::profile_limit
           ? "profile_limit"
           : "unexpected";
-  const std::string_view limit =
-      *error.resource->limit_kind == bennu::ResourceLimitKind::max_work_units
-          ? "max_work_units"
-          : "unexpected";
+  std::string_view limit = "unexpected";
+  if (*error.resource->limit_kind ==
+      bennu::ResourceLimitKind::max_vector_bytes) {
+    limit = "max_vector_bytes";
+  } else if (*error.resource->limit_kind ==
+             bennu::ResourceLimitKind::max_live_evaluation_bytes) {
+    limit = "max_live_evaluation_bytes";
+  } else if (*error.resource->limit_kind ==
+             bennu::ResourceLimitKind::max_work_units) {
+    limit = "max_work_units";
+  }
   return "bennu-source:" + std::to_string(error.location.line) + ":" +
          std::to_string(error.location.column) + ": ResourceError: reason=" +
          std::string(reason) +
@@ -110,7 +348,7 @@ std::string refusal_evidence(const bennu::Error &error) {
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 15) {
+  if (argument_count != 22) {
     return 2;
   }
 
@@ -165,6 +403,34 @@ int main(int argument_count, char **arguments) {
       }
       return 7;
     }
+  }
+  bennu::ValueResult domain_context =
+      bennu::evaluate_expression("inc[(9223372036854775807)]");
+  if (domain_context.ok ||
+      domain_context.error.kind != bennu::ErrorKind::domain_error ||
+      !domain_context.error.primitive.has_value() ||
+      domain_context.error.primitive->id != bennu::PrimitiveId::inc ||
+      domain_context.error.primitive->name != "inc" ||
+      !domain_context.error.domain.has_value() ||
+      domain_context.error.domain->reason !=
+          bennu::DomainErrorReason::integer_overflow ||
+      domain_context.error.domain->signature.parameter_types.size() != 1U ||
+      domain_context.error.domain->signature.parameter_types[0] !=
+          bennu::ScalarType::integer ||
+      domain_context.error.domain->signature.result_type !=
+          bennu::ScalarType::integer ||
+      domain_context.error.domain->operands.size() != 1U ||
+      domain_context.error.domain->operands[0].type !=
+          bennu::ScalarType::integer ||
+      domain_context.error.domain->operands[0].integer != INT64_MAX ||
+      domain_context.error.element_index != std::size_t{0U} ||
+      domain_context.error.location.offset != std::size_t{1U} ||
+      domain_context.error.location.line != std::size_t{1U} ||
+      domain_context.error.location.column != std::size_t{1U}) {
+    if (domain_context.ok) {
+      bennu::destroy_value(domain_context.value);
+    }
+    return 9;
   }
   bennu::ProgramResult late_error =
       bennu::evaluate_source("inc 5\nwat[1]\n");
@@ -221,6 +487,65 @@ int main(int argument_count, char **arguments) {
   if (expected_refusal.empty() ||
       !write_file(arguments[14], expected_refusal)) {
     return 22;
+  }
+
+  constexpr std::string_view vector_refusal_source = "iota[2]\n";
+  const bennu::EvaluationConfiguration vector_refusal_configuration{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{8U}, std::size_t{64U},
+                            std::size_t{64U}},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  bennu::ProgramResult vector_refused = bennu::evaluate_source(
+      vector_refusal_source, vector_refusal_configuration);
+  if (vector_refused.ok || !vector_refused.values.empty() ||
+      !is_resource_error(vector_refused.error,
+                         bennu::ResourceErrorReason::profile_limit) ||
+      vector_refused.error.resource->limit_kind !=
+          bennu::ResourceLimitKind::max_vector_bytes ||
+      vector_refused.error.resource->configured_limit != std::size_t{8U} ||
+      vector_refused.error.resource->usage_before != std::size_t{0U} ||
+      vector_refused.error.resource->refused_charge != std::size_t{16U} ||
+      vector_refused.error.resource->requested_elements != std::size_t{2U} ||
+      vector_refused.error.resource->requested_bytes != std::size_t{16U} ||
+      !vector_refused.error.primitive.has_value() ||
+      vector_refused.error.primitive->name != "iota") {
+    destroy_program(vector_refused);
+    return 29;
+  }
+  const std::string vector_refusal_expected =
+      refusal_evidence(vector_refused.error);
+  if (vector_refusal_expected.empty() ||
+      !write_file(arguments[18], vector_refusal_expected)) {
+    return 30;
+  }
+
+  constexpr std::string_view live_refusal_source = "inc[(1)]\n";
+  const bennu::EvaluationConfiguration live_refusal_configuration{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{8U}, std::size_t{8U},
+                            std::size_t{2U}},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  bennu::ProgramResult live_refused =
+      bennu::evaluate_source(live_refusal_source, live_refusal_configuration);
+  if (live_refused.ok || !live_refused.values.empty() ||
+      !is_resource_error(live_refused.error,
+                         bennu::ResourceErrorReason::profile_limit) ||
+      live_refused.error.resource->limit_kind !=
+          bennu::ResourceLimitKind::max_live_evaluation_bytes ||
+      live_refused.error.resource->configured_limit != std::size_t{8U} ||
+      live_refused.error.resource->usage_before != std::size_t{8U} ||
+      live_refused.error.resource->refused_charge != std::size_t{8U} ||
+      live_refused.error.resource->requested_elements != std::size_t{1U} ||
+      live_refused.error.resource->requested_bytes != std::size_t{8U} ||
+      !live_refused.error.primitive.has_value() ||
+      live_refused.error.primitive->name != "inc") {
+    destroy_program(live_refused);
+    return 31;
+  }
+  const std::string live_refusal_expected = refusal_evidence(live_refused.error);
+  if (live_refusal_expected.empty() ||
+      !write_file(arguments[21], live_refusal_expected)) {
+    return 32;
   }
 
   const bennu::EvaluationConfiguration fail_first{
@@ -308,8 +633,17 @@ int main(int argument_count, char **arguments) {
       !emit_and_build("inc[(1 2)]\n", fail_second, arguments[8], arguments[9],
                       arguments[1]) ||
       !emit_and_build("iota[2]\niota[2]\n", fail_second, arguments[10],
-                      arguments[11], arguments[1])) {
+                      arguments[11], arguments[1]) ||
+      !emit_and_build(vector_refusal_source, vector_refusal_configuration,
+                      arguments[16], arguments[17], arguments[1]) ||
+      !emit_and_build(live_refusal_source, live_refusal_configuration,
+                      arguments[19], arguments[20], arguments[1])) {
     return 27;
+  }
+  const std::optional<std::string> context_probe = generated_runtime_probe();
+  if (!context_probe.has_value() ||
+      !write_file(arguments[15], *context_probe)) {
+    return 28;
   }
   return 0;
 }
