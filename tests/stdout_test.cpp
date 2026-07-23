@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <streambuf>
 #include <string_view>
 
 namespace {
@@ -40,6 +41,12 @@ bennu_cli::OutputSink make_test_output(TestOutput &output) {
   return bennu_cli::OutputSink{&output, write_test_output, flush_test_output};
 }
 
+struct ShortStreamBuffer : std::streambuf {
+  std::streamsize xsputn(const char *, std::streamsize count) override {
+    return count > 0 ? count - 1 : 0;
+  }
+};
+
 } // namespace
 
 int main() {
@@ -72,6 +79,14 @@ int main() {
         bennu_cli::output_error_record(result) ==
             "bennu_output_error reason=write_failed pending_byte_count=7 accepted_byte_count=6 output_position=6\n",
         "short-write serialization must be stable");
+  }
+  {
+    ShortStreamBuffer buffer{};
+    std::ostream output{&buffer};
+    const bennu_cli::OutputPublicationResult result =
+        bennu_cli::publish_stdout(output, "result\n");
+    ok &= expect(!result.ok && result.accepted_byte_count == 6,
+                 "ostream publication must retain the exact short-write count");
   }
   {
     TestOutput output{1, false};
