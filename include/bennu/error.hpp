@@ -17,6 +17,11 @@ struct SourceLocation {
   std::size_t column;
 };
 
+struct SourceSpan {
+  SourceLocation begin;
+  SourceLocation end;
+};
+
 enum class ErrorKind {
   none,
   invalid_byte,
@@ -24,9 +29,11 @@ enum class ErrorKind {
   literal_range_error,
   syntax_error,
   unknown_name,
+  invalid_parameter_declaration,
   type_mismatch,
   empty_expression,
   arity_error,
+  argument_error,
   shape_mismatch,
   invalid_execution_profile,
   resource_error,
@@ -103,6 +110,64 @@ struct TypeErrorContext {
   std::vector<TypeErrorSignatureContext> accepted_signatures;
 };
 
+enum class ArgumentErrorReason {
+  missing,
+  extra,
+  invalid_literal,
+  out_of_range,
+  invalid_typed_value,
+  container_mismatch,
+  type_mismatch,
+};
+
+enum class ArgumentContainer {
+  unknown,
+  scalar,
+  vector,
+};
+
+enum class ArgumentScalarType {
+  unknown,
+  boolean,
+  integer,
+  double_precision,
+};
+
+struct ArgumentErrorContext {
+  ArgumentErrorReason reason;
+  std::size_t required_count;
+  std::size_t supplied_count;
+  std::size_t position;
+  std::optional<std::string> parameter_name{};
+  std::optional<ScalarType> expected_type{};
+  std::optional<SourceSpan> declaration_span{};
+  std::optional<ArgumentContainer> actual_container{};
+  std::optional<ArgumentScalarType> actual_type{};
+  std::optional<ValueInvariant> invalid_value_invariant{};
+};
+
+enum class ParameterErrorReason {
+  second_parameter_header,
+  parameter_header_after_root,
+  expected_header_open,
+  expected_parameter_name,
+  expected_parameter_type,
+  missing_header_close,
+  unexpected_header_token,
+  trailing_header_bytes,
+  duplicate_parameter_name,
+  reserved_parameter_name,
+  program_only_parameter_header,
+  unsupported_parameterized_surface,
+};
+
+struct ParameterErrorContext {
+  ParameterErrorReason reason;
+  SourceSpan primary_span;
+  SourceSpan context_span;
+  std::optional<SourceSpan> related_span{};
+};
+
 struct Error {
   ErrorKind kind;
   SourceLocation location;
@@ -116,6 +181,11 @@ struct Error {
   std::optional<std::size_t> element_index{};
   std::optional<ResourceErrorContext> resource{};
   std::optional<DomainErrorContext> domain{};
+  std::optional<ArgumentErrorContext> argument{};
+  std::optional<ParameterErrorContext> parameter{};
+  std::optional<SourceSpan> primary_span{};
+  std::optional<SourceSpan> context_span{};
+  std::optional<SourceSpan> related_span{};
 };
 
 Error make_error(ErrorKind kind, SourceLocation location, std::string message);

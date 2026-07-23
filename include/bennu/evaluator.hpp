@@ -3,6 +3,7 @@
 
 #include "bennu/resources.hpp"
 
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -32,6 +33,11 @@ ValueResult evaluate_expression(std::string_view source,
 ProgramResult evaluate_source(std::string_view source);
 ProgramResult evaluate_source(std::string_view source,
                               const EvaluationConfiguration &configuration);
+ProgramResult evaluate_source(std::string_view source,
+                              std::span<const Value> arguments);
+ProgramResult evaluate_source(
+    std::string_view source, std::span<const Value> arguments,
+    const EvaluationConfiguration &configuration);
 
 } // namespace bennu
 

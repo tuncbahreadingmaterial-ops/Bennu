@@ -115,7 +115,7 @@ inc 5
 > > 6
 > > 6
 > ]=])
-  set(expected_stderr [=[<repl>:1:1: SyntaxError: primitive name requires bracketed or unary prefix application
+  set(expected_stderr [=[<repl>:1:1: UnknownPrimitive: unknown primitive 'wat'
 <repl>:1:1: ArityError: add received 1 argument(s); accepted arity 2
 <repl>:1:7: TypeError: add arguments do not match an accepted signature; first unsupported argument is 2
 <repl>:1:1: DomainError: inc failed: integer_overflow
@@ -126,6 +126,13 @@ elseif(CASE STREQUAL "repl_ignores_blank_lines")
   set(expected_exit 0)
   set(expected_stdout "> > > 6\n> ")
   set(expected_stderr "")
+elseif(CASE STREQUAL "repl_rejects_parameter_header")
+  set(arguments repl)
+  set(input "parameters[n Int]\n")
+  set(expected_exit 0)
+  set(expected_stdout "> > ")
+  set(expected_stderr
+    "<repl>:1:1: SyntaxError: invalid parameter header\n")
 elseif(CASE STREQUAL "repl_rejects_arguments")
   set(arguments repl extra)
   set(expected_exit 1)

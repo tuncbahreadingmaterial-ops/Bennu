@@ -4,8 +4,11 @@
 #include "doctest/doctest.h"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
+#include <span>
 #include <string>
 
 namespace {
@@ -21,6 +24,23 @@ void destroy_program(bennu::ProgramResult &result) {
     bennu::destroy_value(value);
   }
   result.values.clear();
+}
+
+void check_parameter_error(std::string_view source,
+                           bennu::ParameterErrorReason reason,
+                           std::size_t primary_begin,
+                           std::size_t primary_end,
+                           std::size_t related_begin,
+                           std::size_t related_end) {
+  bennu::ProgramResult result = bennu::evaluate_source(source);
+  REQUIRE_FALSE(result.ok);
+  REQUIRE(result.error.parameter.has_value());
+  CHECK(result.error.parameter->reason == reason);
+  CHECK(result.error.parameter->primary_span.begin.offset == primary_begin);
+  CHECK(result.error.parameter->primary_span.end.offset == primary_end);
+  REQUIRE(result.error.parameter->related_span.has_value());
+  CHECK(result.error.parameter->related_span->begin.offset == related_begin);
+  CHECK(result.error.parameter->related_span->end.offset == related_end);
 }
 
 } // namespace
@@ -365,4 +385,576 @@ TEST_CASE("LOWERING-01 emission defers value-dependent failures to runtime") {
   CHECK_FALSE(static_container.ok);
   CHECK(static_container.error.kind == bennu::ErrorKind::type_mismatch);
   CHECK(static_container.error.argument_position == 1U);
+}
+
+TEST_CASE("PARG-004-TYPED-API") {
+  std::array<bennu::Value, 4> arguments{
+      bennu::make_bool_value(true), bennu::make_int_value(4),
+      bennu::make_double_value(0.5), bennu::make_double_value(-0.0)};
+
+  bennu::ProgramResult result = bennu::evaluate_source(
+      "parameters[enabled Bool n Int delta Double signed_zero Double]\n"
+      "not[enabled]\n"
+      "add[n delta]\n"
+      "signed_zero\n",
+      std::span<const bennu::Value>(arguments));
+
+  REQUIRE(result.ok);
+  REQUIRE(result.values.size() == 3U);
+  bennu::ProgramResult literals =
+      bennu::evaluate_source("not[true]\nadd[4 0.5]\n-0.0\n");
+  REQUIRE(literals.ok);
+  REQUIRE(literals.values.size() == result.values.size());
+  CHECK(formatted(result.values[0]) == "false");
+  CHECK(formatted(result.values[0]) == formatted(literals.values[0]));
+  CHECK(formatted(result.values[1]) == "4.5");
+  CHECK(formatted(result.values[1]) == formatted(literals.values[1]));
+  CHECK(std::bit_cast<std::uint64_t>(
+            result.values[2].scalar.double_precision) ==
+        UINT64_C(0x8000000000000000));
+  CHECK(std::bit_cast<std::uint64_t>(
+            result.values[2].scalar.double_precision) ==
+        std::bit_cast<std::uint64_t>(
+            literals.values[2].scalar.double_precision));
+  CHECK(arguments[0].scalar.boolean);
+  CHECK(arguments[1].scalar.integer == 4);
+  CHECK(std::bit_cast<std::uint64_t>(
+            arguments[3].scalar.double_precision) ==
+        UINT64_C(0x8000000000000000));
+  arguments[3] = bennu::make_double_value(9.0);
+  CHECK(std::bit_cast<std::uint64_t>(
+            result.values[2].scalar.double_precision) ==
+        UINT64_C(0x8000000000000000));
+  destroy_program(literals);
+  destroy_program(result);
+}
+
+TEST_CASE("PARG-009-DYNAMIC-IOTA-SHAPE") {
+  std::array<bennu::Value, 3> successful_arguments{
+      bennu::make_int_value(3), bennu::make_int_value(2),
+      bennu::make_double_value(0.5)};
+  bennu::ProgramResult successful = bennu::evaluate_source(
+      "parameters[n Int x Int delta Double]\n"
+      "iota[n]\n"
+      "add[x delta]\n",
+      std::span<const bennu::Value>(successful_arguments));
+  REQUIRE(successful.ok);
+  REQUIRE(successful.values.size() == 2U);
+  CHECK(formatted(successful.values[0]) == "(1 2 3)");
+  CHECK(formatted(successful.values[1]) == "2.5");
+  destroy_program(successful);
+
+  std::array<bennu::Value, 2> shape_arguments{bennu::make_int_value(2),
+                                              bennu::make_int_value(3)};
+  bennu::ProgramResult shape = bennu::evaluate_source(
+      "parameters[left Int right Int]\nadd[iota[left] iota[right]]\n",
+      std::span<const bennu::Value>(shape_arguments));
+  REQUIRE_FALSE(shape.ok);
+  CHECK(shape.error.kind == bennu::ErrorKind::shape_mismatch);
+  CHECK(shape.error.argument_position == 2U);
+
+  std::array<bennu::Value, 1> overflow_argument{bennu::make_int_value(
+      std::numeric_limits<std::int64_t>::max())};
+  bennu::ProgramResult overflow = bennu::evaluate_source(
+      "parameters[n Int]\ninc[n]\n",
+      std::span<const bennu::Value>(overflow_argument));
+  REQUIRE_FALSE(overflow.ok);
+  CHECK(overflow.error.kind == bennu::ErrorKind::domain_error);
+  REQUIRE(overflow.error.domain.has_value());
+  CHECK(overflow.error.domain->reason ==
+        bennu::DomainErrorReason::integer_overflow);
+
+  const bennu::EvaluationConfiguration bounded{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{8U}, std::nullopt, std::nullopt}};
+  std::array<bennu::Value, 1> resource_argument{bennu::make_int_value(2)};
+  bennu::ProgramResult resource = bennu::evaluate_source(
+      "parameters[n Int]\niota[n]\n",
+      std::span<const bennu::Value>(resource_argument), bounded);
+  REQUIRE_FALSE(resource.ok);
+  CHECK(resource.error.kind == bennu::ErrorKind::resource_error);
+  REQUIRE(resource.error.resource.has_value());
+  CHECK(resource.error.resource->reason ==
+        bennu::ResourceErrorReason::profile_limit);
+  CHECK(resource.error.resource->limit_kind ==
+        bennu::ResourceLimitKind::max_vector_bytes);
+}
+
+TEST_CASE("PARG-005-ARGUMENT-ERROR reports exact count context before value inspection") {
+  bennu::ProgramResult missing =
+      bennu::evaluate_source("parameters[n Int]\nn\n");
+  REQUIRE_FALSE(missing.ok);
+  CHECK(missing.error.kind == bennu::ErrorKind::argument_error);
+  REQUIRE(missing.error.argument.has_value());
+  CHECK(missing.error.argument->reason == bennu::ArgumentErrorReason::missing);
+  CHECK(missing.error.argument->required_count == 1U);
+  CHECK(missing.error.argument->supplied_count == 0U);
+  CHECK(missing.error.argument->position == 1U);
+  CHECK(missing.error.argument->parameter_name == "n");
+  CHECK(missing.error.argument->expected_type == bennu::ScalarType::integer);
+  REQUIRE(missing.error.argument->declaration_span.has_value());
+  CHECK(missing.error.argument->declaration_span->begin.offset == 12U);
+  CHECK(missing.error.argument->declaration_span->end.offset == 17U);
+  CHECK_FALSE(missing.error.argument->actual_container.has_value());
+  CHECK_FALSE(missing.error.argument->actual_type.has_value());
+  CHECK_FALSE(missing.error.argument->invalid_value_invariant.has_value());
+
+  bennu::Value invalid = bennu::make_int_value(1);
+  invalid.container = static_cast<bennu::ContainerKind>(99);
+  const std::array<bennu::Value, 1> extra{std::move(invalid)};
+  bennu::ProgramResult extra_result = bennu::evaluate_source(
+      "parameters[]\n1\n", std::span<const bennu::Value>(extra));
+  REQUIRE_FALSE(extra_result.ok);
+  CHECK(extra_result.error.kind == bennu::ErrorKind::argument_error);
+  REQUIRE(extra_result.error.argument.has_value());
+  CHECK(extra_result.error.argument->reason == bennu::ArgumentErrorReason::extra);
+  CHECK(extra_result.error.argument->required_count == 0U);
+  CHECK(extra_result.error.argument->supplied_count == 1U);
+  CHECK(extra_result.error.argument->position == 1U);
+  CHECK_FALSE(extra_result.error.argument->parameter_name.has_value());
+  CHECK_FALSE(extra_result.error.argument->expected_type.has_value());
+  CHECK_FALSE(extra_result.error.argument->declaration_span.has_value());
+  CHECK_FALSE(extra_result.error.argument->actual_container.has_value());
+}
+
+TEST_CASE("PARG-005-ARGUMENT-ERROR") {
+  const std::string source = "parameters[n Int]\nn\n";
+
+  bennu::Value unknown_container = bennu::make_int_value(1);
+  unknown_container.container = static_cast<bennu::ContainerKind>(99);
+  std::array<bennu::Value, 1> unknown_container_arguments{
+      std::move(unknown_container)};
+  bennu::ProgramResult unknown_container_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(unknown_container_arguments));
+  REQUIRE_FALSE(unknown_container_result.ok);
+  REQUIRE(unknown_container_result.error.argument.has_value());
+  CHECK(unknown_container_result.error.argument->reason ==
+        bennu::ArgumentErrorReason::invalid_typed_value);
+  CHECK(unknown_container_result.error.argument->actual_container ==
+        bennu::ArgumentContainer::unknown);
+  CHECK_FALSE(unknown_container_result.error.argument->actual_type.has_value());
+  CHECK(unknown_container_result.error.argument->invalid_value_invariant ==
+        bennu::ValueInvariant::unknown_container);
+
+  bennu::Value vector = bennu::make_int_value(0);
+  vector.container = bennu::ContainerKind::vector;
+  vector.scalar =
+      bennu::ScalarValue{bennu::ScalarType::boolean, false, 0, 0.0};
+  vector.vector.element_type = static_cast<bennu::ScalarType>(99);
+  std::array<bennu::Value, 1> vector_arguments{std::move(vector)};
+  bennu::ProgramResult vector_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(vector_arguments));
+  REQUIRE_FALSE(vector_result.ok);
+  REQUIRE(vector_result.error.argument.has_value());
+  CHECK(vector_result.error.argument->reason ==
+        bennu::ArgumentErrorReason::container_mismatch);
+  CHECK(vector_result.error.argument->actual_container ==
+        bennu::ArgumentContainer::vector);
+  CHECK_FALSE(vector_result.error.argument->actual_type.has_value());
+  CHECK_FALSE(vector_result.error.argument->invalid_value_invariant.has_value());
+
+  bennu::Value unknown_type = bennu::make_int_value(1);
+  unknown_type.scalar.type = static_cast<bennu::ScalarType>(99);
+  std::array<bennu::Value, 1> unknown_type_arguments{std::move(unknown_type)};
+  bennu::ProgramResult unknown_type_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(unknown_type_arguments));
+  REQUIRE_FALSE(unknown_type_result.ok);
+  REQUIRE(unknown_type_result.error.argument.has_value());
+  CHECK(unknown_type_result.error.argument->reason ==
+        bennu::ArgumentErrorReason::invalid_typed_value);
+  CHECK(unknown_type_result.error.argument->actual_container ==
+        bennu::ArgumentContainer::scalar);
+  CHECK(unknown_type_result.error.argument->actual_type ==
+        bennu::ArgumentScalarType::unknown);
+  CHECK(unknown_type_result.error.argument->invalid_value_invariant ==
+        bennu::ValueInvariant::unknown_scalar_type);
+
+  bennu::Value inactive = bennu::make_int_value(1);
+  inactive.scalar.boolean = true;
+  std::array<bennu::Value, 1> inactive_arguments{std::move(inactive)};
+  bennu::ProgramResult inactive_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(inactive_arguments));
+  REQUIRE_FALSE(inactive_result.ok);
+  REQUIRE(inactive_result.error.argument.has_value());
+  CHECK(inactive_result.error.argument->actual_type ==
+        bennu::ArgumentScalarType::integer);
+  CHECK(inactive_result.error.argument->invalid_value_invariant ==
+        bennu::ValueInvariant::inactive_scalar_field);
+
+  bennu::Value inactive_vector_state = bennu::make_int_value(1);
+  inactive_vector_state.vector.element_type = bennu::ScalarType::integer;
+  std::array<bennu::Value, 1> inactive_vector_state_arguments{
+      std::move(inactive_vector_state)};
+  bennu::ProgramResult inactive_vector_state_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(inactive_vector_state_arguments));
+  REQUIRE_FALSE(inactive_vector_state_result.ok);
+  REQUIRE(inactive_vector_state_result.error.argument.has_value());
+  CHECK(inactive_vector_state_result.error.argument->actual_type ==
+        bennu::ArgumentScalarType::integer);
+  CHECK(inactive_vector_state_result.error.argument->invalid_value_invariant ==
+        bennu::ValueInvariant::inactive_scalar_field);
+
+  bennu::Value noncanonical = bennu::make_double_value(0.0);
+  noncanonical.scalar.double_precision =
+      std::bit_cast<double>(UINT64_C(0x7ff0000000000001));
+  std::array<bennu::Value, 1> noncanonical_arguments{std::move(noncanonical)};
+  bennu::ProgramResult noncanonical_result = bennu::evaluate_source(
+      "parameters[x Double]\nx\n",
+      std::span<const bennu::Value>(noncanonical_arguments));
+  REQUIRE_FALSE(noncanonical_result.ok);
+  REQUIRE(noncanonical_result.error.argument.has_value());
+  CHECK(noncanonical_result.error.argument->actual_type ==
+        bennu::ArgumentScalarType::double_precision);
+  CHECK(noncanonical_result.error.argument->invalid_value_invariant ==
+        bennu::ValueInvariant::noncanonical_nan);
+
+  std::array<bennu::Value, 1> wrong_type{bennu::make_bool_value(true)};
+  bennu::ProgramResult wrong_type_result = bennu::evaluate_source(
+      source, std::span<const bennu::Value>(wrong_type));
+  REQUIRE_FALSE(wrong_type_result.ok);
+  REQUIRE(wrong_type_result.error.argument.has_value());
+  CHECK(wrong_type_result.error.argument->reason ==
+        bennu::ArgumentErrorReason::type_mismatch);
+  CHECK(wrong_type_result.error.argument->actual_type ==
+        bennu::ArgumentScalarType::boolean);
+  CHECK_FALSE(wrong_type_result.error.argument->invalid_value_invariant.has_value());
+
+  bennu::Value invalid_first = bennu::make_int_value(1);
+  invalid_first.scalar.boolean = true;
+  bennu::Value invalid_second = bennu::make_int_value(2);
+  invalid_second.scalar.boolean = true;
+  std::array<bennu::Value, 2> two_invalid{
+      std::move(invalid_first), std::move(invalid_second)};
+  bennu::ProgramResult first_invalid = bennu::evaluate_source(
+      "parameters[first Int second Int]\nadd[first second]\n",
+      std::span<const bennu::Value>(two_invalid));
+  REQUIRE_FALSE(first_invalid.ok);
+  REQUIRE(first_invalid.error.argument.has_value());
+  CHECK(first_invalid.error.argument->position == 1U);
+  CHECK(first_invalid.error.argument->parameter_name == "first");
+
+  two_invalid[0] = bennu::make_int_value(1);
+  bennu::ProgramResult second_invalid = bennu::evaluate_source(
+      "parameters[first Int second Int]\nadd[first second]\n",
+      std::span<const bennu::Value>(two_invalid));
+  REQUIRE_FALSE(second_invalid.ok);
+  REQUIRE(second_invalid.error.argument.has_value());
+  CHECK(second_invalid.error.argument->position == 2U);
+  CHECK(second_invalid.error.argument->parameter_name == "second");
+}
+
+TEST_CASE("PARG-001-HEADER") {
+  std::array<bennu::Value, 2> multiline_arguments{
+      bennu::make_int_value(3), bennu::make_bool_value(true)};
+  bennu::ProgramResult multiline = bennu::evaluate_source(
+      " \r\nparameters[\r\n n Int\r\n enabled Bool\r\n]\r\n"
+      "add[n n]\r\nnot[enabled]\r\n",
+      std::span<const bennu::Value>(multiline_arguments));
+  REQUIRE(multiline.ok);
+  REQUIRE(multiline.values.size() == 2U);
+  CHECK(formatted(multiline.values[0]) == "6");
+  CHECK(formatted(multiline.values[1]) == "false");
+  destroy_program(multiline);
+
+  check_parameter_error("parameters",
+                        bennu::ParameterErrorReason::expected_header_open,
+                        11U, 11U, 1U, 11U);
+  check_parameter_error("parameters]",
+                        bennu::ParameterErrorReason::expected_header_open,
+                        11U, 12U, 1U, 11U);
+  check_parameter_error("parameters [n Int]",
+                        bennu::ParameterErrorReason::expected_header_open,
+                        11U, 12U, 1U, 11U);
+  check_parameter_error("parameters[",
+                        bennu::ParameterErrorReason::missing_header_close,
+                        12U, 12U, 11U, 12U);
+  check_parameter_error("parameters[n",
+                        bennu::ParameterErrorReason::expected_parameter_type,
+                        13U, 13U, 12U, 13U);
+  check_parameter_error("parameters[n]",
+                        bennu::ParameterErrorReason::expected_parameter_type,
+                        13U, 13U, 12U, 13U);
+  check_parameter_error("parameters[Int]",
+                        bennu::ParameterErrorReason::expected_parameter_name,
+                        12U, 15U, 11U, 12U);
+  check_parameter_error("parameters[,]",
+                        bennu::ParameterErrorReason::unexpected_header_token,
+                        12U, 13U, 11U, 12U);
+  check_parameter_error("parameters[n Integer]",
+                        bennu::ParameterErrorReason::unexpected_header_token,
+                        14U, 21U, 12U, 13U);
+  check_parameter_error("parameters[n Int",
+                        bennu::ParameterErrorReason::missing_header_close,
+                        17U, 17U, 11U, 12U);
+  check_parameter_error("parameters[]x",
+                        bennu::ParameterErrorReason::trailing_header_bytes,
+                        13U, 14U, 1U, 13U);
+  check_parameter_error("parameters[]\nparameters[]",
+                        bennu::ParameterErrorReason::second_parameter_header,
+                        14U, 24U, 1U, 13U);
+  check_parameter_error("1\nparameters[]",
+                        bennu::ParameterErrorReason::parameter_header_after_root,
+                        3U, 13U, 1U, 2U);
+  check_parameter_error("parameters[]\n1\nparameters[]",
+                        bennu::ParameterErrorReason::second_parameter_header,
+                        16U, 26U, 1U, 13U);
+}
+
+TEST_CASE("PARG-001-NAMES") {
+  bennu::ProgramResult duplicate =
+      bennu::evaluate_source("parameters[n Int n Bool]\nn\n");
+  REQUIRE_FALSE(duplicate.ok);
+  CHECK(duplicate.error.kind ==
+        bennu::ErrorKind::invalid_parameter_declaration);
+  REQUIRE(duplicate.error.parameter.has_value());
+  CHECK(duplicate.error.parameter->reason ==
+        bennu::ParameterErrorReason::duplicate_parameter_name);
+  CHECK(duplicate.error.parameter->primary_span.begin.offset == 18U);
+  REQUIRE(duplicate.error.parameter->related_span.has_value());
+  CHECK(duplicate.error.parameter->related_span->begin.offset == 12U);
+
+  for (std::string_view name : {"parameters", "fanout", "true", "false",
+                                "inf", "nan", "inc", "add", "equals",
+                                "not", "iota"}) {
+    const std::string source =
+        "parameters[" + std::string(name) + " Int]\n1\n";
+    bennu::ProgramResult reserved = bennu::evaluate_source(source);
+    INFO(std::string(name));
+    REQUIRE_FALSE(reserved.ok);
+    CHECK(reserved.error.kind ==
+          bennu::ErrorKind::invalid_parameter_declaration);
+    REQUIRE(reserved.error.parameter.has_value());
+    CHECK(reserved.error.parameter->reason ==
+          bennu::ParameterErrorReason::reserved_parameter_name);
+  }
+
+  bennu::ProgramResult unknown =
+      bennu::evaluate_source("parameters[n Int]\nm\n",
+                             std::array{bennu::make_int_value(1)});
+  REQUIRE_FALSE(unknown.ok);
+  CHECK(unknown.error.kind == bennu::ErrorKind::unknown_name);
+  CHECK(unknown.error.location.offset == 19U);
+  REQUIRE(unknown.error.primary_span.has_value());
+  CHECK(unknown.error.primary_span->begin.offset == 19U);
+  CHECK(unknown.error.primary_span->end.offset == 20U);
+
+  bennu::ProgramResult bracket_call = bennu::evaluate_source(
+      "parameters[n Int]\nn[1]\n", std::array{bennu::make_int_value(1)});
+  REQUIRE_FALSE(bracket_call.ok);
+  CHECK(bracket_call.error.kind == bennu::ErrorKind::unknown_name);
+  CHECK(bracket_call.error.location.offset == 19U);
+
+  bennu::ProgramResult prefix_call = bennu::evaluate_source(
+      "parameters[n Int]\nn 1\n", std::array{bennu::make_int_value(1)});
+  REQUIRE_FALSE(prefix_call.ok);
+  CHECK(prefix_call.error.kind == bennu::ErrorKind::unknown_name);
+  CHECK(prefix_call.error.location.offset == 19U);
+
+  bennu::ProgramResult prefix_operand = bennu::evaluate_source(
+      "parameters[n Int]\ninc n\n", std::array{bennu::make_int_value(1)});
+  REQUIRE(prefix_operand.ok);
+  REQUIRE(prefix_operand.values.size() == 1U);
+  CHECK(formatted(prefix_operand.values[0]) == "2");
+  destroy_program(prefix_operand);
+
+  bennu::ProgramResult vector_interior =
+      bennu::evaluate_source("parameters[n Int]\n(n 1)\n");
+  REQUIRE_FALSE(vector_interior.ok);
+  CHECK(vector_interior.error.kind == bennu::ErrorKind::syntax_error);
+}
+
+TEST_CASE("PARG-002-STATIC-ORDER") {
+  bennu::ProgramResult unknown =
+      bennu::evaluate_source("parameters[n Int]\nm\n");
+  REQUIRE_FALSE(unknown.ok);
+  CHECK(unknown.error.kind == bennu::ErrorKind::unknown_name);
+
+  bennu::ProgramResult arity =
+      bennu::evaluate_source("parameters[n Int]\ninc[1 2]\n");
+  REQUIRE_FALSE(arity.ok);
+  CHECK(arity.error.kind == bennu::ErrorKind::arity_error);
+
+  bennu::ProgramResult type =
+      bennu::evaluate_source("parameters[n Int]\nadd[true false]\n");
+  REQUIRE_FALSE(type.ok);
+  CHECK(type.error.kind == bennu::ErrorKind::type_mismatch);
+
+  bennu::Value invalid = bennu::make_int_value(1);
+  invalid.container = static_cast<bennu::ContainerKind>(99);
+  std::array<bennu::Value, 1> invalid_argument{std::move(invalid)};
+  bennu::ProgramResult shape_before_binding = bennu::evaluate_source(
+      "parameters[n Int]\nadd[(1 2) (3 4 5)]\nn\n",
+      std::span<const bennu::Value>(invalid_argument));
+  REQUIRE_FALSE(shape_before_binding.ok);
+  CHECK(shape_before_binding.error.kind == bennu::ErrorKind::shape_mismatch);
+}
+
+TEST_CASE("PARG-003-SHAPE-ANALYSIS") {
+  bennu::ProgramResult static_mismatch = bennu::evaluate_source(
+      "parameters[n Int]\nadd[(1 2) (3 4 5)]\nn\n");
+  REQUIRE_FALSE(static_mismatch.ok);
+  CHECK(static_mismatch.error.kind == bennu::ErrorKind::shape_mismatch);
+
+  bennu::ProgramResult dynamic_requires_binding = bennu::evaluate_source(
+      "parameters[n Int]\nadd[(1 2) iota[n]]\n");
+  REQUIRE_FALSE(dynamic_requires_binding.ok);
+  CHECK(dynamic_requires_binding.error.kind == bennu::ErrorKind::argument_error);
+
+  std::array<bennu::Value, 1> matching{bennu::make_int_value(2)};
+  bennu::ProgramResult dynamic_match = bennu::evaluate_source(
+      "parameters[n Int]\nadd[(1 2) iota[n]]\n",
+      std::span<const bennu::Value>(matching));
+  REQUIRE(dynamic_match.ok);
+  REQUIRE(dynamic_match.values.size() == 1U);
+  CHECK(formatted(dynamic_match.values[0]) == "(2 4)");
+  destroy_program(dynamic_match);
+
+  std::array<bennu::Value, 2> different_dynamic_lengths{
+      bennu::make_int_value(2), bennu::make_int_value(3)};
+  bennu::ProgramResult two_dynamic = bennu::evaluate_source(
+      "parameters[left Int right Int]\nadd[iota[left] iota[right]]\n",
+      std::span<const bennu::Value>(different_dynamic_lengths));
+  REQUIRE_FALSE(two_dynamic.ok);
+  CHECK(two_dynamic.error.kind == bennu::ErrorKind::shape_mismatch);
+  CHECK(two_dynamic.error.argument_position == 2U);
+}
+
+TEST_CASE("PARG-008-ZERO-ROOTS") {
+  std::array<bennu::Value, 2> values{bennu::make_int_value(7),
+                                     bennu::make_bool_value(false)};
+  bennu::ProgramResult empty = bennu::evaluate_source(
+      "parameters[n Int unused Bool]\n",
+      std::span<const bennu::Value>(values));
+  REQUIRE(empty.ok);
+  CHECK(empty.values.empty());
+
+  bennu::ProgramResult empty_header = bennu::evaluate_source("parameters[]\n");
+  REQUIRE(empty_header.ok);
+  CHECK(empty_header.values.empty());
+
+  std::array<bennu::Value, 1> wrong_unused{bennu::make_int_value(7)};
+  bennu::ProgramResult invalid_unused = bennu::evaluate_source(
+      "parameters[unused Bool]\n",
+      std::span<const bennu::Value>(wrong_unused));
+  REQUIRE_FALSE(invalid_unused.ok);
+  REQUIRE(invalid_unused.error.argument.has_value());
+  CHECK(invalid_unused.error.argument->reason ==
+        bennu::ArgumentErrorReason::type_mismatch);
+  CHECK(invalid_unused.error.argument->position == 1U);
+
+  std::array<bennu::Value, 2> repeated_values{bennu::make_int_value(7),
+                                              bennu::make_bool_value(false)};
+  bennu::ProgramResult repeated = bennu::evaluate_source(
+      "parameters[n Int unused Bool]\nadd[n n]\nn\n",
+      std::span<const bennu::Value>(repeated_values));
+  REQUIRE(repeated.ok);
+  REQUIRE(repeated.values.size() == 2U);
+  CHECK(formatted(repeated.values[0]) == "14");
+  CHECK(formatted(repeated.values[1]) == "7");
+  destroy_program(repeated);
+}
+
+TEST_CASE("PARG-010-RUNTIME-ORDER") {
+  std::array<bennu::Value, 1> maximum{bennu::make_int_value(
+      std::numeric_limits<std::int64_t>::max())};
+  bennu::ProgramResult first_root_domain = bennu::evaluate_source(
+      "parameters[n Int]\ninc[n]\niota[n]\n",
+      std::span<const bennu::Value>(maximum));
+  REQUIRE_FALSE(first_root_domain.ok);
+  CHECK(first_root_domain.values.empty());
+  CHECK(first_root_domain.error.kind == bennu::ErrorKind::domain_error);
+
+  std::array<bennu::Value, 3> shape_then_domain{
+      bennu::make_int_value(2), bennu::make_int_value(3),
+      bennu::make_int_value(std::numeric_limits<std::int64_t>::max())};
+  bennu::ProgramResult first_root_shape = bennu::evaluate_source(
+      "parameters[left Int right Int maximum Int]\n"
+      "add[iota[left] iota[right]]\ninc[maximum]\n",
+      std::span<const bennu::Value>(shape_then_domain));
+  REQUIRE_FALSE(first_root_shape.ok);
+  CHECK(first_root_shape.values.empty());
+  CHECK(first_root_shape.error.kind == bennu::ErrorKind::shape_mismatch);
+
+  const bennu::EvaluationConfiguration bounded{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{8U}, std::nullopt, std::nullopt}};
+  std::array<bennu::Value, 1> three{bennu::make_int_value(3)};
+  bennu::ProgramResult child_resource = bennu::evaluate_source(
+      "parameters[n Int]\nadd[(1 2) iota[n]]\n",
+      std::span<const bennu::Value>(three), bounded);
+  REQUIRE_FALSE(child_resource.ok);
+  CHECK(child_resource.values.empty());
+  CHECK(child_resource.error.kind == bennu::ErrorKind::resource_error);
+}
+
+TEST_CASE("PARG-011-PROFILES") {
+  const bennu::EvaluationConfiguration no_work{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::size_t{0U}}};
+  std::array<bennu::Value, 1> argument{bennu::make_int_value(4)};
+
+  bennu::ProgramResult binding_only = bennu::evaluate_source(
+      "parameters[n Int]\nn\n", std::span<const bennu::Value>(argument),
+      no_work);
+  REQUIRE(binding_only.ok);
+  REQUIRE(binding_only.values.size() == 1U);
+  CHECK(formatted(binding_only.values[0]) == "4");
+  destroy_program(binding_only);
+
+  bennu::ProgramResult call_is_charged = bennu::evaluate_source(
+      "parameters[n Int]\ninc[n]\n", std::span<const bennu::Value>(argument),
+      no_work);
+  REQUIRE_FALSE(call_is_charged.ok);
+  CHECK(call_is_charged.error.kind == bennu::ErrorKind::resource_error);
+  REQUIRE(call_is_charged.error.resource.has_value());
+  CHECK(call_is_charged.error.resource->reason ==
+        bennu::ResourceErrorReason::profile_limit);
+  CHECK(call_is_charged.error.resource->limit_kind ==
+        bennu::ResourceLimitKind::max_work_units);
+
+  bennu::ProgramResult binding_failure_precedes_profile =
+      bennu::evaluate_source("parameters[n Int]\ninc[n]\n",
+                             std::span<const bennu::Value>{}, no_work);
+  REQUIRE_FALSE(binding_failure_precedes_profile.ok);
+  CHECK(binding_failure_precedes_profile.error.kind ==
+        bennu::ErrorKind::argument_error);
+}
+
+TEST_CASE("Issue 46 explicitly defers parameterized C emission to Issue 48") {
+  bennu::CEmissionResult emitted =
+      bennu::emit_c_source("parameters[n Int]\nn\n");
+  REQUIRE_FALSE(emitted.ok);
+  CHECK(emitted.error.kind == bennu::ErrorKind::syntax_error);
+  REQUIRE(emitted.error.parameter.has_value());
+  CHECK(emitted.error.parameter->reason ==
+        bennu::ParameterErrorReason::unsupported_parameterized_surface);
+}
+
+TEST_CASE("PARG-017-REGRESSION") {
+  bennu::ProgramResult absent_header = bennu::evaluate_source("add[1 2]\n");
+  REQUIRE(absent_header.ok);
+  REQUIRE(absent_header.values.size() == 1U);
+  CHECK(formatted(absent_header.values[0]) == "3");
+  destroy_program(absent_header);
+
+  bennu::ProgramResult empty_header =
+      bennu::evaluate_source("parameters[]\nadd[1 2]\n");
+  REQUIRE(empty_header.ok);
+  REQUIRE(empty_header.values.size() == 1U);
+  CHECK(formatted(empty_header.values[0]) == "3");
+  destroy_program(empty_header);
+
+  bennu::ValueResult result =
+      bennu::evaluate_expression("parameters[n Int]\nn\n");
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.error.kind == bennu::ErrorKind::syntax_error);
+  REQUIRE(result.error.parameter.has_value());
+  CHECK(result.error.parameter->reason ==
+        bennu::ParameterErrorReason::program_only_parameter_header);
+  CHECK(result.error.location.offset == 1U);
+
+  bennu::ValueResult bare_name = bennu::evaluate_expression("name");
+  REQUIRE_FALSE(bare_name.ok);
+  CHECK(bare_name.error.kind == bennu::ErrorKind::unknown_name);
+  CHECK(bare_name.error.location.offset == 1U);
 }
