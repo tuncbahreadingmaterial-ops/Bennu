@@ -12,6 +12,8 @@
 
 **Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
 
+**Explicit sequential fan-out:** [BENNU-SPEC-0007](bennu-spec-0007-explicit-sequential-fanout.md)
+
 **Target:** Bennu typed analysis, evaluator, runner, emitted strict C11, and
 native execution
 
@@ -49,8 +51,10 @@ call-preparation rule:
   profile identity.
 
 This specification also defines construction, ownership, validation,
-formatting, diagnostic provenance, deterministic failure order, and the future
-conformance plan. It does not implement any of those requirements.
+formatting, diagnostic provenance, deterministic failure order, and the
+conformance plan. BENNU-SPEC-0007 separately applies these accepted tuple and
+profile-v2 rules to explicit sequential fan-out. Neither specification
+implements its requirements.
 
 ## 3. Tuple source grammar
 
@@ -612,9 +616,9 @@ payload is charged as part of either outer table.
 
 Tuple construction, movement, validation, formatting, spreading, and cleanup
 charge zero work units. Primitive calls made while evaluating tuple elements or
-consuming spread elements retain their ordinary work charges. Future fan-out
-uses the same rule: its result tuple table is charged once, while branch
-primitive work and branch payloads retain their own charges.
+consuming spread elements retain their ordinary work charges. BENNU-SPEC-0007
+uses the same rule for fan-out: its result tuple table is charged once, while
+operand/branch primitive work and branch payloads retain their own charges.
 
 ### 6.4 Admission order
 
@@ -887,9 +891,9 @@ Origin selection is exact:
    complete expression span for each forwarded outer element.
 
 The first rule gives `[1 add[2 3]]` the spans of `1` and `add[2 3]`. The second
-allows future fan-out to use each branch span. A future tuple-producing construct
-must define rule 2 or explicitly accept rule 3. Runtime tuple values remain
-source-independent and can move without span repair.
+allows BENNU-SPEC-0007 fan-out to use each branch span. A future tuple-producing
+construct must define rule 2 or explicitly accept rule 3. Runtime tuple values
+remain source-independent and can move without span repair.
 
 ### 9.2 Expanded-call diagnostics
 
@@ -977,8 +981,9 @@ reasons, transactional admission, and cross-backend agreement, then adds the
 fixed tuple-table unit, limit, profile identities, and ordinal rules in section
 6.
 
-Future tuple producers, including sequential fan-out, must use v2's existing
-tuple-table event rather than inventing a backend-sized charge. A future new
+BENNU-SPEC-0007 sequential fan-out uses v2's existing tuple-table event rather
+than inventing a backend-sized charge. Every other future tuple producer must do
+the same. A future new
 resource kind or changed canonical event requires another versioned profile; it
 must not silently mutate v1 or v2.
 
@@ -990,7 +995,8 @@ requires static one-level spreading, primitive-name targets, right-associated
 complete operands, explicit adjacent direct calls, versioned resource profiles,
 flat ownership, and structured provenance. It does not import Anka currying,
 blocks, trains, placeholders, connected tuples, word folding, or executor
-semantics.
+semantics. BENNU-SPEC-0007 adds a narrowly scoped branch-local placeholder and
+sequential construct without importing those broader Anka rules.
 
 ## 12. Non-goals and fixed follow-ups
 
@@ -1004,12 +1010,14 @@ This specification does not add:
 - callable values, callable-expression targets, partial application, user
   functions, closures, or blocks;
 - vector or tuple program parameters;
-- fan-out syntax or branch semantics;
+- fan-out syntax or branch semantics within this tuple specification;
 - runtime reference counting or shared ownership; or
 - optimization that removes an observable tuple reservation, profile refusal,
   allocation ordinal, failure, or lifetime event.
 
-Each requires separate specification and acceptance. In particular, a compiler
+Each requires separate specification and acceptance. BENNU-SPEC-0007 is the
+separate specification for explicit sequential fan-out; the other exclusions
+remain unchanged. In particular, a compiler
 may elide a tuple used only by immediate spreading only after proving and
 preserving the exact v2 charge, fault-injection, diagnostic, ownership, and
 failure-order observations as if construction occurred.
