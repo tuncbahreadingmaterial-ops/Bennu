@@ -5,12 +5,15 @@
 
 #include "doctest/doctest.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <ostream>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -51,13 +54,59 @@ Value make_test_vector(EvaluationResources &resources,
 std::string valid_type_text(const TypeArena &type) {
   const TypeFormattingResult formatted = format_type(type);
   REQUIRE(formatted.ok);
-  return formatted.formatted;
+  return std::string(formatted.formatted);
 }
 
 std::string valid_value_text(const Value &value) {
   const ValueFormattingResult formatted = format_value(value);
   REQUIRE(formatted.ok);
-  return formatted.formatted;
+  return std::string(formatted.formatted);
+}
+
+TypeArena copy_test_type(const TypeArena &type) {
+  TypeConstructionResult copied = clone_type(type);
+  REQUIRE(copied.ok);
+  return std::move(copied.type);
+}
+
+template <typename Element>
+void append_test_array(HostArray<Element> &array, Element element) {
+  HostArray<Element> replacement;
+  REQUIRE(allocate_host_array(replacement, array.size + 1U,
+                              std::nullopt) ==
+          HostResourceErrorReason::none);
+  for (Element &existing : host_array_span(array)) {
+    REQUIRE(host_array_push(replacement, std::move(existing)) ==
+            HostResourceErrorReason::none);
+  }
+  REQUIRE(host_array_push(replacement, std::move(element)) ==
+          HostResourceErrorReason::none);
+  array = std::move(replacement);
+}
+
+void insert_test_type_node_before_root(TypeArena &type, TypeNode node) {
+  HostArray<TypeNode> replacement;
+  REQUIRE(allocate_host_array(replacement, type.nodes.size + 1U,
+                              std::nullopt) ==
+          HostResourceErrorReason::none);
+  for (std::size_t index = 0U; index + 1U < type.nodes.size; ++index) {
+    REQUIRE(host_array_push(replacement,
+                            type.nodes.storage.get()[index]) ==
+            HostResourceErrorReason::none);
+  }
+  REQUIRE(host_array_push(replacement, node) ==
+          HostResourceErrorReason::none);
+  REQUIRE(host_array_push(
+              replacement,
+              type.nodes.storage.get()[type.nodes.size - 1U]) ==
+          HostResourceErrorReason::none);
+  type.nodes = std::move(replacement);
+}
+
+bool test_path_equals(std::span<const std::size_t> path,
+                      std::initializer_list<std::size_t> expected) {
+  return std::equal(path.begin(), path.end(), expected.begin(),
+                    expected.end());
 }
 
 struct ConstructionProbe {
@@ -73,14 +122,15 @@ TupleElementExecutionResult execute_construction_element(
   auto &probe = *static_cast<ConstructionProbe *>(context);
   probe.execution_order.push_back(element_index);
   ++probe.execution_counts[element_index];
-  const WorkChargeResult charged = charge_work(
+  WorkChargeResult charged = charge_work(
       resources, element_index + 1U, tuple_location, "tuple-element");
   probe.work_after_element.push_back(resources.work_units);
   if (!charged.ok || probe.fail_element == element_index) {
-    Error error = charged.ok
-                      ? make_error(ErrorKind::domain_error, tuple_location,
-                                   "injected tuple element failure")
-                      : charged.error;
+    Error error =
+        charged.ok
+            ? make_error(ErrorKind::domain_error, tuple_location,
+                         "injected tuple element failure")
+            : std::move(charged.error);
     Value empty = make_int_value(0);
     CHECK(destroy_value(empty).ok);
     return TupleElementExecutionResult{false, std::move(empty),
@@ -184,28 +234,50 @@ void *reduced_stack_entry(void *context) {
 
 } // namespace
 
+TEST_CASE("host arrays reject writes beyond their allocation") {
+  HostArray<std::size_t> bounded_host_array;
+  REQUIRE(allocate_host_array(bounded_host_array, 1U, std::nullopt) ==
+          HostResourceErrorReason::none);
+  CHECK(host_array_push(bounded_host_array, std::size_t{7U}) ==
+        HostResourceErrorReason::none);
+  CHECK(host_array_push(bounded_host_array, std::size_t{8U}) ==
+        HostResourceErrorReason::size_overflow);
+  bounded_host_array.capacity = 2U;
+  CHECK(host_array_push(bounded_host_array, std::size_t{9U}) ==
+        HostResourceErrorReason::size_overflow);
+  CHECK(bounded_host_array.size == 1U);
+  CHECK(bounded_host_array.storage.get()[0] == 7U);
+  bounded_host_array.capacity = 1U;
+}
+
 TEST_CASE("TUP-002-TYPES") {
-  const TypeArena integer = make_scalar_type(ScalarType::integer);
-  const TypeArena vector_boolean = make_vector_type(ScalarType::boolean);
   const TypeConstructionResult empty = make_tuple_type({});
   REQUIRE(empty.ok);
   CHECK(valid_type_text(empty.type) == "Tuple<>");
 
   const std::array<TypeArena, 3> element_types{{
-      integer,
+      make_scalar_type(ScalarType::integer),
       make_scalar_type(ScalarType::double_precision),
-      vector_boolean,
+      make_vector_type(ScalarType::boolean),
   }};
   const TypeConstructionResult heterogeneous = make_tuple_type(element_types);
   REQUIRE(heterogeneous.ok);
   CHECK(valid_type_text(heterogeneous.type) ==
         "Tuple<Int, Double, Vector<Bool>>");
   CHECK(validate_type(heterogeneous.type).ok);
-  CHECK(heterogeneous.type.root_index == heterogeneous.type.nodes.size() - 1U);
+  CHECK(heterogeneous.type.root_index ==
+        type_nodes(heterogeneous.type).size() - 1U);
 
-  TypeArena copied_diagnostic_type = heterogeneous.type;
+  TypeArena copied_diagnostic_type = copy_test_type(heterogeneous.type);
   CHECK(structural_type_equal(copied_diagnostic_type, heterogeneous.type));
   CHECK(valid_type_text(copied_diagnostic_type) ==
+        "Tuple<Int, Double, Vector<Bool>>");
+  TypeFormattingResult owned_type_format =
+      format_type(copied_diagnostic_type);
+  REQUIRE(owned_type_format.ok);
+  TypeFormattingResult moved_type_format =
+      std::move(owned_type_format);
+  CHECK(moved_type_format.formatted ==
         "Tuple<Int, Double, Vector<Bool>>");
 
   const std::array<TypeArena, 11> notation_types{{
@@ -216,16 +288,20 @@ TEST_CASE("TUP-002-TYPES") {
       make_vector_type(ScalarType::integer),
       make_vector_type(ScalarType::double_precision),
       make_tuple_type({}).type,
-      make_tuple_type(std::array<TypeArena, 1>{integer}).type,
+      make_tuple_type(std::array<TypeArena, 1>{
+                          make_scalar_type(ScalarType::integer)})
+          .type,
       make_tuple_type(std::array<TypeArena, 3>{
-                          integer,
+                          make_scalar_type(ScalarType::integer),
                           make_scalar_type(ScalarType::double_precision),
                           make_scalar_type(ScalarType::boolean)})
           .type,
       make_tuple_type(std::array<TypeArena, 2>{
-                          integer,
+                          make_scalar_type(ScalarType::integer),
                           make_tuple_type(
-                              std::array<TypeArena, 2>{integer, integer})
+                              std::array<TypeArena, 2>{
+                                  make_scalar_type(ScalarType::integer),
+                                  make_scalar_type(ScalarType::integer)})
                               .type})
           .type,
       make_tuple_type(std::array<TypeArena, 2>{
@@ -255,22 +331,24 @@ TEST_CASE("TUP-002-TYPES") {
 
   const TypeArena reversed =
       make_tuple_type(std::array<TypeArena, 3>{
-                          vector_boolean,
-                          make_scalar_type(ScalarType::double_precision), integer})
+                          make_vector_type(ScalarType::boolean),
+                          make_scalar_type(ScalarType::double_precision),
+                          make_scalar_type(ScalarType::integer)})
           .type;
   const TypeArena shorter =
       make_tuple_type(std::array<TypeArena, 2>{
-                          integer,
+                          make_scalar_type(ScalarType::integer),
                           make_scalar_type(ScalarType::double_precision)})
           .type;
   const TypeArena differently_nested =
       make_tuple_type(std::array<TypeArena, 2>{
                           make_tuple_type(std::array<TypeArena, 2>{
-                                              integer,
+                                              make_scalar_type(
+                                                  ScalarType::integer),
                                               make_scalar_type(
                                                   ScalarType::double_precision)})
                               .type,
-                          vector_boolean})
+                          make_vector_type(ScalarType::boolean)})
           .type;
   CHECK_FALSE(structural_type_equal(heterogeneous.type, reversed));
   CHECK_FALSE(structural_type_equal(heterogeneous.type, shorter));
@@ -283,12 +361,13 @@ TEST_CASE("TUP-002-TYPES") {
   CHECK_FALSE(overflow.ok);
   CHECK(overflow.invariant == TypeInvariant::none);
   CHECK(overflow.resource_error == HostResourceErrorReason::size_overflow);
+  CHECK(synthetic_overflow.allocation_ordinal == 9U);
 
   ErrorValueType diagnostic_type;
   {
-    TypeArena source_type = heterogeneous.type;
+    TypeArena source_type = copy_test_type(heterogeneous.type);
     TypeErrorContext diagnostic;
-    diagnostic.actual_arguments.push_back(source_type);
+    diagnostic.actual_arguments.push_back(std::move(source_type));
     diagnostic_type = std::move(diagnostic.actual_arguments[0]);
   }
   CHECK(valid_type_text(diagnostic_type) ==
@@ -309,8 +388,9 @@ TEST_CASE("TUP-002-TYPES") {
   CHECK(deep_text.formatted.starts_with("Tuple<Tuple<Tuple<"));
   CHECK(deep_text.formatted.ends_with(">>>"));
 
-  TypeArena invalid = heterogeneous.type;
-  invalid.nodes.back().first_child = invalid.child_indexes.size() + 1U;
+  TypeArena invalid = copy_test_type(heterogeneous.type);
+  invalid.nodes.storage.get()[invalid.nodes.size - 1U].first_child =
+      invalid.child_indexes.size + 1U;
   const TypeValidationResult invalid_result = validate_type(invalid);
   CHECK_FALSE(invalid_result.ok);
   CHECK(invalid_result.invariant == TypeInvariant::invalid_tuple_range);
@@ -322,49 +402,66 @@ TEST_CASE("TUP-002-TYPES") {
     CHECK_FALSE(result.ok);
     CHECK(result.invariant == expected);
   };
-  TypeArena invalid_root = heterogeneous.type;
-  invalid_root.root_index = invalid_root.nodes.size();
+  TypeArena invalid_root = copy_test_type(heterogeneous.type);
+  invalid_root.root_index = invalid_root.nodes.size;
   check_invalid(invalid_root, TypeInvariant::invalid_type_root);
-  TypeArena nonfinal_root = heterogeneous.type;
+  TypeArena nonfinal_root = copy_test_type(heterogeneous.type);
   nonfinal_root.root_index = 0U;
   check_invalid(nonfinal_root, TypeInvariant::nonfinal_type_root);
-  TypeArena unknown_kind = heterogeneous.type;
-  unknown_kind.nodes[0].kind = static_cast<TypeKind>(99);
+  TypeArena unknown_kind = copy_test_type(heterogeneous.type);
+  unknown_kind.nodes.storage.get()[0].kind =
+      static_cast<TypeKind>(99);
   check_invalid(unknown_kind, TypeInvariant::unknown_type_kind);
-  TypeArena unknown_scalar = heterogeneous.type;
-  unknown_scalar.nodes[0].scalar = static_cast<ScalarType>(99);
+  TypeArena unknown_scalar = copy_test_type(heterogeneous.type);
+  unknown_scalar.nodes.storage.get()[0].scalar =
+      static_cast<ScalarType>(99);
   check_invalid(unknown_scalar, TypeInvariant::unknown_scalar_type);
-  TypeArena inactive_field = heterogeneous.type;
-  inactive_field.nodes[0].child_count = 1U;
+  TypeArena inactive_field = copy_test_type(heterogeneous.type);
+  inactive_field.nodes.storage.get()[0].child_count = 1U;
   check_invalid(inactive_field, TypeInvariant::inactive_type_field);
-  TypeArena invalid_child = heterogeneous.type;
-  invalid_child.child_indexes[0] = invalid_child.nodes.size();
+  TypeArena invalid_child = copy_test_type(heterogeneous.type);
+  invalid_child.child_indexes.storage.get()[0] =
+      invalid_child.nodes.size;
   check_invalid(invalid_child, TypeInvariant::invalid_tuple_child_index);
-  TypeArena non_postorder = heterogeneous.type;
-  non_postorder.child_indexes[0] = non_postorder.root_index;
+  TypeArena non_postorder = copy_test_type(heterogeneous.type);
+  non_postorder.child_indexes.storage.get()[0] =
+      non_postorder.root_index;
   check_invalid(non_postorder, TypeInvariant::non_postorder_tuple_child);
-  TypeArena aliased_child = heterogeneous.type;
-  aliased_child.child_indexes[1] = aliased_child.child_indexes[0];
+  TypeArena aliased_child = copy_test_type(heterogeneous.type);
+  aliased_child.child_indexes.storage.get()[1] =
+      aliased_child.child_indexes.storage.get()[0];
   check_invalid(aliased_child, TypeInvariant::aliased_tuple_child);
-  TypeArena orphan_edge = heterogeneous.type;
-  orphan_edge.child_indexes.push_back(0U);
+  TypeArena excess_edges = copy_test_type(heterogeneous.type);
+  append_test_array(excess_edges.child_indexes, std::size_t{0U});
+  append_test_array(excess_edges.child_indexes, std::size_t{1U});
+  type_nodes(excess_edges)[excess_edges.root_index].child_count += 2U;
+  CHECK(excess_edges.child_indexes.size >
+        type_nodes(excess_edges).size());
+  check_invalid(excess_edges, TypeInvariant::aliased_tuple_child);
+  TypeArena orphan_edge = copy_test_type(heterogeneous.type);
+  append_test_array(orphan_edge.child_indexes, std::size_t{0U});
   check_invalid(orphan_edge, TypeInvariant::orphan_tuple_edge);
-  TypeArena orphan_node = heterogeneous.type;
-  orphan_node.nodes.insert(
-      orphan_node.nodes.end() - 1,
+  TypeArena orphan_node = copy_test_type(heterogeneous.type);
+  insert_test_type_node_before_root(
+      orphan_node,
       TypeNode{TypeKind::scalar, ScalarType::boolean, 0U, 0U});
   ++orphan_node.root_index;
   check_invalid(orphan_node, TypeInvariant::orphan_type_node);
 
-  const std::array<TypeArena, 1> nested_child{{integer}};
+  const std::array<TypeArena, 1> nested_child{{
+      make_scalar_type(ScalarType::integer)}};
   const TypeConstructionResult nested_tuple = make_tuple_type(nested_child);
   REQUIRE(nested_tuple.ok);
-  const std::array<TypeArena, 2> nested_elements{{nested_tuple.type, integer}};
+  const std::array<TypeArena, 2> nested_elements{{
+      copy_test_type(nested_tuple.type),
+      make_scalar_type(ScalarType::integer)}};
   const TypeConstructionResult nested_owner = make_tuple_type(nested_elements);
   REQUIRE(nested_owner.ok);
-  TypeArena overlapping_range = nested_owner.type;
-  overlapping_range.nodes[1].first_child =
-      overlapping_range.nodes.back().first_child;
+  TypeArena overlapping_range = copy_test_type(nested_owner.type);
+  overlapping_range.nodes.storage.get()[1].first_child =
+      overlapping_range.nodes.storage.get()[
+          overlapping_range.nodes.size - 1U]
+          .first_child;
   check_invalid(overlapping_range, TypeInvariant::overlapping_tuple_range);
 }
 
@@ -431,7 +528,7 @@ TEST_CASE("TUP-003-VALUES") {
   CHECK(legacy_length == 0U);
 
   Value bad_root = move_value(made.value);
-  bad_root.tuple.root_index = bad_root.tuple.nodes.size() + 1U;
+  bad_root.tuple.root_index = bad_root.tuple.nodes.size + 1U;
   const ValueValidationResult bad_root_result = validate_value(bad_root);
   CHECK_FALSE(bad_root_result.ok);
   CHECK(bad_root_result.invariant == ValueInvariant::invalid_value_root);
@@ -441,7 +538,7 @@ TEST_CASE("TUP-003-VALUES") {
   const ValueDestructionResult refused_destroy = destroy_value(bad_root);
   CHECK_FALSE(refused_destroy.ok);
   CHECK(bad_root.tuple.root_reservation.storage.get() == reservation_before);
-  bad_root.tuple.root_index = bad_root.tuple.nodes.size();
+  bad_root.tuple.root_index = bad_root.tuple.nodes.size;
   CHECK(destroy_value(bad_root).ok);
   CHECK_FALSE(bad_root.claimed);
 
@@ -453,25 +550,28 @@ TEST_CASE("TUP-003-VALUES") {
   TupleConstructionResult nested_outer = make_tuple_value(
       resources, nested_owner, tuple_location, "nested-path");
   REQUIRE(nested_outer.ok);
-  nested_outer.value.tuple.nodes[0].first_child = 1U;
-  const ValueValidationResult nested_invalid =
+  nested_outer.value.tuple.nodes.storage.get()[0].first_child = 1U;
+  ValueValidationResult nested_invalid =
       validate_value(nested_outer.value);
   CHECK_FALSE(nested_invalid.ok);
-  CHECK(nested_invalid.path == std::vector<std::size_t>{0U, 0U});
+  CHECK(test_path_equals(nested_invalid.path, {0U, 0U}));
+  ValueValidationResult moved_nested_invalid =
+      std::move(nested_invalid);
+  CHECK(test_path_equals(moved_nested_invalid.path, {0U, 0U}));
   const ValueFormattingResult invalid_format =
       format_value(nested_outer.value);
   CHECK_FALSE(invalid_format.ok);
-  CHECK(invalid_format.path == std::vector<std::size_t>{0U, 0U});
+  CHECK(test_path_equals(invalid_format.path, {0U, 0U}));
   const ValueTupleArityResult invalid_arity =
       value_tuple_arity(nested_outer.value);
   CHECK_FALSE(invalid_arity.ok);
-  CHECK(invalid_arity.path == std::vector<std::size_t>{0U, 0U});
+  CHECK(test_path_equals(invalid_arity.path, {0U, 0U}));
   const ValueDestructionResult invalid_destruction =
       destroy_value(nested_outer.value);
   CHECK_FALSE(invalid_destruction.ok);
-  CHECK(invalid_destruction.path == std::vector<std::size_t>{0U, 0U});
-  CHECK(nested_outer.value.tuple.nodes[0].first_child == 1U);
-  nested_outer.value.tuple.nodes[0].first_child = 0U;
+  CHECK(test_path_equals(invalid_destruction.path, {0U, 0U}));
+  CHECK(nested_outer.value.tuple.nodes.storage.get()[0].first_child == 1U);
+  nested_outer.value.tuple.nodes.storage.get()[0].first_child = 0U;
   CHECK(release_value_reservations(resources, nested_outer.value).ok);
 
   std::array<Value, 2> vector_children{{
@@ -481,20 +581,20 @@ TEST_CASE("TUP-003-VALUES") {
   TupleConstructionResult vector_tuple = make_tuple_value(
       resources, vector_children, tuple_location, "payload-handles");
   REQUIRE(vector_tuple.ok);
-  vector_tuple.value.tuple.nodes[1].vector_payload_index =
-      vector_tuple.value.tuple.nodes[0].vector_payload_index;
+  vector_tuple.value.tuple.nodes.storage.get()[1].vector_payload_index =
+      vector_tuple.value.tuple.nodes.storage.get()[0].vector_payload_index;
   CHECK(validate_value(vector_tuple.value).invariant ==
         ValueInvariant::aliased_vector_payload);
-  vector_tuple.value.tuple.nodes[1].vector_payload_index = 1U;
+  vector_tuple.value.tuple.nodes.storage.get()[1].vector_payload_index = 1U;
   VectorAllocationResult empty_payload = allocate_vector(
       resources, ScalarType::integer, 0U, 0U, tuple_location,
       "orphan-payload");
   REQUIRE(empty_payload.ok);
-  vector_tuple.value.tuple.vector_payloads.push_back(
-      std::move(empty_payload.value.vector));
+  append_test_array(vector_tuple.value.tuple.vector_payloads,
+                    std::move(empty_payload.value.vector));
   CHECK(validate_value(vector_tuple.value).invariant ==
         ValueInvariant::orphan_vector_payload_handle);
-  vector_tuple.value.tuple.vector_payloads.pop_back();
+  --vector_tuple.value.tuple.vector_payloads.size;
   CHECK(release_value_reservations(resources, vector_tuple.value).ok);
 
   EvaluationResources invariant_resources =
@@ -517,14 +617,15 @@ TEST_CASE("TUP-003-VALUES") {
   nonfinal_root.tuple.root_index = 0U;
   check_invalid(nonfinal_root, ValueInvariant::nonfinal_value_root);
   Value unknown_container = make_pair();
-  unknown_container.tuple.nodes[0].container =
+  unknown_container.tuple.nodes.storage.get()[0].container =
       static_cast<ContainerKind>(99);
   check_invalid(unknown_container, ValueInvariant::unknown_container);
   Value unknown_scalar = make_pair();
-  unknown_scalar.tuple.nodes[0].scalar.type = static_cast<ScalarType>(99);
+  unknown_scalar.tuple.nodes.storage.get()[0].scalar.type =
+      static_cast<ScalarType>(99);
   check_invalid(unknown_scalar, ValueInvariant::unknown_scalar_type);
   Value inactive_scalar_node = make_pair();
-  inactive_scalar_node.tuple.nodes[0].first_child = 1U;
+  inactive_scalar_node.tuple.nodes.storage.get()[0].first_child = 1U;
   check_invalid(inactive_scalar_node, ValueInvariant::inactive_tuple_field);
   Value inactive_tuple_scalar = make_pair();
   inactive_tuple_scalar.scalar.integer = 1;
@@ -534,7 +635,7 @@ TEST_CASE("TUP-003-VALUES") {
   check_invalid(inactive_tuple_vector, ValueInvariant::inactive_vector_payload);
   Value invalid_root_wins_before_inactive_fields = make_pair();
   invalid_root_wins_before_inactive_fields.tuple.root_index =
-      invalid_root_wins_before_inactive_fields.tuple.nodes.size() + 1U;
+      invalid_root_wins_before_inactive_fields.tuple.nodes.size + 1U;
   invalid_root_wins_before_inactive_fields.scalar.integer = 1;
   check_invalid(invalid_root_wins_before_inactive_fields,
                 ValueInvariant::invalid_value_root);
@@ -548,29 +649,30 @@ TEST_CASE("TUP-003-VALUES") {
   CHECK(root_winner_under_pressure.resource_error ==
         HostResourceErrorReason::none);
   Value invalid_range = make_pair();
-  invalid_range.tuple.first_child = invalid_range.tuple.child_indexes.size() + 1U;
+  invalid_range.tuple.first_child = invalid_range.tuple.child_indexes.size + 1U;
   check_invalid(invalid_range, ValueInvariant::invalid_tuple_range);
   Value invalid_child_index = make_pair();
-  invalid_child_index.tuple.child_indexes[0] =
+  invalid_child_index.tuple.child_indexes.storage.get()[0] =
       invalid_child_index.tuple.root_index + 1U;
   check_invalid(invalid_child_index,
                 ValueInvariant::invalid_tuple_child_index);
   Value non_postorder = make_pair();
-  non_postorder.tuple.child_indexes[0] = non_postorder.tuple.root_index;
+  non_postorder.tuple.child_indexes.storage.get()[0] =
+      non_postorder.tuple.root_index;
   check_invalid(non_postorder, ValueInvariant::non_postorder_tuple_child);
   Value aliased_child = make_pair();
-  aliased_child.tuple.child_indexes[1] =
-      aliased_child.tuple.child_indexes[0];
+  aliased_child.tuple.child_indexes.storage.get()[1] =
+      aliased_child.tuple.child_indexes.storage.get()[0];
   check_invalid(aliased_child, ValueInvariant::aliased_tuple_child);
   Value invalid_reservation_count = make_pair();
   ++invalid_reservation_count.tuple.root_reservation.element_count;
   check_invalid(invalid_reservation_count,
                 ValueInvariant::invalid_tuple_reservation_count);
   Value orphan_edge = make_pair();
-  orphan_edge.tuple.child_indexes.push_back(0U);
+  append_test_array(orphan_edge.tuple.child_indexes, std::size_t{0U});
   check_invalid(orphan_edge, ValueInvariant::orphan_tuple_edge);
   Value orphan_node = make_pair();
-  orphan_node.tuple.nodes.push_back(ValueNode{
+  append_test_array(orphan_node.tuple.nodes, ValueNode{
       ContainerKind::scalar,
       ScalarValue{ScalarType::integer, false, 7, 0.0}, 0U, 0U, 0U, 0U});
   ++orphan_node.tuple.root_index;
@@ -580,11 +682,12 @@ TEST_CASE("TUP-003-VALUES") {
       invariant_resources, ScalarType::integer, 0U, 0U, tuple_location,
       "orphan-vector-payload");
   REQUIRE(detached_empty_vector.ok);
-  orphan_payload.tuple.vector_payloads.push_back(
-      std::move(detached_empty_vector.value.vector));
+  append_test_array(orphan_payload.tuple.vector_payloads,
+                    std::move(detached_empty_vector.value.vector));
   check_invalid(orphan_payload, ValueInvariant::orphan_vector_payload_handle);
   Value orphan_reservation = make_pair();
-  orphan_reservation.tuple.reservations.push_back(TupleTableReservation{});
+  append_test_array(orphan_reservation.tuple.reservations,
+                    TupleTableReservation{});
   check_invalid(orphan_reservation, ValueInvariant::orphan_tuple_reservation);
 
   const auto make_nested = [&invariant_resources]() {
@@ -599,25 +702,27 @@ TEST_CASE("TUP-003-VALUES") {
     return move_value(outer.value);
   };
   Value overlapping_range = make_nested();
-  overlapping_range.tuple.nodes[1].first_child =
+  overlapping_range.tuple.nodes.storage.get()[1].first_child =
       overlapping_range.tuple.first_child;
   check_invalid(overlapping_range, ValueInvariant::overlapping_tuple_range);
   Value missing_reservation = make_nested();
-  missing_reservation.tuple.nodes[1].tuple_reservation_index =
-      missing_reservation.tuple.reservations.size() + 1U;
+  missing_reservation.tuple.nodes.storage.get()[1].tuple_reservation_index =
+      missing_reservation.tuple.reservations.size + 1U;
   check_invalid(missing_reservation,
                 ValueInvariant::missing_tuple_reservation);
   Value aliased_reservation = make_nested();
-  aliased_reservation.tuple.nodes[1].tuple_reservation_index =
-      aliased_reservation.tuple.reservations.size();
+  aliased_reservation.tuple.nodes.storage.get()[1].tuple_reservation_index =
+      aliased_reservation.tuple.reservations.size;
   check_invalid(aliased_reservation,
                 ValueInvariant::aliased_tuple_reservation);
 
   Value invalid_payload_handle = make_pair();
-  invalid_payload_handle.tuple.nodes[0].container = ContainerKind::vector;
-  invalid_payload_handle.tuple.nodes[0].scalar =
+  invalid_payload_handle.tuple.nodes.storage.get()[0].container =
+      ContainerKind::vector;
+  invalid_payload_handle.tuple.nodes.storage.get()[0].scalar =
       ScalarValue{ScalarType::boolean, false, 0, 0.0};
-  invalid_payload_handle.tuple.nodes[0].vector_payload_index = 1U;
+  invalid_payload_handle.tuple.nodes.storage.get()[0].vector_payload_index =
+      1U;
   check_invalid(invalid_payload_handle,
                 ValueInvariant::invalid_vector_payload_handle);
 
@@ -630,9 +735,9 @@ TEST_CASE("TUP-003-VALUES") {
       "duplicate-payload-pointer");
   REQUIRE(duplicate_pointer_tuple.ok);
   VectorValue &first_payload =
-      duplicate_pointer_tuple.value.tuple.vector_payloads[0];
+      duplicate_pointer_tuple.value.tuple.vector_payloads.storage.get()[0];
   VectorValue &second_payload =
-      duplicate_pointer_tuple.value.tuple.vector_payloads[1];
+      duplicate_pointer_tuple.value.tuple.vector_payloads.storage.get()[1];
   std::int64_t *second_original = second_payload.integers.release();
   second_payload.integers.reset(first_payload.integers.get());
   check_invalid(duplicate_pointer_tuple.value,
@@ -645,7 +750,7 @@ TEST_CASE("TUP-003-VALUES") {
 
   Value duplicate_reservation = make_nested();
   TupleTableReservation &nested_reservation =
-      duplicate_reservation.tuple.reservations[0];
+      duplicate_reservation.tuple.reservations.storage.get()[0];
   std::byte *nested_storage = nested_reservation.storage.release();
   nested_reservation.storage.reset(
       duplicate_reservation.tuple.root_reservation.storage.get());
@@ -665,7 +770,7 @@ TEST_CASE("TUP-003-VALUES") {
       "cross-kind-payload-pointer");
   REQUIRE(cross_kind.ok);
   VectorValue &cross_kind_payload =
-      cross_kind.value.tuple.vector_payloads[0];
+      cross_kind.value.tuple.vector_payloads.storage.get()[0];
   std::int64_t *cross_kind_storage = cross_kind_payload.integers.release();
   cross_kind_payload.integers.reset(reinterpret_cast<std::int64_t *>(
       cross_kind.value.tuple.root_reservation.storage.get()));
@@ -889,6 +994,12 @@ TEST_CASE("TUP-005-FORMAT") {
       resources, singleton_child, tuple_location, "singleton-tuple");
   REQUIRE(singleton.ok);
   CHECK(valid_value_text(singleton.value) == "[7]");
+  ValueFormattingResult owned_value_format =
+      format_value(singleton.value);
+  REQUIRE(owned_value_format.ok);
+  ValueFormattingResult moved_value_format =
+      std::move(owned_value_format);
+  CHECK(moved_value_format.formatted == "[7]");
 
   Value deep = move_value(singleton.value);
   constexpr std::size_t depth = 4096U;

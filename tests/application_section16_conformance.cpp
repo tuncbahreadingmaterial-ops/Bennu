@@ -152,7 +152,7 @@ Value numeric_matrix_vector(ScalarType type, bool right) {
 std::string formatted(const Value &value) {
   const ValueFormattingResult result = format_value(value);
   REQUIRE(result.ok);
-  return result.formatted;
+  return std::string(result.formatted);
 }
 
 bool same_scalar(const ScalarValue &left, const ScalarValue &right) {

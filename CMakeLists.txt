@@ -214,6 +214,41 @@ if(BUILD_TESTING)
     CXX_EXTENSIONS NO
   )
   add_test(NAME unit.doctest COMMAND bennu_tests)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(bennu_structural_host_allocation_refusal
+      tests/structural_host_allocation_refusal.cpp
+      src/error.cpp
+      src/resources.cpp
+      src/type.cpp
+      src/value.cpp
+    )
+    target_include_directories(
+      bennu_structural_host_allocation_refusal PRIVATE include)
+    target_include_directories(
+      bennu_structural_host_allocation_refusal SYSTEM PRIVATE
+      third_party/doctest)
+    target_compile_definitions(
+      bennu_structural_host_allocation_refusal PRIVATE
+      DOCTEST_CONFIG_DISABLE
+      DOCTEST_CONFIG_NO_EXCEPTIONS
+      DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
+    )
+    target_link_libraries(
+      bennu_structural_host_allocation_refusal PRIVATE Threads::Threads)
+    set_target_properties(bennu_structural_host_allocation_refusal PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED YES
+      CXX_EXTENSIONS NO
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      target_compile_options(
+        bennu_structural_host_allocation_refusal PRIVATE -fno-exceptions)
+    endif()
+    add_test(
+      NAME unit.structural_host_allocation_refusal
+      COMMAND bennu_structural_host_allocation_refusal
+    )
+  endif()
   add_test(
     NAME spec.traceability
     COMMAND "${CMAKE_COMMAND}"

@@ -10,11 +10,10 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
-#include <new>
 #include <ostream>
 #include <span>
 #include <string>
-#include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -157,23 +156,36 @@ void reset_vector_storage(VectorValue &vector) {
   }
 }
 
-bool append_double(std::string &formatted, double value) {
+enum class AppendError {
+  none,
+  conversion_failure,
+  size_overflow,
+};
+
+AppendError append_text(HostArray<char> &formatted,
+                        std::string_view text) {
+  for (const char character : text) {
+    if (host_array_push(formatted, character) !=
+        HostResourceErrorReason::none) {
+      return AppendError::size_overflow;
+    }
+  }
+  return AppendError::none;
+}
+
+AppendError append_double(HostArray<char> &formatted, double value) {
   const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
   if ((bits & binary64_exponent_mask) == binary64_exponent_mask) {
     if ((bits & binary64_fraction_mask) != 0) {
-      formatted += "nan";
-      return true;
+      return append_text(formatted, "nan");
     }
-    formatted += (bits >> 63U) != 0 ? "-inf" : "inf";
-    return true;
+    return append_text(formatted, (bits >> 63U) != 0 ? "-inf" : "inf");
   }
   if (bits == UINT64_C(0)) {
-    formatted += "0.0";
-    return true;
+    return append_text(formatted, "0.0");
   }
   if (bits == UINT64_C(0x8000000000000000)) {
-    formatted += "-0.0";
-    return true;
+    return append_text(formatted, "-0.0");
   }
 
   std::array<char, 64> buffer{};
@@ -181,7 +193,7 @@ bool append_double(std::string &formatted, double value) {
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
                     std::chars_format::general);
   if (converted.ec != std::errc{}) {
-    return false;
+    return AppendError::conversion_failure;
   }
   const char *exponent = buffer.data();
   while (exponent != converted.ptr && *exponent != 'e' && *exponent != 'E') {
@@ -192,16 +204,28 @@ bool append_double(std::string &formatted, double value) {
     while (point != converted.ptr && *point != '.') {
       ++point;
     }
-    formatted.append(buffer.data(), converted.ptr);
+    AppendError appended = append_text(
+        formatted,
+        std::string_view(
+            buffer.data(),
+            static_cast<std::size_t>(converted.ptr - buffer.data())));
     if (point == converted.ptr) {
-      formatted += ".0";
+      if (appended == AppendError::none) {
+        appended = append_text(formatted, ".0");
+      }
     }
-    return true;
+    return appended;
   }
 
-  formatted.append(buffer.data(),
-                   static_cast<std::size_t>(exponent - buffer.data()));
-  formatted += 'e';
+  AppendError appended = append_text(
+      formatted,
+      std::string_view(
+          buffer.data(),
+          static_cast<std::size_t>(exponent - buffer.data())));
+  if (appended == AppendError::none &&
+      host_array_push(formatted, 'e') != HostResourceErrorReason::none) {
+    appended = AppendError::size_overflow;
+  }
   const char *digits = exponent + 1;
   bool negative = false;
   if (digits != converted.ptr && (*digits == '+' || *digits == '-')) {
@@ -211,36 +235,45 @@ bool append_double(std::string &formatted, double value) {
   while (digits + 1 < converted.ptr && *digits == '0') {
     ++digits;
   }
-  if (negative) {
-    formatted += '-';
+  if (negative && appended == AppendError::none &&
+      host_array_push(formatted, '-') != HostResourceErrorReason::none) {
+    appended = AppendError::size_overflow;
   }
-  formatted.append(digits,
-                   static_cast<std::size_t>(converted.ptr - digits));
-  return true;
+  if (appended == AppendError::none) {
+    appended = append_text(
+        formatted,
+        std::string_view(
+            digits,
+            static_cast<std::size_t>(converted.ptr - digits)));
+  }
+  return appended;
 }
 
-bool append_integer(std::string &formatted, std::int64_t value) {
+AppendError append_integer(HostArray<char> &formatted, std::int64_t value) {
   std::array<char, 32> buffer{};
   const std::to_chars_result converted =
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
   if (converted.ec != std::errc{}) {
-    return false;
+    return AppendError::conversion_failure;
   }
-  formatted.append(buffer.data(), converted.ptr);
-  return true;
+  return append_text(
+      formatted,
+      std::string_view(
+          buffer.data(),
+          static_cast<std::size_t>(converted.ptr - buffer.data())));
 }
 
-bool append_scalar(std::string &formatted, const ScalarValue &scalar) {
+AppendError append_scalar(HostArray<char> &formatted,
+                          const ScalarValue &scalar) {
   switch (scalar.type) {
   case ScalarType::boolean:
-    formatted += scalar.boolean ? "true" : "false";
-    return true;
+    return append_text(formatted, scalar.boolean ? "true" : "false");
   case ScalarType::integer:
     return append_integer(formatted, scalar.integer);
   case ScalarType::double_precision:
     return append_double(formatted, scalar.double_precision);
   }
-  return false;
+  return AppendError::conversion_failure;
 }
 
 } // namespace
@@ -282,21 +315,18 @@ ValueValidationResult validate_value(const Value &value) {
 ValueValidationResult validate_value(
     const Value &value,
     HostAllocationFailureInjection &allocation_failure) {
-  std::vector<std::size_t> current_path;
-  const auto invalid = [&current_path](
-                           ValueInvariant invariant, std::size_t node_index,
-                           std::optional<std::size_t> edge_index = std::nullopt) {
+  const auto invalid = [](ValueInvariant invariant, std::size_t node_index,
+                          std::optional<std::size_t> edge_index = std::nullopt) {
     ValueValidationResult result{false, invariant,
                                  ValueAccessError::invalid_value};
-    result.path = current_path;
     result.node_index = node_index;
     result.edge_index = edge_index;
     return result;
   };
   const auto tuple_fields_empty = [](const TupleValue &tuple) {
-    return tuple.nodes.empty() && tuple.child_indexes.empty() &&
-           tuple.root_index == 0U && tuple.vector_payloads.empty() &&
-           tuple.reservations.empty() &&
+    return tuple.nodes.size == 0U && tuple.child_indexes.size == 0U &&
+           tuple.root_index == 0U && tuple.vector_payloads.size == 0U &&
+           tuple.reservations.size == 0U &&
            tuple.root_reservation.storage.get() == nullptr &&
            tuple.root_reservation.element_count == 0U &&
            tuple.root_reservation.canonical_bytes == 0U &&
@@ -307,8 +337,9 @@ ValueValidationResult validate_value(
            tuple.root_reservation.lifetime_observer.record == nullptr &&
            tuple.first_child == 0U && tuple.child_count == 0U;
   };
-  const auto vector_validation = [&invalid](const VectorValue &vector,
-                                             std::size_t node_index) {
+  const auto vector_validation = [&invalid](
+                                     const VectorValue &vector,
+                                     std::size_t node_index) {
     const auto accounting_valid = [&invalid, node_index](
                                       const VectorValue &payload,
                                       std::size_t count,
@@ -373,6 +404,17 @@ ValueValidationResult validate_value(
   if (!value.claimed) {
     return invalid(ValueInvariant::empty_owner, 0U);
   }
+  const bool tuple_arrays_valid =
+      host_array_metadata_valid(value.tuple.nodes) &&
+      host_array_metadata_valid(value.tuple.child_indexes) &&
+      host_array_metadata_valid(value.tuple.vector_payloads) &&
+      host_array_metadata_valid(value.tuple.reservations);
+  if (!tuple_arrays_valid) {
+    return invalid(value.container == ContainerKind::tuple
+                       ? ValueInvariant::invalid_value_root
+                       : ValueInvariant::inactive_tuple_field,
+                   value.tuple.root_index);
+  }
   if (value.container == ContainerKind::scalar) {
     if (value.vector.element_type != ScalarType::boolean ||
         value.vector.booleans.get() != nullptr ||
@@ -392,10 +434,12 @@ ValueValidationResult validate_value(
     if (!tuple_fields_empty(value.tuple)) {
       return invalid(ValueInvariant::inactive_tuple_field, 0U);
     }
-    const ValueValidationResult scalar_validation = validate_scalar(value.scalar);
-    return scalar_validation.ok
-               ? scalar_validation
-               : invalid(scalar_validation.invariant, 0U);
+    const ValueValidationResult scalar_validation =
+        validate_scalar(value.scalar);
+    if (!scalar_validation.ok) {
+      return invalid(scalar_validation.invariant, 0U);
+    }
+    return ValueValidationResult{true, ValueInvariant::none};
   }
   if (value.container == ContainerKind::vector) {
     if (!is_empty_scalar(value.scalar)) {
@@ -411,11 +455,11 @@ ValueValidationResult validate_value(
   }
 
   const std::size_t root_index = value.tuple.root_index;
-  if (value.tuple.nodes.size() ==
+  if (value.tuple.nodes.size ==
       std::numeric_limits<std::size_t>::max()) {
     return invalid(ValueInvariant::invalid_value_root, root_index);
   }
-  const std::size_t node_count = value.tuple.nodes.size() + 1U;
+  const std::size_t node_count = value.tuple.nodes.size + 1U;
   if (root_index >= node_count) {
     return invalid(ValueInvariant::invalid_value_root, root_index);
   }
@@ -445,216 +489,372 @@ ValueValidationResult validate_value(
 
   if (allocation_failure.max_container_elements.has_value()) {
     const std::size_t maximum = *allocation_failure.max_container_elements;
-    if (node_count > maximum || value.tuple.child_indexes.size() > maximum ||
-        value.tuple.vector_payloads.size() > maximum ||
-        value.tuple.reservations.size() ==
+    if (node_count > maximum || value.tuple.child_indexes.size > maximum ||
+        value.tuple.vector_payloads.size > maximum ||
+        value.tuple.reservations.size ==
             std::numeric_limits<std::size_t>::max() ||
-        value.tuple.reservations.size() + 1U > maximum) {
+        value.tuple.reservations.size + 1U > maximum ||
+        value.tuple.child_indexes.size ==
+            std::numeric_limits<std::size_t>::max() ||
+        value.tuple.child_indexes.size + 1U > maximum) {
       ValueValidationResult result{false, ValueInvariant::none};
       result.resource_error = HostResourceErrorReason::size_overflow;
       return result;
     }
   }
 
-  const std::size_t allocation_ordinal = allocation_failure.allocation_ordinal;
-  if (allocation_ordinal == std::numeric_limits<std::size_t>::max() ||
-      (allocation_failure.fail_at_allocation_ordinal.has_value() &&
-       allocation_ordinal ==
-           *allocation_failure.fail_at_allocation_ordinal)) {
+  if (value.tuple.reservations.size ==
+          std::numeric_limits<std::size_t>::max() ||
+      value.tuple.child_indexes.size ==
+          std::numeric_limits<std::size_t>::max()) {
     ValueValidationResult result{false, ValueInvariant::none};
-    result.resource_error = HostResourceErrorReason::allocation_unavailable;
+    result.resource_error = HostResourceErrorReason::size_overflow;
     return result;
   }
-  ++allocation_failure.allocation_ordinal;
-#if defined(__cpp_exceptions)
-  try {
-#endif
+  const HostResourceErrorReason begun =
+      begin_host_allocation(allocation_failure);
+  if (begun != HostResourceErrorReason::none) {
+    ValueValidationResult result{false, ValueInvariant::none};
+    result.resource_error = begun;
+    return result;
+  }
 
-  std::vector<std::uint8_t> visited(node_count, 0U);
-  std::vector<std::uint8_t> edge_owners(value.tuple.child_indexes.size(), 0U);
-  std::vector<std::size_t> parent_count(node_count, 0U);
-  std::vector<std::uint8_t> payload_owners(
-      value.tuple.vector_payloads.size(), 0U);
-  std::vector<std::uint8_t> reservation_owners(
-      value.tuple.reservations.size() + 1U, 0U);
   struct ValidationWork {
     std::size_t node_index;
-    std::vector<std::size_t> path;
+    std::size_t parent_index;
+    std::size_t child_offset;
   };
-  std::vector<ValidationWork> stack{
-      ValidationWork{root_index, std::vector<std::size_t>{}}};
-  while (!stack.empty()) {
-    ValidationWork work = std::move(stack.back());
-    stack.pop_back();
-    const std::size_t node_index = work.node_index;
-    current_path = std::move(work.path);
-    if (visited[node_index] != 0U) {
-      return invalid(ValueInvariant::aliased_tuple_child, node_index);
+  HostArray<std::uint8_t> visited;
+  HostArray<std::uint8_t> edge_owners;
+  HostArray<std::size_t> parent_count;
+  HostArray<std::uint8_t> payload_owners;
+  HostArray<std::uint8_t> reservation_owners;
+  HostArray<std::size_t> path_parents;
+  HostArray<std::size_t> path_offsets;
+  HostArray<ValidationWork> stack;
+  HostResourceErrorReason allocated = allocate_host_array(
+      visited, node_count, allocation_failure.max_container_elements);
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        edge_owners, value.tuple.child_indexes.size,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        parent_count, node_count,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        payload_owners, value.tuple.vector_payloads.size,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        reservation_owners, value.tuple.reservations.size + 1U,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        path_parents, node_count,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        path_offsets, node_count,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        stack, value.tuple.child_indexes.size + 1U,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated != HostResourceErrorReason::none) {
+    ValueValidationResult result{false, ValueInvariant::none};
+    result.resource_error = allocated;
+    return result;
+  }
+  allocated = host_array_fill(visited, node_count, std::uint8_t{0U});
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = host_array_fill(edge_owners,
+                                value.tuple.child_indexes.size,
+                                std::uint8_t{0U});
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated =
+        host_array_fill(parent_count, node_count, std::size_t{0U});
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = host_array_fill(payload_owners,
+                                value.tuple.vector_payloads.size,
+                                std::uint8_t{0U});
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = host_array_fill(reservation_owners,
+                                value.tuple.reservations.size + 1U,
+                                std::uint8_t{0U});
+  }
+  const std::size_t no_parent = std::numeric_limits<std::size_t>::max();
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = host_array_fill(path_parents, node_count, no_parent);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated =
+        host_array_fill(path_offsets, node_count, std::size_t{0U});
+  }
+  if (allocated != HostResourceErrorReason::none) {
+    ValueValidationResult result{false, ValueInvariant::none};
+    result.resource_error = allocated;
+    return result;
+  }
+
+  const auto invalid_at = [&](ValueInvariant invariant,
+                              std::size_t node_index,
+                              std::optional<std::size_t> edge_index =
+                                  std::nullopt) {
+    ValueValidationResult result{
+        false, invariant, ValueAccessError::invalid_value};
+    result.node_index = node_index;
+    result.edge_index = edge_index;
+    std::size_t depth = 0U;
+    std::size_t cursor = node_index;
+    while (cursor < node_count &&
+           path_parents.storage.get()[cursor] != no_parent) {
+      ++depth;
+      cursor = path_parents.storage.get()[cursor];
     }
-    visited[node_index] = 1U;
+    const HostResourceErrorReason path_allocated = allocate_host_array(
+        result.path_storage, depth,
+        allocation_failure.max_container_elements);
+    if (path_allocated != HostResourceErrorReason::none) {
+      result.invariant = ValueInvariant::none;
+      result.error = ValueAccessError::none;
+      result.node_index = std::nullopt;
+      result.edge_index = std::nullopt;
+      result.resource_error = path_allocated;
+      return result;
+    }
+    const HostResourceErrorReason path_filled =
+        host_array_fill(result.path_storage, depth, std::size_t{0U});
+    if (path_filled != HostResourceErrorReason::none) {
+      result.invariant = ValueInvariant::none;
+      result.error = ValueAccessError::none;
+      result.node_index = std::nullopt;
+      result.edge_index = std::nullopt;
+      result.resource_error = path_filled;
+      return result;
+    }
+    cursor = node_index;
+    for (std::size_t offset = depth; offset > 0U; --offset) {
+      result.path_storage.storage.get()[offset - 1U] =
+          path_offsets.storage.get()[cursor];
+      cursor = path_parents.storage.get()[cursor];
+    }
+    result.path = host_array_span(result.path_storage);
+    return result;
+  };
+
+  allocated = host_array_push(
+      stack, ValidationWork{root_index, no_parent, 0U});
+  if (allocated != HostResourceErrorReason::none) {
+    ValueValidationResult result{false, ValueInvariant::none};
+    result.resource_error = allocated;
+    return result;
+  }
+  while (stack.size != 0U) {
+    const ValidationWork work =
+        stack.storage.get()[stack.size - 1U];
+    --stack.size;
+    const std::size_t node_index = work.node_index;
+    path_parents.storage.get()[node_index] = work.parent_index;
+    path_offsets.storage.get()[node_index] = work.child_offset;
+    if (visited.storage.get()[node_index] != 0U) {
+      return invalid_at(ValueInvariant::aliased_tuple_child, node_index);
+    }
+    visited.storage.get()[node_index] = 1U;
 
     const bool root = node_index == root_index;
     const ContainerKind container =
         root ? ContainerKind::tuple
-             : value.tuple.nodes[node_index].container;
+             : value.tuple.nodes.storage.get()[node_index].container;
     if (container == ContainerKind::scalar) {
-      const ValueNode &node = value.tuple.nodes[node_index];
+      const ValueNode &node =
+          value.tuple.nodes.storage.get()[node_index];
       if (node.first_child != 0U || node.child_count != 0U ||
           node.tuple_reservation_index != 0U ||
           node.vector_payload_index != 0U) {
-        return invalid(ValueInvariant::inactive_tuple_field, node_index);
+        return invalid_at(ValueInvariant::inactive_tuple_field, node_index);
       }
       const ValueValidationResult scalar_validation = validate_scalar(node.scalar);
       if (!scalar_validation.ok) {
-        return invalid(scalar_validation.invariant, node_index);
+        return invalid_at(scalar_validation.invariant, node_index);
       }
       continue;
     }
     if (container == ContainerKind::vector) {
-      const ValueNode &node = value.tuple.nodes[node_index];
+      const ValueNode &node =
+          value.tuple.nodes.storage.get()[node_index];
       if (!is_empty_scalar(node.scalar)) {
-        return invalid(ValueInvariant::inactive_scalar_field, node_index);
+        return invalid_at(ValueInvariant::inactive_scalar_field, node_index);
       }
       if (node.first_child != 0U || node.child_count != 0U ||
           node.tuple_reservation_index != 0U) {
-        return invalid(ValueInvariant::inactive_tuple_field, node_index);
+        return invalid_at(ValueInvariant::inactive_tuple_field, node_index);
       }
-      if (node.vector_payload_index >= value.tuple.vector_payloads.size()) {
-        return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+      if (node.vector_payload_index >=
+          value.tuple.vector_payloads.size) {
+        return invalid_at(ValueInvariant::invalid_vector_payload_handle,
+                          node_index);
       }
-      if (payload_owners[node.vector_payload_index] != 0U) {
-        return invalid(ValueInvariant::aliased_vector_payload, node_index);
+      if (payload_owners.storage.get()[node.vector_payload_index] != 0U) {
+        return invalid_at(ValueInvariant::aliased_vector_payload,
+                          node_index);
       }
-      payload_owners[node.vector_payload_index] = 1U;
+      payload_owners.storage.get()[node.vector_payload_index] = 1U;
       const void *storage = vector_storage_address(
-          value.tuple.vector_payloads[node.vector_payload_index]);
+          value.tuple.vector_payloads.storage.get()[
+              node.vector_payload_index]);
       if (storage != nullptr) {
         for (std::size_t payload_index = 0U;
-             payload_index < value.tuple.vector_payloads.size();
+             payload_index < value.tuple.vector_payloads.size;
              ++payload_index) {
           if (payload_index == node.vector_payload_index ||
-              payload_owners[payload_index] == 0U) {
+              payload_owners.storage.get()[payload_index] == 0U) {
             continue;
           }
           if (vector_storage_address(
-                  value.tuple.vector_payloads[payload_index]) == storage) {
-            return invalid(ValueInvariant::aliased_vector_payload, node_index);
+                  value.tuple.vector_payloads.storage.get()[payload_index]) ==
+              storage) {
+            return invalid_at(ValueInvariant::aliased_vector_payload,
+                              node_index);
           }
         }
         for (std::size_t reservation_index = 0U;
-             reservation_index < reservation_owners.size();
+             reservation_index < reservation_owners.size;
              ++reservation_index) {
-          if (reservation_owners[reservation_index] == 0U) {
+          if (reservation_owners.storage.get()[reservation_index] == 0U) {
             continue;
           }
           const TupleTableReservation &reservation =
-              reservation_index == value.tuple.reservations.size()
+              reservation_index == value.tuple.reservations.size
                   ? value.tuple.root_reservation
-                  : value.tuple.reservations[reservation_index];
+                  : value.tuple.reservations.storage.get()[
+                        reservation_index];
           if (reservation.storage.get() == storage) {
-            return invalid(ValueInvariant::aliased_vector_payload, node_index);
+            return invalid_at(ValueInvariant::aliased_vector_payload,
+                              node_index);
           }
         }
       }
       const ValueValidationResult vector_result =
           vector_validation(
-              value.tuple.vector_payloads[node.vector_payload_index],
+              value.tuple.vector_payloads.storage.get()[
+                  node.vector_payload_index],
               node_index);
       if (!vector_result.ok) {
-        return vector_result;
+        return invalid_at(vector_result.invariant, node_index);
       }
       continue;
     }
     if (container != ContainerKind::tuple) {
-      return invalid(ValueInvariant::unknown_container, node_index);
+      return invalid_at(ValueInvariant::unknown_container, node_index);
     }
 
     const ScalarValue &scalar = root ? value.scalar
-                                     : value.tuple.nodes[node_index].scalar;
+        : value.tuple.nodes.storage.get()[node_index].scalar;
     if (!is_empty_scalar(scalar)) {
-      return invalid(ValueInvariant::inactive_scalar_field, node_index);
+      return invalid_at(ValueInvariant::inactive_scalar_field, node_index);
     }
-    if (!root && value.tuple.nodes[node_index].vector_payload_index != 0U) {
-      return invalid(ValueInvariant::inactive_vector_payload, node_index);
+    if (!root &&
+        value.tuple.nodes.storage.get()[node_index]
+                .vector_payload_index != 0U) {
+      return invalid_at(ValueInvariant::inactive_vector_payload,
+                        node_index);
     }
     const std::size_t first_child =
         root ? value.tuple.first_child
-             : value.tuple.nodes[node_index].first_child;
+             : value.tuple.nodes.storage.get()[node_index].first_child;
     const std::size_t child_count =
         root ? value.tuple.child_count
-             : value.tuple.nodes[node_index].child_count;
-    if (first_child > value.tuple.child_indexes.size() ||
-        child_count > value.tuple.child_indexes.size() - first_child) {
-      return invalid(ValueInvariant::invalid_tuple_range, node_index,
-                     first_child);
+             : value.tuple.nodes.storage.get()[node_index].child_count;
+    if (first_child > value.tuple.child_indexes.size ||
+        child_count > value.tuple.child_indexes.size - first_child) {
+      return invalid_at(ValueInvariant::invalid_tuple_range, node_index,
+                        first_child);
     }
     for (std::size_t offset = 0U; offset < child_count; ++offset) {
       const std::size_t edge_index = first_child + offset;
-      if (edge_owners[edge_index] != 0U) {
-        return invalid(ValueInvariant::overlapping_tuple_range, node_index,
-                       edge_index);
+      if (edge_owners.storage.get()[edge_index] != 0U) {
+        return invalid_at(ValueInvariant::overlapping_tuple_range,
+                          node_index, edge_index);
       }
-      edge_owners[edge_index] = 1U;
-      const std::size_t child_index = value.tuple.child_indexes[edge_index];
+      edge_owners.storage.get()[edge_index] = 1U;
+      const std::size_t child_index =
+          value.tuple.child_indexes.storage.get()[edge_index];
       if (child_index >= node_count) {
-        return invalid(ValueInvariant::invalid_tuple_child_index, node_index,
-                       edge_index);
+        return invalid_at(ValueInvariant::invalid_tuple_child_index,
+                          node_index, edge_index);
       }
       if (child_index >= node_index) {
-        return invalid(ValueInvariant::non_postorder_tuple_child, node_index,
-                       edge_index);
+        return invalid_at(ValueInvariant::non_postorder_tuple_child,
+                          node_index, edge_index);
       }
-      ++parent_count[child_index];
-      if (parent_count[child_index] != 1U) {
-        return invalid(ValueInvariant::aliased_tuple_child, child_index,
-                       edge_index);
+      ++parent_count.storage.get()[child_index];
+      if (parent_count.storage.get()[child_index] != 1U) {
+        path_parents.storage.get()[child_index] = node_index;
+        path_offsets.storage.get()[child_index] = offset;
+        return invalid_at(ValueInvariant::aliased_tuple_child,
+                          child_index, edge_index);
       }
     }
 
     const std::size_t reservation_index =
-        root ? value.tuple.reservations.size()
-             : value.tuple.nodes[node_index].tuple_reservation_index;
-    if (reservation_index > value.tuple.reservations.size()) {
-      return invalid(ValueInvariant::missing_tuple_reservation, node_index);
+        root ? value.tuple.reservations.size
+             : value.tuple.nodes.storage.get()[node_index]
+                   .tuple_reservation_index;
+    if (reservation_index > value.tuple.reservations.size) {
+      return invalid_at(ValueInvariant::missing_tuple_reservation,
+                        node_index);
     }
-    if (reservation_owners[reservation_index] != 0U) {
-      return invalid(ValueInvariant::aliased_tuple_reservation, node_index);
+    if (reservation_owners.storage.get()[reservation_index] != 0U) {
+      return invalid_at(ValueInvariant::aliased_tuple_reservation,
+                        node_index);
     }
-    reservation_owners[reservation_index] = 1U;
+    reservation_owners.storage.get()[reservation_index] = 1U;
     const TupleTableReservation &reservation =
         root ? value.tuple.root_reservation
-             : value.tuple.reservations[reservation_index];
+             : value.tuple.reservations.storage.get()[reservation_index];
     const void *reservation_storage = reservation.storage.get();
     if (reservation_storage != nullptr) {
       for (std::size_t prior_index = 0U;
-           prior_index < reservation_owners.size(); ++prior_index) {
+           prior_index < reservation_owners.size; ++prior_index) {
         if (prior_index == reservation_index ||
-            reservation_owners[prior_index] == 0U) {
+            reservation_owners.storage.get()[prior_index] == 0U) {
           continue;
         }
         const TupleTableReservation &prior =
-            prior_index == value.tuple.reservations.size()
+            prior_index == value.tuple.reservations.size
                 ? value.tuple.root_reservation
-                : value.tuple.reservations[prior_index];
+                : value.tuple.reservations.storage.get()[prior_index];
         if (prior.storage.get() == reservation_storage) {
-          return invalid(ValueInvariant::aliased_tuple_reservation,
-                         node_index);
+          return invalid_at(ValueInvariant::aliased_tuple_reservation,
+                            node_index);
         }
       }
       for (std::size_t payload_index = 0U;
-           payload_index < payload_owners.size(); ++payload_index) {
-        if (payload_owners[payload_index] != 0U &&
-            vector_storage_address(value.tuple.vector_payloads[payload_index]) ==
+           payload_index < payload_owners.size; ++payload_index) {
+        if (payload_owners.storage.get()[payload_index] != 0U &&
+            vector_storage_address(
+                value.tuple.vector_payloads.storage.get()[payload_index]) ==
                 reservation_storage) {
-          return invalid(ValueInvariant::aliased_tuple_reservation,
-                         node_index);
+          return invalid_at(ValueInvariant::aliased_tuple_reservation,
+                            node_index);
         }
       }
     }
     if (child_count > std::numeric_limits<std::size_t>::max() / 16U) {
-      return invalid(ValueInvariant::invalid_tuple_reservation_count,
-                     node_index);
+      return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
+                        node_index);
     }
     const std::size_t expected_bytes = child_count * 16U;
     if (reservation.element_count != child_count ||
@@ -670,57 +870,55 @@ ValueValidationResult validate_value(
          reservation.accounting_owner != nullptr) ||
         (!reservation.accounting_active &&
          reservation.accounting_owner != nullptr)) {
-      return invalid(ValueInvariant::invalid_tuple_reservation_count,
-                     node_index);
+      return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
+                        node_index);
     }
     for (std::size_t offset = child_count; offset > 0U; --offset) {
       const std::size_t child_offset = offset - 1U;
-      std::vector<std::size_t> child_path = current_path;
-      child_path.push_back(child_offset);
-      stack.push_back(ValidationWork{
-          value.tuple.child_indexes[first_child + child_offset],
-          std::move(child_path)});
+      const HostResourceErrorReason pushed = host_array_push(
+          stack,
+          ValidationWork{
+              value.tuple.child_indexes.storage.get()[
+                  first_child + child_offset],
+              node_index, child_offset});
+      if (pushed != HostResourceErrorReason::none) {
+        ValueValidationResult result{false, ValueInvariant::none};
+        result.resource_error = pushed;
+        return result;
+      }
     }
   }
 
-  for (std::size_t index = 0U; index < visited.size(); ++index) {
-    if (visited[index] == 0U) {
-      return invalid(ValueInvariant::orphan_value_node, index);
+  for (std::size_t index = 0U; index < visited.size; ++index) {
+    if (visited.storage.get()[index] == 0U) {
+      return invalid_at(ValueInvariant::orphan_value_node, index);
     }
   }
-  for (std::size_t index = 0U; index < edge_owners.size(); ++index) {
-    if (edge_owners[index] == 0U) {
-      return invalid(ValueInvariant::orphan_tuple_edge, root_index, index);
+  for (std::size_t index = 0U; index < edge_owners.size; ++index) {
+    if (edge_owners.storage.get()[index] == 0U) {
+      return invalid_at(ValueInvariant::orphan_tuple_edge, root_index,
+                        index);
     }
   }
-  for (std::size_t index = 0U; index < payload_owners.size(); ++index) {
-    if (payload_owners[index] == 0U) {
-      return invalid(ValueInvariant::orphan_vector_payload_handle, root_index);
+  for (std::size_t index = 0U; index < payload_owners.size; ++index) {
+    if (payload_owners.storage.get()[index] == 0U) {
+      return invalid_at(ValueInvariant::orphan_vector_payload_handle,
+                        root_index);
     }
   }
-  for (std::size_t index = 0U; index < reservation_owners.size(); ++index) {
-    if (reservation_owners[index] == 0U) {
-      return invalid(ValueInvariant::orphan_tuple_reservation, root_index);
+  for (std::size_t index = 0U; index < reservation_owners.size; ++index) {
+    if (reservation_owners.storage.get()[index] == 0U) {
+      return invalid_at(ValueInvariant::orphan_tuple_reservation,
+                        root_index);
     }
   }
   return ValueValidationResult{true, ValueInvariant::none};
-#if defined(__cpp_exceptions)
-  } catch (const std::bad_alloc &) {
-    ValueValidationResult result{false, ValueInvariant::none};
-    result.resource_error = HostResourceErrorReason::allocation_unavailable;
-    return result;
-  } catch (const std::length_error &) {
-    ValueValidationResult result{false, ValueInvariant::none};
-    result.resource_error = HostResourceErrorReason::size_overflow;
-    return result;
-  }
-#endif
 }
 
 ValueValidationResult value_element_type(const Value &value,
                                          ScalarType &element_type) {
   element_type = ScalarType::boolean;
-  const ValueValidationResult validation = validate_value(value);
+  ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     return validation;
   }
@@ -736,7 +934,7 @@ ValueValidationResult value_element_type(const Value &value,
 
 ValueValidationResult value_rank(const Value &value, std::size_t &rank) {
   rank = 0;
-  const ValueValidationResult validation = validate_value(value);
+  ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     return validation;
   }
@@ -750,7 +948,7 @@ ValueValidationResult value_rank(const Value &value, std::size_t &rank) {
 
 ValueValidationResult value_length(const Value &value, std::size_t &length) {
   length = 0;
-  const ValueValidationResult validation = validate_value(value);
+  ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     return validation;
   }
@@ -817,7 +1015,7 @@ ScalarProjectionResult project_scalar(const Value &value, std::size_t index) {
 namespace {
 
 ValueTypeResult value_type_resource_failure(HostResourceErrorReason reason) {
-  ValueTypeResult result{false, TypeArena{{}, {}, 0U}, ValueInvariant::none,
+  ValueTypeResult result{false, TypeArena{}, ValueInvariant::none,
                          ValueAccessError::none};
   result.resource_error = reason;
   return result;
@@ -826,156 +1024,191 @@ ValueTypeResult value_type_resource_failure(HostResourceErrorReason reason) {
 ValueTypeResult type_for_value_node(
     const Value &value, std::size_t requested_root,
     HostAllocationFailureInjection &allocation_failure) {
-  const std::size_t allocation_ordinal = allocation_failure.allocation_ordinal;
-  if (allocation_ordinal == std::numeric_limits<std::size_t>::max() ||
-      (allocation_failure.fail_at_allocation_ordinal.has_value() &&
-       allocation_ordinal ==
-           *allocation_failure.fail_at_allocation_ordinal)) {
-    return value_type_resource_failure(
-        HostResourceErrorReason::allocation_unavailable);
+  const HostResourceErrorReason begun =
+      begin_host_allocation(allocation_failure);
+  if (begun != HostResourceErrorReason::none) {
+    return value_type_resource_failure(begun);
   }
-  ++allocation_failure.allocation_ordinal;
 
   TypeArena type;
   if (value.container != ContainerKind::tuple) {
-#if defined(__cpp_exceptions)
-    try {
-#endif
-      type.nodes.reserve(1U);
-#if defined(__cpp_exceptions)
-    } catch (const std::bad_alloc &) {
+    if (allocation_failure.max_container_elements.has_value() &&
+        *allocation_failure.max_container_elements < 1U) {
       return value_type_resource_failure(
-          HostResourceErrorReason::allocation_unavailable);
-    } catch (const std::length_error &) {
-      return value_type_resource_failure(HostResourceErrorReason::size_overflow);
+          HostResourceErrorReason::size_overflow);
     }
-#endif
-    type.nodes.push_back(TypeNode{
+    type.inline_leaf = TypeNode{
         value.container == ContainerKind::scalar ? TypeKind::scalar
                                                  : TypeKind::vector,
         value.container == ContainerKind::scalar ? value.scalar.type
                                                  : value.vector.element_type,
         0U,
         0U,
-    });
+    };
     type.root_index = 0U;
     return ValueTypeResult{true, std::move(type), ValueInvariant::none,
                            ValueAccessError::none};
   }
 
-  const std::size_t logical_count = value.tuple.nodes.size() + 1U;
-  std::vector<std::uint8_t> reachable;
-  std::vector<std::size_t> stack;
-  std::vector<std::size_t> index_map;
-#if defined(__cpp_exceptions)
-  try {
-#endif
-    reachable.reserve(logical_count);
-    stack.reserve(logical_count);
-    index_map.reserve(logical_count);
-    type.nodes.reserve(logical_count);
-    type.child_indexes.reserve(value.tuple.child_indexes.size());
-#if defined(__cpp_exceptions)
-  } catch (const std::bad_alloc &) {
-    return value_type_resource_failure(
-        HostResourceErrorReason::allocation_unavailable);
-  } catch (const std::length_error &) {
-    return value_type_resource_failure(HostResourceErrorReason::size_overflow);
+  const std::size_t logical_count = value.tuple.nodes.size + 1U;
+  HostArray<std::uint8_t> reachable;
+  HostArray<std::size_t> stack;
+  HostArray<std::size_t> index_map;
+  HostResourceErrorReason allocated = allocate_host_array(
+      reachable, logical_count,
+      allocation_failure.max_container_elements);
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        stack, logical_count,
+        allocation_failure.max_container_elements);
   }
-#endif
-  reachable.resize(logical_count, 0U);
-  index_map.resize(logical_count, 0U);
-  stack.push_back(requested_root);
-  while (!stack.empty()) {
-    const std::size_t node_index = stack.back();
-    stack.pop_back();
-    if (reachable[node_index] != 0U) {
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        index_map, logical_count,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        type.nodes, logical_count,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        type.child_indexes, value.tuple.child_indexes.size,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated != HostResourceErrorReason::none) {
+    return value_type_resource_failure(allocated);
+  }
+  allocated =
+      host_array_fill(reachable, logical_count, std::uint8_t{0U});
+  if (allocated == HostResourceErrorReason::none) {
+    allocated =
+        host_array_fill(index_map, logical_count, std::size_t{0U});
+  }
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = host_array_push(stack, requested_root);
+  }
+  if (allocated != HostResourceErrorReason::none) {
+    return value_type_resource_failure(allocated);
+  }
+  while (stack.size != 0U) {
+    const std::size_t node_index =
+        stack.storage.get()[stack.size - 1U];
+    --stack.size;
+    if (reachable.storage.get()[node_index] != 0U) {
       continue;
     }
-    reachable[node_index] = 1U;
+    reachable.storage.get()[node_index] = 1U;
     const bool root = node_index == value.tuple.root_index;
     const ContainerKind container =
         root ? ContainerKind::tuple
-             : value.tuple.nodes[node_index].container;
+             : value.tuple.nodes.storage.get()[node_index].container;
     if (container != ContainerKind::tuple) {
       continue;
     }
     const std::size_t first_child =
         root ? value.tuple.first_child
-             : value.tuple.nodes[node_index].first_child;
+             : value.tuple.nodes.storage.get()[node_index].first_child;
     const std::size_t child_count =
         root ? value.tuple.child_count
-             : value.tuple.nodes[node_index].child_count;
+             : value.tuple.nodes.storage.get()[node_index].child_count;
     for (std::size_t offset = 0U; offset < child_count; ++offset) {
-      stack.push_back(value.tuple.child_indexes[first_child + offset]);
+      const HostResourceErrorReason pushed = host_array_push(
+          stack, value.tuple.child_indexes.storage.get()[
+                     first_child + offset]);
+      if (pushed != HostResourceErrorReason::none) {
+        return value_type_resource_failure(pushed);
+      }
     }
   }
 
   for (std::size_t node_index = 0U; node_index <= requested_root; ++node_index) {
-    if (reachable[node_index] == 0U) {
+    if (reachable.storage.get()[node_index] == 0U) {
       continue;
     }
     const bool root = node_index == value.tuple.root_index;
     const ContainerKind container =
         root ? ContainerKind::tuple
-             : value.tuple.nodes[node_index].container;
+             : value.tuple.nodes.storage.get()[node_index].container;
     TypeNode node{TypeKind::scalar, ScalarType::boolean, 0U, 0U};
     if (container == ContainerKind::scalar) {
-      node.scalar = value.tuple.nodes[node_index].scalar.type;
+      node.scalar =
+          value.tuple.nodes.storage.get()[node_index].scalar.type;
     } else if (container == ContainerKind::vector) {
       node.kind = TypeKind::vector;
-      node.scalar = value
-                        .tuple.vector_payloads[value.tuple.nodes[node_index]
-                                                   .vector_payload_index]
-                        .element_type;
+      node.scalar =
+          value.tuple.vector_payloads.storage
+              .get()[value.tuple.nodes.storage.get()[node_index]
+                         .vector_payload_index]
+              .element_type;
     } else {
       node.kind = TypeKind::tuple;
       const std::size_t first_child =
           root ? value.tuple.first_child
-               : value.tuple.nodes[node_index].first_child;
+               : value.tuple.nodes.storage.get()[node_index].first_child;
       const std::size_t child_count =
           root ? value.tuple.child_count
-               : value.tuple.nodes[node_index].child_count;
-      node.first_child = type.child_indexes.size();
+               : value.tuple.nodes.storage.get()[node_index].child_count;
+      node.first_child = type.child_indexes.size;
       node.child_count = child_count;
       for (std::size_t offset = 0U; offset < child_count; ++offset) {
-        type.child_indexes.push_back(index_map[
-            value.tuple.child_indexes[first_child + offset]]);
+        const HostResourceErrorReason pushed = host_array_push(
+            type.child_indexes,
+            index_map.storage.get()[
+                value.tuple.child_indexes.storage.get()[
+                    first_child + offset]]);
+        if (pushed != HostResourceErrorReason::none) {
+          return value_type_resource_failure(pushed);
+        }
       }
     }
-    index_map[node_index] = type.nodes.size();
-    type.nodes.push_back(node);
+    index_map.storage.get()[node_index] = type.nodes.size;
+    const HostResourceErrorReason pushed =
+        host_array_push(type.nodes, node);
+    if (pushed != HostResourceErrorReason::none) {
+      return value_type_resource_failure(pushed);
+    }
   }
-  type.root_index = index_map[requested_root];
+  type.root_index = index_map.storage.get()[requested_root];
   return ValueTypeResult{true, std::move(type), ValueInvariant::none,
                          ValueAccessError::none};
 }
 
-bool append_vector(std::string &formatted, const VectorValue &vector) {
+AppendError append_vector(HostArray<char> &formatted,
+                          const VectorValue &vector) {
   const std::size_t length = active_vector_length(vector);
-  formatted += '(';
+  if (host_array_push(formatted, '(') != HostResourceErrorReason::none) {
+    return AppendError::size_overflow;
+  }
   for (std::size_t index = 0U; index < length; ++index) {
     if (index != 0U) {
-      formatted += ' ';
+      if (host_array_push(formatted, ' ') !=
+          HostResourceErrorReason::none) {
+        return AppendError::size_overflow;
+      }
     }
+    AppendError appended = AppendError::none;
     switch (vector.element_type) {
     case ScalarType::boolean:
-      formatted += vector.booleans.get()[index] != 0U ? "true" : "false";
+      appended = append_text(
+          formatted,
+          vector.booleans.get()[index] != 0U ? "true" : "false");
       break;
     case ScalarType::integer:
-      if (!append_integer(formatted, vector.integers.get()[index])) {
-        return false;
-      }
+      appended = append_integer(formatted, vector.integers.get()[index]);
       break;
     case ScalarType::double_precision:
-      if (!append_double(formatted, vector.doubles.get()[index])) {
-        return false;
-      }
+      appended = append_double(formatted, vector.doubles.get()[index]);
       break;
     }
+    if (appended != AppendError::none) {
+      return appended;
+    }
   }
-  formatted += ')';
-  return true;
+  return host_array_push(formatted, ')') == HostResourceErrorReason::none
+             ? AppendError::none
+             : AppendError::size_overflow;
 }
 
 struct ValueFormatAction {
@@ -997,16 +1230,17 @@ ValueTypeResult value_type(const Value &value) {
 ValueTypeResult value_type(
     const Value &value,
     HostAllocationFailureInjection &allocation_failure) {
-  const ValueValidationResult validation =
+  ValueValidationResult validation =
       validate_value(value, allocation_failure);
   if (!validation.ok) {
-    ValueTypeResult result{false, TypeArena{{}, {}, 0U},
+    ValueTypeResult result{false, TypeArena{},
                            validation.invariant,
                            validation.resource_error ==
                                    HostResourceErrorReason::none
                                ? ValueAccessError::invalid_value
                                : ValueAccessError::none};
-    result.path = validation.path;
+    result.path_storage = std::move(validation.path_storage);
+    result.path = host_array_span(result.path_storage);
     result.node_index = validation.node_index;
     result.edge_index = validation.edge_index;
     result.resource_error = validation.resource_error;
@@ -1027,23 +1261,24 @@ ValueTypeResult value_type(
     BorrowedValueView view,
     HostAllocationFailureInjection &allocation_failure) {
   if (view.owner == nullptr) {
-    return ValueTypeResult{false, TypeArena{{}, {}, 0U},
+    return ValueTypeResult{false, TypeArena{},
                            ValueInvariant::invalid_value_root,
                            ValueAccessError::invalid_value};
   }
-  const ValueValidationResult validation =
+  ValueValidationResult validation =
       validate_value(*view.owner, allocation_failure);
   if (!validation.ok || view.owner->container != ContainerKind::tuple ||
-      view.node_index >= view.owner->tuple.nodes.size()) {
+      view.node_index >= view.owner->tuple.nodes.size) {
     ValueTypeResult result{
-        false, TypeArena{{}, {}, 0U},
+        false, TypeArena{},
         validation.ok ? ValueInvariant::invalid_value_root
                       : validation.invariant,
         validation.resource_error == HostResourceErrorReason::none
             ? ValueAccessError::invalid_value
             : ValueAccessError::none};
     if (!validation.ok) {
-      result.path = validation.path;
+      result.path_storage = std::move(validation.path_storage);
+      result.path = host_array_span(result.path_storage);
       result.node_index = validation.node_index;
       result.edge_index = validation.edge_index;
       result.resource_error = validation.resource_error;
@@ -1057,14 +1292,15 @@ ValueTypeResult value_type(
 }
 
 ValueTupleArityResult value_tuple_arity(const Value &value) {
-  const ValueValidationResult validation = validate_value(value);
+  ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     ValueTupleArityResult result{
         false, 0U, validation.invariant,
         validation.resource_error == HostResourceErrorReason::none
             ? ValueAccessError::invalid_value
             : ValueAccessError::none};
-    result.path = validation.path;
+    result.path_storage = std::move(validation.path_storage);
+    result.path = host_array_span(result.path_storage);
     result.node_index = validation.node_index;
     result.edge_index = validation.edge_index;
     result.resource_error = validation.resource_error;
@@ -1080,14 +1316,15 @@ ValueTupleArityResult value_tuple_arity(const Value &value) {
 
 ValueTupleElementResult value_tuple_element(const Value &value,
                                             std::size_t index) {
-  const ValueValidationResult validation = validate_value(value);
+  ValueValidationResult validation = validate_value(value);
   if (!validation.ok) {
     ValueTupleElementResult result{
         false, BorrowedValueView{nullptr, 0U}, validation.invariant,
         validation.resource_error == HostResourceErrorReason::none
             ? ValueAccessError::invalid_value
             : ValueAccessError::none};
-    result.path = validation.path;
+    result.path_storage = std::move(validation.path_storage);
+    result.path = host_array_span(result.path_storage);
     result.node_index = validation.node_index;
     result.edge_index = validation.edge_index;
     result.resource_error = validation.resource_error;
@@ -1106,7 +1343,9 @@ ValueTupleElementResult value_tuple_element(const Value &value,
   return ValueTupleElementResult{
       true,
       BorrowedValueView{
-          &value, value.tuple.child_indexes[value.tuple.first_child + index]},
+          &value,
+          value.tuple.child_indexes.storage.get()[
+              value.tuple.first_child + index]},
       ValueInvariant::none, ValueAccessError::none};
 }
 
@@ -1121,11 +1360,12 @@ ValueDestructionResult destroy_value(
   if (!value.claimed) {
     return ValueDestructionResult{true, ValueInvariant::none};
   }
-  const ValueValidationResult validation =
+  ValueValidationResult validation =
       validate_value(value, allocation_failure);
   if (!validation.ok) {
     ValueDestructionResult result{false, validation.invariant};
-    result.path = validation.path;
+    result.path_storage = std::move(validation.path_storage);
+    result.path = host_array_span(result.path_storage);
     result.node_index = validation.node_index;
     result.edge_index = validation.edge_index;
     result.resource_error = validation.resource_error;
@@ -1187,7 +1427,7 @@ ValueDestructionResult destroy_value(
   } else if (value.container == ContainerKind::tuple) {
     const auto set_parent = [&value](std::size_t child_index,
                                      std::size_t parent_index) {
-      ValueNode &child = value.tuple.nodes[child_index];
+      ValueNode &child = value.tuple.nodes.storage.get()[child_index];
       if (child.container == ContainerKind::tuple) {
         child.vector_payload_index = parent_index;
       } else {
@@ -1195,25 +1435,30 @@ ValueDestructionResult destroy_value(
       }
     };
     for (std::size_t node_index = 0U;
-         node_index < value.tuple.nodes.size(); ++node_index) {
-      const ValueNode &node = value.tuple.nodes[node_index];
+         node_index < value.tuple.nodes.size; ++node_index) {
+      const ValueNode &node =
+          value.tuple.nodes.storage.get()[node_index];
       if (node.container != ContainerKind::tuple) {
         continue;
       }
       for (std::size_t offset = 0U; offset < node.child_count; ++offset) {
-        set_parent(value.tuple.child_indexes[node.first_child + offset],
+        set_parent(value.tuple.child_indexes.storage.get()[
+                       node.first_child + offset],
                    node_index);
       }
     }
     for (std::size_t offset = 0U; offset < value.tuple.child_count; ++offset) {
-      set_parent(value.tuple.child_indexes[value.tuple.first_child + offset],
+      set_parent(value.tuple.child_indexes.storage.get()[
+                     value.tuple.first_child + offset],
                  value.tuple.root_index);
     }
 
     std::size_t node_index = value.tuple.root_index;
     while (true) {
       const bool root = node_index == value.tuple.root_index;
-      ValueNode *node = root ? nullptr : &value.tuple.nodes[node_index];
+      ValueNode *node =
+          root ? nullptr
+               : &value.tuple.nodes.storage.get()[node_index];
       const ContainerKind container =
           root ? ContainerKind::tuple : node->container;
       if (container == ContainerKind::tuple) {
@@ -1224,16 +1469,19 @@ ValueDestructionResult destroy_value(
         if (remaining_children != 0U) {
           --remaining_children;
           node_index =
-              value.tuple.child_indexes[first_child + remaining_children];
+              value.tuple.child_indexes.storage.get()[
+                  first_child + remaining_children];
           continue;
         }
         TupleTableReservation &reservation =
             root ? value.tuple.root_reservation
-                 : value.tuple.reservations[node->tuple_reservation_index];
+                 : value.tuple.reservations.storage.get()[
+                       node->tuple_reservation_index];
         release_tuple_accounting(reservation);
       } else if (container == ContainerKind::vector) {
         release_vector_accounting(
-            value.tuple.vector_payloads[node->vector_payload_index]);
+            value.tuple.vector_payloads.storage.get()[
+                node->vector_payload_index]);
       }
 
       if (root) {
@@ -1256,130 +1504,235 @@ ValueFormattingResult format_value(const Value &value) {
 ValueFormattingResult format_value(
     const Value &value,
     HostAllocationFailureInjection &allocation_failure) {
-  const ValueValidationResult validation =
+  ValueValidationResult validation =
       validate_value(value, allocation_failure);
   if (!validation.ok) {
-    if (validation.resource_error != HostResourceErrorReason::none) {
-      ValueFormattingResult result{false, {}, ValueInvariant::none,
-                                   ValueFormatError::none};
-      result.resource_error = validation.resource_error;
-      return result;
-    }
-    ValueFormattingResult result{false, {}, validation.invariant,
-                                 ValueFormatError::invalid_value};
-    result.path = validation.path;
+    ValueFormattingResult result;
+    result.ok = false;
+    result.invariant = validation.invariant;
+    result.error =
+        validation.resource_error == HostResourceErrorReason::none
+            ? ValueFormatError::invalid_value
+            : ValueFormatError::none;
     result.node_index = validation.node_index;
     result.edge_index = validation.edge_index;
     result.resource_error = validation.resource_error;
-    return result;
-  }
-
-  const std::size_t allocation_ordinal = allocation_failure.allocation_ordinal;
-  if (allocation_ordinal == std::numeric_limits<std::size_t>::max() ||
-      (allocation_failure.fail_at_allocation_ordinal.has_value() &&
-       allocation_ordinal ==
-           *allocation_failure.fail_at_allocation_ordinal)) {
-    ValueFormattingResult result{false, {}, ValueInvariant::none,
-                                 ValueFormatError::none};
-    result.resource_error = HostResourceErrorReason::allocation_unavailable;
-    return result;
-  }
-  ++allocation_failure.allocation_ordinal;
-#if defined(__cpp_exceptions)
-  try {
-#endif
-
-  std::string formatted;
-  if (value.container == ContainerKind::scalar) {
-    if (!append_scalar(formatted, value.scalar)) {
-      return ValueFormattingResult{false, {}, ValueInvariant::none,
-                                   ValueFormatError::conversion_failure};
+    result.path_storage = std::move(validation.path_storage);
+    result.path = host_array_span(result.path_storage);
+    if (validation.resource_error != HostResourceErrorReason::none) {
+      result.invariant = ValueInvariant::none;
+      return result;
     }
-    return ValueFormattingResult{true, std::move(formatted),
-                                 ValueInvariant::none, ValueFormatError::none};
+    return result;
   }
+
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  std::size_t text_capacity = 66U;
+  std::size_t stack_capacity = 0U;
   if (value.container == ContainerKind::vector) {
-    if (!append_vector(formatted, value.vector)) {
-      return ValueFormattingResult{false, {}, ValueInvariant::none,
-                                   ValueFormatError::conversion_failure};
+    const std::size_t length = active_vector_length(value.vector);
+    if (length > (maximum - text_capacity) / 65U) {
+      ValueFormattingResult result;
+      result.ok = false;
+      result.invariant = ValueInvariant::none;
+      result.error = ValueFormatError::none;
+      result.resource_error = HostResourceErrorReason::size_overflow;
+      return result;
     }
-    return ValueFormattingResult{true, std::move(formatted),
-                                 ValueInvariant::none, ValueFormatError::none};
+    text_capacity += length * 65U;
+  } else if (value.container == ContainerKind::tuple) {
+    if (value.tuple.nodes.size == maximum ||
+        value.tuple.nodes.size + 1U > maximum / 66U) {
+      ValueFormattingResult result;
+      result.ok = false;
+      result.invariant = ValueInvariant::none;
+      result.error = ValueFormatError::none;
+      result.resource_error = HostResourceErrorReason::size_overflow;
+      return result;
+    }
+    text_capacity = (value.tuple.nodes.size + 1U) * 66U;
+    if (value.tuple.child_indexes.size >
+        (maximum - text_capacity) / 2U) {
+      ValueFormattingResult result;
+      result.ok = false;
+      result.invariant = ValueInvariant::none;
+      result.error = ValueFormatError::none;
+      result.resource_error = HostResourceErrorReason::size_overflow;
+      return result;
+    }
+    text_capacity += value.tuple.child_indexes.size * 2U;
+    for (const VectorValue &payload :
+         host_array_span(value.tuple.vector_payloads)) {
+      const std::size_t length = active_vector_length(payload);
+      if (length > (maximum - text_capacity) / 65U) {
+        ValueFormattingResult result;
+        result.ok = false;
+        result.invariant = ValueInvariant::none;
+        result.error = ValueFormatError::none;
+        result.resource_error = HostResourceErrorReason::size_overflow;
+        return result;
+      }
+      text_capacity += length * 65U;
+    }
+    if (value.tuple.child_indexes.size >
+        (maximum - value.tuple.nodes.size - 1U) / 2U) {
+      ValueFormattingResult result;
+      result.ok = false;
+      result.invariant = ValueInvariant::none;
+      result.error = ValueFormatError::none;
+      result.resource_error = HostResourceErrorReason::size_overflow;
+      return result;
+    }
+    stack_capacity = value.tuple.nodes.size +
+                     value.tuple.child_indexes.size * 2U + 1U;
   }
 
-  std::vector<ValueFormatAction> stack;
-  stack.push_back(ValueFormatAction{ValueFormatAction::Kind::node,
-                                    value.tuple.root_index});
-  while (!stack.empty()) {
-    const ValueFormatAction action = stack.back();
-    stack.pop_back();
+  ValueFormattingResult result;
+  result.ok = false;
+  result.invariant = ValueInvariant::none;
+  result.error = ValueFormatError::none;
+  HostResourceErrorReason allocated =
+      begin_host_allocation(allocation_failure);
+  if (allocated == HostResourceErrorReason::none) {
+    allocated = allocate_host_array(
+        result.formatted_storage, text_capacity,
+        allocation_failure.max_container_elements);
+  }
+  HostArray<ValueFormatAction> stack;
+  if (allocated == HostResourceErrorReason::none &&
+      stack_capacity != 0U) {
+    allocated = allocate_host_array(
+        stack, stack_capacity,
+        allocation_failure.max_container_elements);
+  }
+  if (allocated != HostResourceErrorReason::none) {
+    result.resource_error = allocated;
+    return result;
+  }
+  const auto append_failed = [&result](AppendError error) {
+    if (error == AppendError::none) {
+      return false;
+    }
+    if (error == AppendError::size_overflow) {
+      result.resource_error = HostResourceErrorReason::size_overflow;
+    } else {
+      result.error = ValueFormatError::conversion_failure;
+    }
+    return true;
+  };
+
+  if (value.container == ContainerKind::scalar) {
+    if (append_failed(
+            append_scalar(result.formatted_storage, value.scalar))) {
+      return result;
+    }
+  } else if (value.container == ContainerKind::vector) {
+    if (append_failed(
+            append_vector(result.formatted_storage, value.vector))) {
+      return result;
+    }
+  } else {
+    allocated = host_array_push(
+        stack, ValueFormatAction{ValueFormatAction::Kind::node,
+                                 value.tuple.root_index});
+    if (allocated != HostResourceErrorReason::none) {
+      result.resource_error = allocated;
+      return result;
+    }
+  }
+  while (stack.size != 0U) {
+    const ValueFormatAction action =
+        stack.storage.get()[stack.size - 1U];
+    --stack.size;
     if (action.kind == ValueFormatAction::Kind::separator) {
-      formatted += ' ';
+      allocated = host_array_push(result.formatted_storage, ' ');
+      if (allocated != HostResourceErrorReason::none) {
+        result.resource_error = allocated;
+        return result;
+      }
       continue;
     }
     if (action.kind == ValueFormatAction::Kind::close_tuple) {
-      formatted += ']';
+      allocated = host_array_push(result.formatted_storage, ']');
+      if (allocated != HostResourceErrorReason::none) {
+        result.resource_error = allocated;
+        return result;
+      }
       continue;
     }
 
     const bool root = action.node_index == value.tuple.root_index;
     const ContainerKind container =
         root ? ContainerKind::tuple
-             : value.tuple.nodes[action.node_index].container;
+             : value.tuple.nodes.storage.get()[action.node_index]
+                   .container;
     if (container == ContainerKind::scalar) {
-      if (!append_scalar(formatted,
-                         value.tuple.nodes[action.node_index].scalar)) {
-        return ValueFormattingResult{false, {}, ValueInvariant::none,
-                                     ValueFormatError::conversion_failure};
+      if (append_failed(append_scalar(
+              result.formatted_storage,
+              value.tuple.nodes.storage.get()[action.node_index].scalar))) {
+        return result;
       }
       continue;
     }
     if (container == ContainerKind::vector) {
-      if (!append_vector(
-              formatted,
-              value.tuple.vector_payloads[
-                  value.tuple.nodes[action.node_index].vector_payload_index])) {
-        return ValueFormattingResult{false, {}, ValueInvariant::none,
-                                     ValueFormatError::conversion_failure};
+      if (append_failed(append_vector(
+              result.formatted_storage,
+              value.tuple.vector_payloads.storage.get()[
+                  value.tuple.nodes.storage.get()[action.node_index]
+                      .vector_payload_index]))) {
+        return result;
       }
       continue;
     }
 
-    formatted += '[';
-    stack.push_back(
+    allocated = host_array_push(result.formatted_storage, '[');
+    if (allocated != HostResourceErrorReason::none) {
+      result.resource_error = allocated;
+      return result;
+    }
+    allocated = host_array_push(
+        stack,
         ValueFormatAction{ValueFormatAction::Kind::close_tuple, 0U});
+    if (allocated != HostResourceErrorReason::none) {
+      result.resource_error = allocated;
+      return result;
+    }
     const std::size_t first_child =
         root ? value.tuple.first_child
-             : value.tuple.nodes[action.node_index].first_child;
+             : value.tuple.nodes.storage.get()[action.node_index]
+                   .first_child;
     const std::size_t child_count =
         root ? value.tuple.child_count
-             : value.tuple.nodes[action.node_index].child_count;
+             : value.tuple.nodes.storage.get()[action.node_index]
+                   .child_count;
     for (std::size_t offset = child_count; offset > 0U; --offset) {
       const std::size_t child_offset = offset - 1U;
-      stack.push_back(ValueFormatAction{
-          ValueFormatAction::Kind::node,
-          value.tuple.child_indexes[first_child + child_offset]});
+      allocated = host_array_push(
+          stack,
+          ValueFormatAction{
+              ValueFormatAction::Kind::node,
+              value.tuple.child_indexes.storage.get()[
+                  first_child + child_offset]});
+      if (allocated != HostResourceErrorReason::none) {
+        result.resource_error = allocated;
+        return result;
+      }
       if (child_offset != 0U) {
-        stack.push_back(
+        allocated = host_array_push(
+            stack,
             ValueFormatAction{ValueFormatAction::Kind::separator, 0U});
+        if (allocated != HostResourceErrorReason::none) {
+          result.resource_error = allocated;
+          return result;
+        }
       }
     }
   }
-  return ValueFormattingResult{true, std::move(formatted), ValueInvariant::none,
-                               ValueFormatError::none};
-#if defined(__cpp_exceptions)
-  } catch (const std::bad_alloc &) {
-    ValueFormattingResult result{false, {}, ValueInvariant::none,
-                                 ValueFormatError::none};
-    result.resource_error = HostResourceErrorReason::allocation_unavailable;
-    return result;
-  } catch (const std::length_error &) {
-    ValueFormattingResult result{false, {}, ValueInvariant::none,
-                                 ValueFormatError::none};
-    result.resource_error = HostResourceErrorReason::size_overflow;
-    return result;
-  }
-#endif
+  result.ok = true;
+  result.formatted =
+      std::string_view(result.formatted_storage.storage.get(),
+                       result.formatted_storage.size);
+  return result;
 }
 
 namespace {
@@ -1412,7 +1765,7 @@ ValueConstructionResult make_double_vector(std::initializer_list<double> values)
 [[maybe_unused]] std::string format_valid_test_value(const Value &value) {
   ValueFormattingResult result = format_value(value);
   CHECK(result.ok);
-  return std::move(result.formatted);
+  return std::string(result.formatted);
 }
 
 [[maybe_unused]] ScalarType valid_element_type_for_test(const Value &value) {

@@ -42,8 +42,8 @@ Value value_from_scalar(const ScalarValue &scalar) {
 Error primitive_error(ErrorKind kind, const PrimitiveDescriptor &descriptor,
                       SourceLocation location) {
   Error error = make_error(kind, location);
-  error.primitive = PrimitiveErrorContext{
-      std::string(descriptor.name), std::optional<PrimitiveId>{descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
   return error;
 }
 
@@ -58,7 +58,7 @@ Error host_resource_error(PrimitiveApplicationContext &context,
           : ResourceErrorReason::allocation_unavailable,
       std::nullopt,
       std::nullopt,
-      std::string(execution_profile_name(context.resources.profile)),
+      execution_profile_name(context.resources.profile),
       std::nullopt,
       std::nullopt,
       std::nullopt,
@@ -255,9 +255,11 @@ PrimitiveApplicationResult apply_primitive_impl(
       Error error = primitive_error(ErrorKind::invalid_value, descriptor,
                                     call_location);
       error.argument_position = index + 1U;
-      error.value = ValueErrorContext{validation.invariant, validation.path,
-                                      validation.node_index,
-                                      validation.edge_index};
+      error.value = ValueErrorContext{
+          validation.invariant,
+          std::vector<std::size_t>(validation.path.begin(),
+                                   validation.path.end()),
+          validation.node_index, validation.edge_index};
       return application_failure(std::move(error));
     }
     ScalarType element_type = ScalarType::boolean;
@@ -413,10 +415,10 @@ PrimitiveApplicationResult apply_primitive_impl(
     }
     vector_value = std::move(allocated.value);
   } else {
-    const WorkChargeResult admitted = charge_work(
+    WorkChargeResult admitted = charge_work(
         context.resources, 1, call_location, descriptor.name);
     if (!admitted.ok) {
-      Error error = admitted.error;
+      Error error = std::move(admitted.error);
       if (error.primitive.has_value()) {
         error.primitive->id = descriptor.id;
       }
@@ -539,7 +541,7 @@ Value test_bool_vector(std::initializer_list<std::uint8_t> values) {
 [[maybe_unused]] std::string formatted_value(const Value &value) {
   const ValueFormattingResult result = format_value(value);
   CHECK(result.ok);
-  return result.formatted;
+  return std::string(result.formatted);
 }
 
 } // namespace
@@ -668,12 +670,16 @@ TEST_CASE("application errors carry deterministic arity type and shape context")
     if (type.error.type->actual_arguments.size() == 2) {
       const TypeArena &left = type.error.type->actual_arguments[0];
       const TypeArena &right = type.error.type->actual_arguments[1];
-      REQUIRE(left.nodes.size() == 1U);
-      REQUIRE(right.nodes.size() == 1U);
-      CHECK(left.nodes[left.root_index].kind == TypeKind::vector);
-      CHECK(left.nodes[left.root_index].scalar == ScalarType::integer);
-      CHECK(right.nodes[right.root_index].kind == TypeKind::vector);
-      CHECK(right.nodes[right.root_index].scalar == ScalarType::boolean);
+      const std::span<const TypeNode> left_nodes = type_nodes(left);
+      const std::span<const TypeNode> right_nodes = type_nodes(right);
+      REQUIRE(left_nodes.size() == 1U);
+      REQUIRE(right_nodes.size() == 1U);
+      CHECK(left_nodes[left.root_index].kind == TypeKind::vector);
+      CHECK(left_nodes[left.root_index].scalar ==
+            ScalarType::integer);
+      CHECK(right_nodes[right.root_index].kind == TypeKind::vector);
+      CHECK(right_nodes[right.root_index].scalar ==
+            ScalarType::boolean);
     }
     CHECK(type.error.type->accepted_signatures.size() == 2);
   }
