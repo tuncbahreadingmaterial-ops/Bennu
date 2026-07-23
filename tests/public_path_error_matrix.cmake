@@ -200,6 +200,13 @@ check_public_failure(type "add[1 true]" 1 7 "TypeError"
   "add arguments do not match an accepted signature; first unsupported argument is 2")
 check_public_failure(shape "add[(1 2) (3)]" 1 11 "ShapeMismatch"
   "add argument 2 expected shape [2], got [1]")
+check_public_failure(issue54_arity "and[true]" 1 1 "ArityError"
+  "and received 1 argument(s); accepted arity 2")
+check_public_failure(issue54_type "odd[1.0]" 1 5 "TypeError"
+  "odd arguments do not match an accepted signature; first unsupported argument is 1")
+check_public_dynamic_failure(issue54_dynamic_shape
+  "less_than[iota[2] iota[3]]" 1 19
+  "ShapeMismatch" "less_than argument 2 expected shape [2], got [3]")
 check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
   "DomainError" "inc failed: integer_overflow")
 check_public_dynamic_failure(domain_vector

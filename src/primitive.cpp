@@ -60,8 +60,57 @@ constexpr std::array<PrimitiveSignature, 1> iota_signatures{{
     {int_parameter.data(), int_parameter.size(), vector_int,
      PrimitiveImplementation::iota_integer},
 }};
+constexpr std::array<PrimitiveSignature, 1> and_signatures{{
+    {bool_parameters.data(), bool_parameters.size(), scalar_bool,
+     PrimitiveImplementation::logical_and_boolean},
+}};
+constexpr std::array<PrimitiveSignature, 1> or_signatures{{
+    {bool_parameters.data(), bool_parameters.size(), scalar_bool,
+     PrimitiveImplementation::logical_or_boolean},
+}};
+constexpr std::array<PrimitiveSignature, 3> not_equals_signatures{{
+    {bool_parameters.data(), bool_parameters.size(), scalar_bool,
+     PrimitiveImplementation::not_equals_boolean},
+    {int_parameters.data(), int_parameters.size(), scalar_bool,
+     PrimitiveImplementation::not_equals_integer},
+    {double_parameters.data(), double_parameters.size(), scalar_bool,
+     PrimitiveImplementation::not_equals_double},
+}};
 
-constexpr std::array<PrimitiveDescriptor, 5> production_descriptors{{
+constexpr std::array<PrimitiveSignature, 1> odd_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_bool,
+     PrimitiveImplementation::odd_integer},
+}};
+constexpr std::array<PrimitiveSignature, 1> even_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_bool,
+     PrimitiveImplementation::even_integer},
+}};
+constexpr std::array<PrimitiveSignature, 2> is_positive_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_bool,
+     PrimitiveImplementation::is_positive_integer},
+    {double_parameter.data(), double_parameter.size(), scalar_bool,
+     PrimitiveImplementation::is_positive_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> is_negative_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_bool,
+     PrimitiveImplementation::is_negative_integer},
+    {double_parameter.data(), double_parameter.size(), scalar_bool,
+     PrimitiveImplementation::is_negative_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> less_than_signatures{{
+    {int_parameters.data(), int_parameters.size(), scalar_bool,
+     PrimitiveImplementation::less_than_integer},
+    {double_parameters.data(), double_parameters.size(), scalar_bool,
+     PrimitiveImplementation::less_than_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> greater_than_signatures{{
+    {int_parameters.data(), int_parameters.size(), scalar_bool,
+     PrimitiveImplementation::greater_than_integer},
+    {double_parameters.data(), double_parameters.size(), scalar_bool,
+     PrimitiveImplementation::greater_than_double},
+}};
+
+constexpr std::array<PrimitiveDescriptor, 14> production_descriptors{{
     {PrimitiveId::inc, "inc", LiftingMode::elementwise, inc_signatures.data(),
      inc_signatures.size()},
     {PrimitiveId::add, "add", LiftingMode::elementwise, add_signatures.data(),
@@ -72,6 +121,24 @@ constexpr std::array<PrimitiveDescriptor, 5> production_descriptors{{
      not_signatures.data(), not_signatures.size()},
     {PrimitiveId::iota, "iota", LiftingMode::none, iota_signatures.data(),
      iota_signatures.size()},
+    {PrimitiveId::logical_and, "and", LiftingMode::elementwise,
+     and_signatures.data(), and_signatures.size()},
+    {PrimitiveId::logical_or, "or", LiftingMode::elementwise,
+     or_signatures.data(), or_signatures.size()},
+    {PrimitiveId::not_equals, "not_equals", LiftingMode::elementwise,
+     not_equals_signatures.data(), not_equals_signatures.size()},
+    {PrimitiveId::odd, "odd", LiftingMode::elementwise, odd_signatures.data(),
+     odd_signatures.size()},
+    {PrimitiveId::even, "even", LiftingMode::elementwise,
+     even_signatures.data(), even_signatures.size()},
+    {PrimitiveId::is_positive, "is_positive", LiftingMode::elementwise,
+     is_positive_signatures.data(), is_positive_signatures.size()},
+    {PrimitiveId::is_negative, "is_negative", LiftingMode::elementwise,
+     is_negative_signatures.data(), is_negative_signatures.size()},
+    {PrimitiveId::less_than, "less_than", LiftingMode::elementwise,
+     less_than_signatures.data(), less_than_signatures.size()},
+    {PrimitiveId::greater_than, "greater_than", LiftingMode::elementwise,
+     greater_than_signatures.data(), greater_than_signatures.size()},
 }};
 
 PrimitiveTableValidationResult valid_table() {
@@ -174,6 +241,65 @@ bool implementation_matches(PrimitiveId id,
            signature.parameters[0].element == ScalarType::integer &&
            signature.result.container == ContainerKind::vector &&
            signature.result.element == ScalarType::integer;
+  case PrimitiveImplementation::logical_and_boolean:
+    return id == PrimitiveId::logical_and &&
+           scalar_parameters_match(
+               {ScalarType::boolean, ScalarType::boolean}, ScalarType::boolean);
+  case PrimitiveImplementation::logical_or_boolean:
+    return id == PrimitiveId::logical_or &&
+           scalar_parameters_match(
+               {ScalarType::boolean, ScalarType::boolean}, ScalarType::boolean);
+  case PrimitiveImplementation::not_equals_boolean:
+    return id == PrimitiveId::not_equals &&
+           scalar_parameters_match(
+               {ScalarType::boolean, ScalarType::boolean}, ScalarType::boolean);
+  case PrimitiveImplementation::not_equals_integer:
+    return id == PrimitiveId::not_equals &&
+           scalar_parameters_match(
+               {ScalarType::integer, ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::not_equals_double:
+    return id == PrimitiveId::not_equals &&
+           scalar_parameters_match(
+               {ScalarType::double_precision, ScalarType::double_precision},
+               ScalarType::boolean);
+  case PrimitiveImplementation::odd_integer:
+    return id == PrimitiveId::odd &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::even_integer:
+    return id == PrimitiveId::even &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::is_positive_integer:
+    return id == PrimitiveId::is_positive &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::is_positive_double:
+    return id == PrimitiveId::is_positive &&
+           scalar_parameters_match({ScalarType::double_precision},
+                                   ScalarType::boolean);
+  case PrimitiveImplementation::is_negative_integer:
+    return id == PrimitiveId::is_negative &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::is_negative_double:
+    return id == PrimitiveId::is_negative &&
+           scalar_parameters_match({ScalarType::double_precision},
+                                   ScalarType::boolean);
+  case PrimitiveImplementation::less_than_integer:
+    return id == PrimitiveId::less_than &&
+           scalar_parameters_match(
+               {ScalarType::integer, ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::less_than_double:
+    return id == PrimitiveId::less_than &&
+           scalar_parameters_match(
+               {ScalarType::double_precision, ScalarType::double_precision},
+               ScalarType::boolean);
+  case PrimitiveImplementation::greater_than_integer:
+    return id == PrimitiveId::greater_than &&
+           scalar_parameters_match(
+               {ScalarType::integer, ScalarType::integer}, ScalarType::boolean);
+  case PrimitiveImplementation::greater_than_double:
+    return id == PrimitiveId::greater_than &&
+           scalar_parameters_match(
+               {ScalarType::double_precision, ScalarType::double_precision},
+               ScalarType::boolean);
   }
   return false;
 }
@@ -732,6 +858,75 @@ ScalarKernelResult invoke_scalar_kernel(
             .scalar);
   case PrimitiveImplementation::logical_not_boolean:
     return successful_kernel(make_bool_value(!operands[0].boolean).scalar);
+  case PrimitiveImplementation::logical_and_boolean:
+    return successful_kernel(
+        make_bool_value(operands[0].boolean & operands[1].boolean).scalar);
+  case PrimitiveImplementation::logical_or_boolean:
+    return successful_kernel(
+        make_bool_value(operands[0].boolean | operands[1].boolean).scalar);
+  case PrimitiveImplementation::not_equals_boolean:
+    return successful_kernel(
+        make_bool_value(operands[0].boolean != operands[1].boolean).scalar);
+  case PrimitiveImplementation::not_equals_integer:
+    return successful_kernel(
+        make_bool_value(operands[0].integer != operands[1].integer).scalar);
+  case PrimitiveImplementation::not_equals_double:
+    if (binary64_is_nan(operands[0].double_precision) ||
+        binary64_is_nan(operands[1].double_precision)) {
+      return successful_kernel(make_bool_value(true).scalar);
+    }
+    return successful_kernel(
+        make_bool_value(operands[0].double_precision !=
+                        operands[1].double_precision)
+            .scalar);
+  case PrimitiveImplementation::odd_integer:
+    return successful_kernel(
+        make_bool_value((operands[0].integer % INT64_C(2)) != 0).scalar);
+  case PrimitiveImplementation::even_integer:
+    return successful_kernel(
+        make_bool_value((operands[0].integer % INT64_C(2)) == 0).scalar);
+  case PrimitiveImplementation::is_positive_integer:
+    return successful_kernel(
+        make_bool_value(operands[0].integer > 0).scalar);
+  case PrimitiveImplementation::is_positive_double:
+    if (binary64_is_nan(operands[0].double_precision)) {
+      return successful_kernel(make_bool_value(false).scalar);
+    }
+    return successful_kernel(
+        make_bool_value(operands[0].double_precision > 0.0).scalar);
+  case PrimitiveImplementation::is_negative_integer:
+    return successful_kernel(
+        make_bool_value(operands[0].integer < 0).scalar);
+  case PrimitiveImplementation::is_negative_double:
+    if (binary64_is_nan(operands[0].double_precision)) {
+      return successful_kernel(make_bool_value(false).scalar);
+    }
+    return successful_kernel(
+        make_bool_value(operands[0].double_precision < 0.0).scalar);
+  case PrimitiveImplementation::less_than_integer:
+    return successful_kernel(
+        make_bool_value(operands[0].integer < operands[1].integer).scalar);
+  case PrimitiveImplementation::less_than_double:
+    if (binary64_is_nan(operands[0].double_precision) ||
+        binary64_is_nan(operands[1].double_precision)) {
+      return successful_kernel(make_bool_value(false).scalar);
+    }
+    return successful_kernel(
+        make_bool_value(operands[0].double_precision <
+                        operands[1].double_precision)
+            .scalar);
+  case PrimitiveImplementation::greater_than_integer:
+    return successful_kernel(
+        make_bool_value(operands[0].integer > operands[1].integer).scalar);
+  case PrimitiveImplementation::greater_than_double:
+    if (binary64_is_nan(operands[0].double_precision) ||
+        binary64_is_nan(operands[1].double_precision)) {
+      return successful_kernel(make_bool_value(false).scalar);
+    }
+    return successful_kernel(
+        make_bool_value(operands[0].double_precision >
+                        operands[1].double_precision)
+            .scalar);
   case PrimitiveImplementation::none:
   case PrimitiveImplementation::iota_integer:
     return invalid_kernel_invocation();
@@ -742,27 +937,49 @@ ScalarKernelResult invoke_scalar_kernel(
 TEST_CASE("production primitive descriptors are static explicit and valid") {
   const std::span<const PrimitiveDescriptor> descriptors =
       production_primitive_descriptors();
-  REQUIRE(descriptors.size() == 5);
+  REQUIRE(descriptors.size() == 14);
 
-  constexpr std::array<PrimitiveId, 5> expected_ids{{
+  constexpr std::array<PrimitiveId, 14> expected_ids{{
       PrimitiveId::inc,
       PrimitiveId::add,
       PrimitiveId::equals,
       PrimitiveId::logical_not,
       PrimitiveId::iota,
+      PrimitiveId::logical_and,
+      PrimitiveId::logical_or,
+      PrimitiveId::not_equals,
+      PrimitiveId::odd,
+      PrimitiveId::even,
+      PrimitiveId::is_positive,
+      PrimitiveId::is_negative,
+      PrimitiveId::less_than,
+      PrimitiveId::greater_than,
   }};
-  constexpr std::array<std::string_view, 5> expected_names{{
-      "inc", "add", "equals", "not", "iota",
+  constexpr std::array<std::string_view, 14> expected_names{{
+      "inc",         "add",         "equals",      "not",
+      "iota",        "and",         "or",          "not_equals",
+      "odd",         "even",        "is_positive", "is_negative",
+      "less_than",   "greater_than",
   }};
-  constexpr std::array<LiftingMode, 5> expected_lifting{{
+  constexpr std::array<LiftingMode, 14> expected_lifting{{
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::none,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
   }};
-  constexpr std::array<std::size_t, 5> expected_signature_counts{{2, 2, 3, 1,
-                                                                  1}};
+  constexpr std::array<std::size_t, 14> expected_signature_counts{{
+      2, 2, 3, 1, 1, 1, 1, 3, 1, 1, 2, 2, 2, 2,
+  }};
 
   for (std::size_t index = 0; index < descriptors.size(); ++index) {
     CAPTURE(index);

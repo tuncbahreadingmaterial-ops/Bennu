@@ -40,7 +40,22 @@ typedef enum BennuImplementation {
   BENNU_IMPL_EQUALS_INT = 6,
   BENNU_IMPL_EQUALS_DOUBLE = 7,
   BENNU_IMPL_NOT_BOOL = 8,
-  BENNU_IMPL_IOTA_INT = 9
+  BENNU_IMPL_IOTA_INT = 9,
+  BENNU_IMPL_AND_BOOL = 10,
+  BENNU_IMPL_OR_BOOL = 11,
+  BENNU_IMPL_NOT_EQUALS_BOOL = 12,
+  BENNU_IMPL_NOT_EQUALS_INT = 13,
+  BENNU_IMPL_NOT_EQUALS_DOUBLE = 14,
+  BENNU_IMPL_ODD_INT = 15,
+  BENNU_IMPL_EVEN_INT = 16,
+  BENNU_IMPL_IS_POSITIVE_INT = 17,
+  BENNU_IMPL_IS_POSITIVE_DOUBLE = 18,
+  BENNU_IMPL_IS_NEGATIVE_INT = 19,
+  BENNU_IMPL_IS_NEGATIVE_DOUBLE = 20,
+  BENNU_IMPL_LESS_THAN_INT = 21,
+  BENNU_IMPL_LESS_THAN_DOUBLE = 22,
+  BENNU_IMPL_GREATER_THAN_INT = 23,
+  BENNU_IMPL_GREATER_THAN_DOUBLE = 24
 } BennuImplementation;
 
 typedef enum BennuPrimitiveId {
@@ -49,7 +64,16 @@ typedef enum BennuPrimitiveId {
   BENNU_PRIMITIVE_ADD = 1,
   BENNU_PRIMITIVE_EQUALS = 2,
   BENNU_PRIMITIVE_NOT = 3,
-  BENNU_PRIMITIVE_IOTA = 4
+  BENNU_PRIMITIVE_IOTA = 4,
+  BENNU_PRIMITIVE_AND = 5,
+  BENNU_PRIMITIVE_OR = 6,
+  BENNU_PRIMITIVE_NOT_EQUALS = 7,
+  BENNU_PRIMITIVE_ODD = 8,
+  BENNU_PRIMITIVE_EVEN = 9,
+  BENNU_PRIMITIVE_IS_POSITIVE = 10,
+  BENNU_PRIMITIVE_IS_NEGATIVE = 11,
+  BENNU_PRIMITIVE_LESS_THAN = 12,
+  BENNU_PRIMITIVE_GREATER_THAN = 13
 } BennuPrimitiveId;
 
 typedef enum BennuFailure {
@@ -544,7 +568,22 @@ static BennuType bennu_result_type(BennuImplementation implementation) {
   if (implementation == BENNU_IMPL_EQUALS_BOOL ||
       implementation == BENNU_IMPL_EQUALS_INT ||
       implementation == BENNU_IMPL_EQUALS_DOUBLE ||
-      implementation == BENNU_IMPL_NOT_BOOL) {
+      implementation == BENNU_IMPL_NOT_BOOL ||
+      implementation == BENNU_IMPL_AND_BOOL ||
+      implementation == BENNU_IMPL_OR_BOOL ||
+      implementation == BENNU_IMPL_NOT_EQUALS_BOOL ||
+      implementation == BENNU_IMPL_NOT_EQUALS_INT ||
+      implementation == BENNU_IMPL_NOT_EQUALS_DOUBLE ||
+      implementation == BENNU_IMPL_ODD_INT ||
+      implementation == BENNU_IMPL_EVEN_INT ||
+      implementation == BENNU_IMPL_IS_POSITIVE_INT ||
+      implementation == BENNU_IMPL_IS_POSITIVE_DOUBLE ||
+      implementation == BENNU_IMPL_IS_NEGATIVE_INT ||
+      implementation == BENNU_IMPL_IS_NEGATIVE_DOUBLE ||
+      implementation == BENNU_IMPL_LESS_THAN_INT ||
+      implementation == BENNU_IMPL_LESS_THAN_DOUBLE ||
+      implementation == BENNU_IMPL_GREATER_THAN_INT ||
+      implementation == BENNU_IMPL_GREATER_THAN_DOUBLE) {
     return BENNU_BOOL;
   }
   if (implementation == BENNU_IMPL_INC_DOUBLE ||
@@ -596,6 +635,36 @@ static int bennu_kernel(BennuResources *resources,
     result->boolean = (uint8_t)(left.double_precision == right.double_precision);
   } else if (implementation == BENNU_IMPL_NOT_BOOL) {
     result->boolean = (uint8_t)(left.boolean == 0U);
+  } else if (implementation == BENNU_IMPL_AND_BOOL) {
+    result->boolean = (uint8_t)(left.boolean & right.boolean);
+  } else if (implementation == BENNU_IMPL_OR_BOOL) {
+    result->boolean = (uint8_t)(left.boolean | right.boolean);
+  } else if (implementation == BENNU_IMPL_NOT_EQUALS_BOOL) {
+    result->boolean = (uint8_t)(left.boolean != right.boolean);
+  } else if (implementation == BENNU_IMPL_NOT_EQUALS_INT) {
+    result->boolean = (uint8_t)(left.integer != right.integer);
+  } else if (implementation == BENNU_IMPL_NOT_EQUALS_DOUBLE) {
+    result->boolean = (uint8_t)(left.double_precision != right.double_precision);
+  } else if (implementation == BENNU_IMPL_ODD_INT) {
+    result->boolean = (uint8_t)((left.integer % INT64_C(2)) != INT64_C(0));
+  } else if (implementation == BENNU_IMPL_EVEN_INT) {
+    result->boolean = (uint8_t)((left.integer % INT64_C(2)) == INT64_C(0));
+  } else if (implementation == BENNU_IMPL_IS_POSITIVE_INT) {
+    result->boolean = (uint8_t)(left.integer > INT64_C(0));
+  } else if (implementation == BENNU_IMPL_IS_POSITIVE_DOUBLE) {
+    result->boolean = (uint8_t)(left.double_precision > 0.0);
+  } else if (implementation == BENNU_IMPL_IS_NEGATIVE_INT) {
+    result->boolean = (uint8_t)(left.integer < INT64_C(0));
+  } else if (implementation == BENNU_IMPL_IS_NEGATIVE_DOUBLE) {
+    result->boolean = (uint8_t)(left.double_precision < 0.0);
+  } else if (implementation == BENNU_IMPL_LESS_THAN_INT) {
+    result->boolean = (uint8_t)(left.integer < right.integer);
+  } else if (implementation == BENNU_IMPL_LESS_THAN_DOUBLE) {
+    result->boolean = (uint8_t)(left.double_precision < right.double_precision);
+  } else if (implementation == BENNU_IMPL_GREATER_THAN_INT) {
+    result->boolean = (uint8_t)(left.integer > right.integer);
+  } else if (implementation == BENNU_IMPL_GREATER_THAN_DOUBLE) {
+    result->boolean = (uint8_t)(left.double_precision > right.double_precision);
   } else {
     bennu_set_failure(resources, BENNU_FAILURE_INTERNAL);
     return 0;
@@ -652,10 +721,18 @@ static int bennu_apply(BennuResources *resources,
   }
   if (implementation == BENNU_IMPL_INC_DOUBLE ||
       implementation == BENNU_IMPL_ADD_DOUBLE ||
-      implementation == BENNU_IMPL_EQUALS_DOUBLE) {
+      implementation == BENNU_IMPL_EQUALS_DOUBLE ||
+      implementation == BENNU_IMPL_NOT_EQUALS_DOUBLE ||
+      implementation == BENNU_IMPL_IS_POSITIVE_DOUBLE ||
+      implementation == BENNU_IMPL_IS_NEGATIVE_DOUBLE ||
+      implementation == BENNU_IMPL_LESS_THAN_DOUBLE ||
+      implementation == BENNU_IMPL_GREATER_THAN_DOUBLE) {
     parameter_type = BENNU_DOUBLE;
   } else if (implementation == BENNU_IMPL_EQUALS_BOOL ||
-             implementation == BENNU_IMPL_NOT_BOOL) {
+             implementation == BENNU_IMPL_NOT_BOOL ||
+             implementation == BENNU_IMPL_AND_BOOL ||
+             implementation == BENNU_IMPL_OR_BOOL ||
+             implementation == BENNU_IMPL_NOT_EQUALS_BOOL) {
     parameter_type = BENNU_BOOL;
   }
   signature.parameter_count = argument_count;

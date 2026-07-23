@@ -2509,6 +2509,36 @@ std::string_view c_implementation_name(PrimitiveImplementation implementation) {
     return "BENNU_IMPL_NOT_BOOL";
   case PrimitiveImplementation::iota_integer:
     return "BENNU_IMPL_IOTA_INT";
+  case PrimitiveImplementation::logical_and_boolean:
+    return "BENNU_IMPL_AND_BOOL";
+  case PrimitiveImplementation::logical_or_boolean:
+    return "BENNU_IMPL_OR_BOOL";
+  case PrimitiveImplementation::not_equals_boolean:
+    return "BENNU_IMPL_NOT_EQUALS_BOOL";
+  case PrimitiveImplementation::not_equals_integer:
+    return "BENNU_IMPL_NOT_EQUALS_INT";
+  case PrimitiveImplementation::not_equals_double:
+    return "BENNU_IMPL_NOT_EQUALS_DOUBLE";
+  case PrimitiveImplementation::odd_integer:
+    return "BENNU_IMPL_ODD_INT";
+  case PrimitiveImplementation::even_integer:
+    return "BENNU_IMPL_EVEN_INT";
+  case PrimitiveImplementation::is_positive_integer:
+    return "BENNU_IMPL_IS_POSITIVE_INT";
+  case PrimitiveImplementation::is_positive_double:
+    return "BENNU_IMPL_IS_POSITIVE_DOUBLE";
+  case PrimitiveImplementation::is_negative_integer:
+    return "BENNU_IMPL_IS_NEGATIVE_INT";
+  case PrimitiveImplementation::is_negative_double:
+    return "BENNU_IMPL_IS_NEGATIVE_DOUBLE";
+  case PrimitiveImplementation::less_than_integer:
+    return "BENNU_IMPL_LESS_THAN_INT";
+  case PrimitiveImplementation::less_than_double:
+    return "BENNU_IMPL_LESS_THAN_DOUBLE";
+  case PrimitiveImplementation::greater_than_integer:
+    return "BENNU_IMPL_GREATER_THAN_INT";
+  case PrimitiveImplementation::greater_than_double:
+    return "BENNU_IMPL_GREATER_THAN_DOUBLE";
   case PrimitiveImplementation::none:
     break;
   }
@@ -2527,6 +2557,24 @@ std::string_view c_primitive_id_name(PrimitiveId id) {
     return "BENNU_PRIMITIVE_NOT";
   case PrimitiveId::iota:
     return "BENNU_PRIMITIVE_IOTA";
+  case PrimitiveId::logical_and:
+    return "BENNU_PRIMITIVE_AND";
+  case PrimitiveId::logical_or:
+    return "BENNU_PRIMITIVE_OR";
+  case PrimitiveId::not_equals:
+    return "BENNU_PRIMITIVE_NOT_EQUALS";
+  case PrimitiveId::odd:
+    return "BENNU_PRIMITIVE_ODD";
+  case PrimitiveId::even:
+    return "BENNU_PRIMITIVE_EVEN";
+  case PrimitiveId::is_positive:
+    return "BENNU_PRIMITIVE_IS_POSITIVE";
+  case PrimitiveId::is_negative:
+    return "BENNU_PRIMITIVE_IS_NEGATIVE";
+  case PrimitiveId::less_than:
+    return "BENNU_PRIMITIVE_LESS_THAN";
+  case PrimitiveId::greater_than:
+    return "BENNU_PRIMITIVE_GREATER_THAN";
   }
   return "BENNU_PRIMITIVE_NONE";
 }

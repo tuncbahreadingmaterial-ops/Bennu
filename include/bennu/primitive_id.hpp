@@ -11,6 +11,15 @@ enum class PrimitiveId : std::uint8_t {
   equals = 2,
   logical_not = 3,
   iota = 4,
+  logical_and = 5,
+  logical_or = 6,
+  not_equals = 7,
+  odd = 8,
+  even = 9,
+  is_positive = 10,
+  is_negative = 11,
+  less_than = 12,
+  greater_than = 13,
 };
 
 } // namespace bennu
