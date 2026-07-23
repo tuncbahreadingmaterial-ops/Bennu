@@ -542,6 +542,7 @@ enum class RewriteNodeKind {
   scalar_literal,
   vector_literal,
   parameter_reference,
+  unresolved_name,
   primitive_call,
 };
 
@@ -579,6 +580,7 @@ struct RewriteNode {
   std::size_t element_count;
   std::size_t first_element_span;
   std::size_t call_index;
+  RewriteSpan declaration_name_span{};
 };
 
 struct RewriteCall {
@@ -598,10 +600,29 @@ struct RewriteDiagnostic {
   RewriteSpan primary;
   RewriteSpan context;
   RewriteSpan related;
+  std::optional<ParameterErrorReason> parameter_reason{};
+};
+
+struct RewriteParameterDeclaration {
+  std::string name;
+  ScalarType type;
+  RewriteSpan span;
+  RewriteSpan name_span;
+  RewriteSpan type_span;
+};
+
+struct RewriteParameterHeader {
+  bool present;
+  RewriteSpan span;
+  RewriteSpan keyword_span;
+  RewriteSpan opening_span;
+  RewriteSpan closing_span;
+  std::vector<RewriteParameterDeclaration> declarations;
 };
 
 struct RewriteProgram {
   std::string source;
+  RewriteParameterHeader parameter_header;
   std::vector<RewriteNode> nodes;
   std::vector<std::size_t> arguments;
   std::vector<RewriteSpan> argument_spans;
@@ -681,6 +702,14 @@ void set_diagnostic(RewriteParseResult &result, RewriteParseError error,
                     RewriteSpan related) {
   result.ok = false;
   result.diagnostic = RewriteDiagnostic{error, primary, context, related};
+}
+
+void set_parameter_diagnostic(RewriteParseResult &result,
+                              ParameterErrorReason reason,
+                              RewriteParseError error, RewriteSpan primary,
+                              RewriteSpan context, RewriteSpan related) {
+  set_diagnostic(result, error, primary, context, related);
+  result.diagnostic.parameter_reason = reason;
 }
 
 RewriteSpan delimited_context_span(const RewriteTokens &tokens,
@@ -992,6 +1021,232 @@ bool token_starts_expression(RewriteTokenKind kind) {
          kind == RewriteTokenKind::invalid;
 }
 
+std::string_view rewrite_token_spelling(const RewriteTokens &tokens,
+                                        const RewriteToken &token) {
+  const std::size_t begin = token.span.begin.offset - 1U;
+  const std::size_t size = token.span.end.offset - token.span.begin.offset;
+  return std::string_view(tokens.source).substr(begin, size);
+}
+
+std::optional<ScalarType> parameter_type(RewriteTokenKind kind) {
+  if (kind == RewriteTokenKind::bool_type) {
+    return ScalarType::boolean;
+  }
+  if (kind == RewriteTokenKind::int_type) {
+    return ScalarType::integer;
+  }
+  if (kind == RewriteTokenKind::double_type) {
+    return ScalarType::double_precision;
+  }
+  return std::nullopt;
+}
+
+bool parameter_name_spelling(std::string_view spelling) {
+  if (spelling.empty() || !is_lowercase(spelling.front())) {
+    return false;
+  }
+  for (const char byte : spelling.substr(1U)) {
+    if (!is_lowercase(byte) && !is_digit(byte) && byte != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool parse_parameter_header(const RewriteTokens &tokens,
+                            std::size_t &token_index,
+                            RewriteParseResult &result) {
+  std::size_t first = token_index;
+  while (first < tokens.tokens.size() &&
+         (tokens.tokens[first].kind == RewriteTokenKind::horizontal_space ||
+          tokens.tokens[first].kind == RewriteTokenKind::line_terminator)) {
+    ++first;
+  }
+  if (first == tokens.tokens.size() ||
+      tokens.tokens[first].kind != RewriteTokenKind::name ||
+      rewrite_token_spelling(tokens, tokens.tokens[first]) != "parameters") {
+    return true;
+  }
+
+  const RewriteToken &keyword = tokens.tokens[first];
+  if (first + 1U >= tokens.tokens.size() ||
+      tokens.tokens[first + 1U].kind != RewriteTokenKind::left_bracket) {
+    const RewriteSpan primary =
+        first + 1U < tokens.tokens.size()
+            ? tokens.tokens[first + 1U].span
+            : insertion_span(tokens.end);
+    set_parameter_diagnostic(
+        result, ParameterErrorReason::expected_header_open,
+        RewriteParseError::expected_expression, primary, keyword.span,
+        keyword.span);
+    return false;
+  }
+
+  RewriteParameterHeader &header = result.program.parameter_header;
+  header.present = true;
+  header.keyword_span = keyword.span;
+  header.opening_span = tokens.tokens[first + 1U].span;
+  std::size_t index = first + 2U;
+  while (index < tokens.tokens.size() &&
+         (tokens.tokens[index].kind == RewriteTokenKind::horizontal_space ||
+          tokens.tokens[index].kind == RewriteTokenKind::line_terminator)) {
+    ++index;
+  }
+  while (index < tokens.tokens.size() &&
+         tokens.tokens[index].kind != RewriteTokenKind::right_bracket) {
+    const RewriteToken &name = tokens.tokens[index];
+    const std::string_view name_spelling = rewrite_token_spelling(tokens, name);
+    if (!parameter_name_spelling(name_spelling)) {
+      const ParameterErrorReason reason = parameter_type(name.kind).has_value()
+                                              ? ParameterErrorReason::expected_parameter_name
+                                              : ParameterErrorReason::unexpected_header_token;
+      set_parameter_diagnostic(
+          result, reason,
+          RewriteParseError::expected_expression, name.span,
+          RewriteSpan{keyword.span.begin, name.span.end}, header.opening_span);
+      return false;
+    }
+    ++index;
+    if (index == tokens.tokens.size() ||
+        (tokens.tokens[index].kind != RewriteTokenKind::horizontal_space &&
+         tokens.tokens[index].kind != RewriteTokenKind::line_terminator)) {
+      const RewriteSpan primary = index == tokens.tokens.size()
+                                      ? insertion_span(tokens.end)
+                                      : tokens.tokens[index].span;
+      if (index == tokens.tokens.size() ||
+          tokens.tokens[index].kind == RewriteTokenKind::right_bracket) {
+        set_parameter_diagnostic(
+            result, ParameterErrorReason::expected_parameter_type,
+            RewriteParseError::expected_expression,
+            index == tokens.tokens.size()
+                ? primary
+                : insertion_span(tokens.tokens[index].span.begin),
+            name.span, name.span);
+      } else {
+        set_parameter_diagnostic(
+            result, ParameterErrorReason::unexpected_header_token,
+            RewriteParseError::expected_expression, primary, name.span,
+            name.span);
+      }
+      return false;
+    }
+    while (index < tokens.tokens.size() &&
+           (tokens.tokens[index].kind == RewriteTokenKind::horizontal_space ||
+            tokens.tokens[index].kind == RewriteTokenKind::line_terminator)) {
+      ++index;
+    }
+    if (index == tokens.tokens.size()) {
+      const RewriteSpan primary = insertion_span(tokens.end);
+      set_parameter_diagnostic(
+          result, ParameterErrorReason::expected_parameter_type,
+          RewriteParseError::expected_expression, primary, name.span,
+          name.span);
+      return false;
+    }
+    const RewriteToken &type = tokens.tokens[index];
+    const std::optional<ScalarType> scalar_type = parameter_type(type.kind);
+    if (!scalar_type.has_value()) {
+      const bool closing = type.kind == RewriteTokenKind::right_bracket;
+      set_parameter_diagnostic(
+          result,
+          closing ? ParameterErrorReason::expected_parameter_type
+                  : ParameterErrorReason::unexpected_header_token,
+          RewriteParseError::expected_expression,
+          closing ? insertion_span(type.span.begin) : type.span, name.span,
+          name.span);
+      return false;
+    }
+    header.declarations.push_back(RewriteParameterDeclaration{
+        std::string(name_spelling), *scalar_type,
+        RewriteSpan{name.span.begin, type.span.end}, name.span, type.span});
+    ++index;
+    if (index < tokens.tokens.size() &&
+        tokens.tokens[index].kind != RewriteTokenKind::right_bracket &&
+        tokens.tokens[index].kind != RewriteTokenKind::horizontal_space &&
+        tokens.tokens[index].kind != RewriteTokenKind::line_terminator) {
+      set_parameter_diagnostic(
+          result, ParameterErrorReason::unexpected_header_token,
+          RewriteParseError::expected_expression, tokens.tokens[index].span,
+          RewriteSpan{keyword.span.begin, tokens.tokens[index].span.end},
+          type.span);
+      return false;
+    }
+    while (index < tokens.tokens.size() &&
+           (tokens.tokens[index].kind == RewriteTokenKind::horizontal_space ||
+            tokens.tokens[index].kind == RewriteTokenKind::line_terminator)) {
+      ++index;
+    }
+  }
+  if (index == tokens.tokens.size()) {
+    const RewriteSpan primary = insertion_span(tokens.end);
+    set_parameter_diagnostic(
+        result, ParameterErrorReason::missing_header_close,
+        RewriteParseError::missing_delimiter, primary,
+        RewriteSpan{keyword.span.begin, tokens.end}, header.opening_span);
+    return false;
+  }
+  header.closing_span = tokens.tokens[index].span;
+  header.span = RewriteSpan{keyword.span.begin, header.closing_span.end};
+  ++index;
+  while (index < tokens.tokens.size() &&
+         tokens.tokens[index].kind == RewriteTokenKind::horizontal_space) {
+    ++index;
+  }
+  if (index < tokens.tokens.size() &&
+      tokens.tokens[index].kind != RewriteTokenKind::line_terminator) {
+    set_parameter_diagnostic(
+        result, ParameterErrorReason::trailing_header_bytes,
+        RewriteParseError::trailing_input, tokens.tokens[index].span,
+        header.span, header.span);
+    return false;
+  }
+  if (index < tokens.tokens.size()) {
+    ++index;
+  }
+  token_index = index;
+  return true;
+}
+
+std::optional<std::size_t> find_parameter(
+    const RewriteProgram &program, std::string_view name) {
+  for (std::size_t index = 0U;
+       index < program.parameter_header.declarations.size(); ++index) {
+    if (program.parameter_header.declarations[index].name == name) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
+RewriteNode parameter_reference_node(
+    const RewriteParameterDeclaration &declaration, std::size_t parameter_index,
+    RewriteSpan reference_span) {
+  return RewriteNode{RewriteNodeKind::parameter_reference,
+                     reference_span,
+                     declaration.type,
+                     false,
+                     0,
+                     0.0,
+                     parameter_index,
+                     0U,
+                     0U,
+                     0U,
+                     declaration.name_span};
+}
+
+RewriteNode unresolved_name_node(RewriteSpan span) {
+  return RewriteNode{RewriteNodeKind::unresolved_name,
+                     span,
+                     ScalarType::boolean,
+                     false,
+                     0,
+                     0.0,
+                     0U,
+                     0U,
+                     0U,
+                     0U};
+}
+
 RewriteParseResult parse_rewrite(std::string_view source) {
   RewriteParseResult result{};
   RewriteTokens tokens = tokenize_rewrite(source);
@@ -1005,6 +1260,10 @@ RewriteParseResult parse_rewrite(std::string_view source) {
   std::size_t token_index = 0U;
   std::size_t completed_node = 0U;
   bool have_expression = false;
+
+  if (!parse_parameter_header(tokens, token_index, result)) {
+    return result;
+  }
 
   while (true) {
     if (have_expression) {
@@ -1173,6 +1432,21 @@ RewriteParseResult parse_rewrite(std::string_view source) {
     }
 
     const RewriteToken &token = tokens.tokens[token_index];
+    if (contexts.empty() && token.kind == RewriteTokenKind::name &&
+        rewrite_token_spelling(tokens, token) == "parameters") {
+      const bool had_header = result.program.parameter_header.present;
+      const RewriteSpan related = had_header
+                                      ? result.program.parameter_header.span
+                                      : result.program.nodes[
+                                            result.program.roots.front()]
+                                            .span;
+      set_parameter_diagnostic(
+          result,
+          had_header ? ParameterErrorReason::second_parameter_header
+                     : ParameterErrorReason::parameter_header_after_root,
+          RewriteParseError::trailing_input, token.span, token.span, related);
+      return result;
+    }
     if (is_scalar_token(token.kind)) {
       result.program.nodes.push_back(scalar_node(token));
       completed_node = result.program.nodes.size() - 1U;
@@ -1224,6 +1498,29 @@ RewriteParseResult parse_rewrite(std::string_view source) {
       return result;
     }
     if (token.kind == RewriteTokenKind::name) {
+      const std::optional<std::size_t> declared_parameter =
+          find_parameter(result.program, rewrite_token_spelling(tokens, token));
+      const bool inside_bracket =
+          !contexts.empty() &&
+          contexts.back().kind == RewriteContextKind::bracket_call;
+      const bool adjacent_bracket =
+          token_index + 1U < tokens.tokens.size() &&
+          tokens.tokens[token_index + 1U].kind ==
+              RewriteTokenKind::left_bracket;
+      const bool root_prefix =
+          contexts.empty() && token_index + 1U < tokens.tokens.size() &&
+          tokens.tokens[token_index + 1U].kind ==
+              RewriteTokenKind::horizontal_space;
+      if (declared_parameter.has_value() && !adjacent_bracket &&
+          (inside_bracket || !root_prefix)) {
+        result.program.nodes.push_back(parameter_reference_node(
+            result.program.parameter_header.declarations[*declared_parameter],
+            *declared_parameter, token.span));
+        completed_node = result.program.nodes.size() - 1U;
+        ++token_index;
+        have_expression = true;
+        continue;
+      }
       if (token_index + 1U < tokens.tokens.size() &&
           tokens.tokens[token_index + 1U].kind ==
               RewriteTokenKind::left_bracket) {
@@ -1285,10 +1582,11 @@ RewriteParseResult parse_rewrite(std::string_view source) {
         }
         continue;
       }
-      set_diagnostic(result,
-                     RewriteParseError::primitive_requires_application,
-                     token.span, token.span, token.span);
-      return result;
+      result.program.nodes.push_back(unresolved_name_node(token.span));
+      completed_node = result.program.nodes.size() - 1U;
+      ++token_index;
+      have_expression = true;
+      continue;
     }
     if (token.kind == RewriteTokenKind::malformed_literal) {
       set_diagnostic(
@@ -1325,8 +1623,41 @@ struct RewriteResolutionResult {
 };
 
 RewriteResolutionResult resolve_rewrite_primitives(RewriteProgram &program) {
+  for (std::size_t index = 0U;
+       index < program.parameter_header.declarations.size(); ++index) {
+    const RewriteParameterDeclaration &declaration =
+        program.parameter_header.declarations[index];
+    for (std::size_t earlier = 0U; earlier < index; ++earlier) {
+      if (program.parameter_header.declarations[earlier].name ==
+          declaration.name) {
+        RewriteDiagnostic diagnostic{
+            RewriteParseError::unknown_primitive, declaration.name_span,
+            program.parameter_header.span,
+            program.parameter_header.declarations[earlier].name_span};
+        diagnostic.parameter_reason =
+            ParameterErrorReason::duplicate_parameter_name;
+        return RewriteResolutionResult{false, std::move(diagnostic)};
+      }
+    }
+    const bool reserved =
+        declaration.name == "parameters" || declaration.name == "fanout" ||
+        declaration.name == "true" || declaration.name == "false" ||
+        declaration.name == "inf" || declaration.name == "nan" ||
+        find_primitive(declaration.name) != nullptr;
+    if (reserved) {
+      RewriteDiagnostic diagnostic{RewriteParseError::unknown_primitive,
+                                   declaration.name_span,
+                                   program.parameter_header.span,
+                                   declaration.name_span};
+      diagnostic.parameter_reason =
+          ParameterErrorReason::reserved_parameter_name;
+      return RewriteResolutionResult{false, std::move(diagnostic)};
+    }
+  }
+
   std::vector<PrimitiveId> resolved_ids;
   resolved_ids.reserve(program.calls.size());
+  std::optional<RewriteDiagnostic> first_unknown;
   for (const RewriteCall &call : program.calls) {
     const std::size_t name_begin = call.name_span.begin.offset - 1U;
     const std::size_t name_size =
@@ -1334,12 +1665,31 @@ RewriteResolutionResult resolve_rewrite_primitives(RewriteProgram &program) {
     const std::string_view name(program.source.data() + name_begin, name_size);
     const PrimitiveDescriptor *descriptor = find_primitive(name);
     if (descriptor == nullptr) {
-      return RewriteResolutionResult{
-          false,
-          RewriteDiagnostic{RewriteParseError::unknown_primitive,
-                            call.name_span, call.span, call.name_span}};
+      RewriteDiagnostic diagnostic{RewriteParseError::unknown_primitive,
+                                   call.name_span, call.span, call.name_span};
+      if (!first_unknown.has_value() ||
+          diagnostic.primary.begin.offset <
+              first_unknown->primary.begin.offset) {
+        first_unknown = std::move(diagnostic);
+      }
+      resolved_ids.push_back(PrimitiveId::inc);
+      continue;
     }
     resolved_ids.push_back(descriptor->id);
+  }
+  for (const RewriteNode &node : program.nodes) {
+    if (node.kind != RewriteNodeKind::unresolved_name) {
+      continue;
+    }
+    RewriteDiagnostic diagnostic{RewriteParseError::unknown_primitive,
+                                 node.span, node.span, node.span};
+    if (!first_unknown.has_value() ||
+        diagnostic.primary.begin.offset < first_unknown->primary.begin.offset) {
+      first_unknown = std::move(diagnostic);
+    }
+  }
+  if (first_unknown.has_value()) {
+    return RewriteResolutionResult{false, std::move(*first_unknown)};
   }
   for (std::size_t index = 0U; index < program.calls.size(); ++index) {
     program.calls[index].primitive = resolved_ids[index];
@@ -1413,6 +1763,7 @@ struct RewriteLoweringNode {
   RewriteSpan source_span;
   SourceLocation source_location;
   std::string_view admission_point;
+  RewriteSpan declaration_name_span;
 };
 
 struct RewriteLoweringProgram {
@@ -1458,6 +1809,134 @@ EvaluationResources make_rewrite_resources(
 
 SourceLocation rewrite_source_location(RewritePosition position) {
   return SourceLocation{position.offset, position.line, position.column};
+}
+
+SourceSpan rewrite_source_span(RewriteSpan span) {
+  return SourceSpan{rewrite_source_location(span.begin),
+                    rewrite_source_location(span.end)};
+}
+
+ArgumentScalarType argument_scalar_type(ScalarType type) {
+  switch (type) {
+  case ScalarType::boolean:
+    return ArgumentScalarType::boolean;
+  case ScalarType::integer:
+    return ArgumentScalarType::integer;
+  case ScalarType::double_precision:
+    return ArgumentScalarType::double_precision;
+  }
+  return ArgumentScalarType::unknown;
+}
+
+Error argument_error(const RewriteProgram &program, ArgumentErrorReason reason,
+                     std::size_t supplied_count, std::size_t position) {
+  const std::size_t required_count =
+      program.parameter_header.declarations.size();
+  SourceLocation location = program.parameter_header.present
+                                ? rewrite_source_location(
+                                      program.parameter_header.keyword_span.begin)
+                                : SourceLocation{1U, 1U, 1U};
+  ArgumentErrorContext context{reason, required_count, supplied_count, position};
+  if (position >= 1U && position <= required_count) {
+    const RewriteParameterDeclaration &declaration =
+        program.parameter_header.declarations[position - 1U];
+    location = rewrite_source_location(declaration.name_span.begin);
+    context.parameter_name = declaration.name;
+    context.expected_type = declaration.type;
+    context.declaration_span = rewrite_source_span(declaration.span);
+  }
+  Error error = make_error(ErrorKind::argument_error, location);
+  error.argument = std::move(context);
+  error.context_span =
+      program.parameter_header.present
+          ? rewrite_source_span(program.parameter_header.span)
+          : SourceSpan{SourceLocation{1U, 1U, 1U},
+                       SourceLocation{1U, 1U, 1U}};
+  if (position >= 1U && position <= required_count) {
+    const RewriteParameterDeclaration &declaration =
+        program.parameter_header.declarations[position - 1U];
+    error.primary_span = rewrite_source_span(declaration.name_span);
+    error.related_span = rewrite_source_span(declaration.span);
+  } else if (program.parameter_header.present) {
+    error.primary_span =
+        rewrite_source_span(program.parameter_header.keyword_span);
+  } else {
+    error.primary_span = SourceSpan{SourceLocation{1U, 1U, 1U},
+                                    SourceLocation{1U, 1U, 1U}};
+  }
+  return error;
+}
+
+Error validate_parameter_values(const RewriteProgram &program,
+                                std::span<const Value> values) {
+  const std::size_t required_count =
+      program.parameter_header.declarations.size();
+  if (values.size() < required_count) {
+    return argument_error(program, ArgumentErrorReason::missing, values.size(),
+                          values.size() + 1U);
+  }
+  if (values.size() > required_count) {
+    return argument_error(program, ArgumentErrorReason::extra, values.size(),
+                          required_count + 1U);
+  }
+
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    const Value &value = values[index];
+    const std::size_t position = index + 1U;
+    if (value.container != ContainerKind::scalar &&
+        value.container != ContainerKind::vector) {
+      Error error = argument_error(
+          program, ArgumentErrorReason::invalid_typed_value, values.size(),
+          position);
+      error.argument->actual_container = ArgumentContainer::unknown;
+      error.argument->invalid_value_invariant =
+          ValueInvariant::unknown_container;
+      return error;
+    }
+    if (value.container == ContainerKind::vector) {
+      Error error = argument_error(
+          program, ArgumentErrorReason::container_mismatch, values.size(),
+          position);
+      error.argument->actual_container = ArgumentContainer::vector;
+      return error;
+    }
+
+    const ArgumentScalarType actual_type =
+        argument_scalar_type(value.scalar.type);
+    if (actual_type == ArgumentScalarType::unknown) {
+      Error error = argument_error(
+          program, ArgumentErrorReason::invalid_typed_value, values.size(),
+          position);
+      error.argument->actual_container = ArgumentContainer::scalar;
+      error.argument->actual_type = ArgumentScalarType::unknown;
+      error.argument->invalid_value_invariant =
+          ValueInvariant::unknown_scalar_type;
+      return error;
+    }
+
+    const ValueValidationResult validation = validate_value(value);
+    if (!validation.ok) {
+      Error error = argument_error(
+          program, ArgumentErrorReason::invalid_typed_value, values.size(),
+          position);
+      error.argument->actual_container = ArgumentContainer::scalar;
+      error.argument->actual_type = actual_type;
+      error.argument->invalid_value_invariant =
+          validation.invariant == ValueInvariant::noncanonical_nan
+              ? ValueInvariant::noncanonical_nan
+              : ValueInvariant::inactive_scalar_field;
+      return error;
+    }
+    if (value.scalar.type !=
+        program.parameter_header.declarations[index].type) {
+      Error error = argument_error(
+          program, ArgumentErrorReason::type_mismatch, values.size(), position);
+      error.argument->actual_container = ArgumentContainer::scalar;
+      error.argument->actual_type = actual_type;
+      return error;
+    }
+  }
+  return make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U});
 }
 
 RewriteEvaluationDiagnostic empty_rewrite_evaluation_diagnostic() {
@@ -1658,7 +2137,8 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       node.span,
       node.span,
       rewrite_source_location(node.span.begin),
-      vector ? std::string_view{"vector-literal"} : std::string_view{}};
+      vector ? std::string_view{"vector-literal"} : std::string_view{},
+      node.declaration_name_span};
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
@@ -2143,11 +2623,41 @@ Error public_error_from_diagnostic(
     if (error.message.empty()) {
       error.message = semantic_error_message(error);
     }
+    if (!error.primary_span.has_value()) {
+      error.primary_span = rewrite_source_span(diagnostic.primary);
+    }
+    if (!error.context_span.has_value()) {
+      error.context_span = rewrite_source_span(diagnostic.context);
+    }
+    if (!error.related_span.has_value()) {
+      error.related_span = rewrite_source_span(diagnostic.related);
+    }
     return error;
   }
 
   if (diagnostic.stage == RewriteEvaluationStage::parse ||
       diagnostic.stage == RewriteEvaluationStage::resolution) {
+    if (diagnostic.rewrite.parameter_reason.has_value()) {
+      const ParameterErrorReason reason =
+          *diagnostic.rewrite.parameter_reason;
+      const bool declaration_error =
+          reason == ParameterErrorReason::duplicate_parameter_name ||
+          reason == ParameterErrorReason::reserved_parameter_name;
+      Error error = make_error(
+          declaration_error ? ErrorKind::invalid_parameter_declaration
+                            : ErrorKind::syntax_error,
+          rewrite_source_location(diagnostic.primary.begin),
+          declaration_error ? "invalid parameter declaration"
+                            : "invalid parameter header");
+      error.parameter = ParameterErrorContext{
+          reason, rewrite_source_span(diagnostic.primary),
+          rewrite_source_span(diagnostic.context),
+          rewrite_source_span(diagnostic.related)};
+      error.primary_span = error.parameter->primary_span;
+      error.context_span = error.parameter->context_span;
+      error.related_span = error.parameter->related_span;
+      return error;
+    }
     const RewriteParseError parse_error = diagnostic.rewrite.error;
     Error error = make_error(
         parse_error_kind(parse_error),
@@ -2158,6 +2668,9 @@ Error public_error_from_diagnostic(
       error.primitive = PrimitiveErrorContext{name, std::nullopt};
       error.message += " '" + name + "'";
     }
+    error.primary_span = rewrite_source_span(diagnostic.primary);
+    error.context_span = rewrite_source_span(diagnostic.context);
+    error.related_span = rewrite_source_span(diagnostic.related);
     return error;
   }
 
@@ -2196,7 +2709,7 @@ CBackendConfiguration c_backend_configuration(
 
 RewriteEvaluationResult evaluate_rewrite_source_impl(
     std::string_view source, const RewriteEvaluationCreationData &creation,
-    bool require_single_root) {
+    bool require_single_root, std::span<const Value> parameter_values) {
   EvaluationResources resources = make_rewrite_resources(creation);
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
@@ -2207,6 +2720,20 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.primary = parsed.diagnostic.primary;
     diagnostic.context = parsed.diagnostic.context;
     diagnostic.related = parsed.diagnostic.related;
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+  }
+
+  if (require_single_root && parsed.program.parameter_header.present) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::parse;
+    diagnostic.primary = parsed.program.parameter_header.keyword_span;
+    diagnostic.context = parsed.program.parameter_header.span;
+    diagnostic.related = parsed.program.parameter_header.keyword_span;
+    diagnostic.rewrite = RewriteDiagnostic{
+        RewriteParseError::trailing_input, diagnostic.primary,
+        diagnostic.context, diagnostic.related,
+        ParameterErrorReason::program_only_parameter_header};
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
@@ -2243,9 +2770,11 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.primary = resolved.diagnostic.primary;
     diagnostic.context = resolved.diagnostic.context;
     diagnostic.related = resolved.diagnostic.related;
-    diagnostic.error = make_error(
-        ErrorKind::unknown_name,
-        rewrite_source_location(resolved.diagnostic.primary.begin));
+    if (!resolved.diagnostic.parameter_reason.has_value()) {
+      diagnostic.error = make_error(
+          ErrorKind::unknown_name,
+          rewrite_source_location(resolved.diagnostic.primary.begin));
+    }
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
@@ -2262,6 +2791,21 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   if (!lowered.ok) {
     return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
                                       0U);
+  }
+
+  Error parameter_error =
+      validate_parameter_values(parsed.program, parameter_values);
+  if (parameter_error.kind != ErrorKind::none) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.primary = parsed.program.parameter_header.present
+                             ? parsed.program.parameter_header.keyword_span
+                             : insertion_span(RewritePosition{1U, 1U, 1U});
+    diagnostic.context = parsed.program.parameter_header.present
+                             ? parsed.program.parameter_header.span
+                             : insertion_span(RewritePosition{1U, 1U, 1U});
+    diagnostic.error = std::move(parameter_error);
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
   WorkChargeResult resource_admission = charge_work(
@@ -2306,6 +2850,18 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     const RewriteNode &node = parsed.program.nodes[node_index];
     if (node.kind == RewriteNodeKind::scalar_literal) {
       node_values[node_index] = scalar_literal_value(node);
+      node_live[node_index] = std::uint8_t{1U};
+      continue;
+    }
+    if (node.kind == RewriteNodeKind::parameter_reference) {
+      const ScalarValue &parameter = parameter_values[node.first_element].scalar;
+      if (parameter.type == ScalarType::boolean) {
+        node_values[node_index] = make_bool_value(parameter.boolean);
+      } else if (parameter.type == ScalarType::integer) {
+        node_values[node_index] = make_int_value(parameter.integer);
+      } else {
+        node_values[node_index] = make_double_value(parameter.double_precision);
+      }
       node_live[node_index] = std::uint8_t{1U};
       continue;
     }
@@ -2442,7 +2998,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
 
 RewriteEvaluationResult evaluate_rewrite_source(
     std::string_view source, const RewriteEvaluationCreationData &creation) {
-  return evaluate_rewrite_source_impl(source, creation, false);
+  return evaluate_rewrite_source_impl(source, creation, false, {});
 }
 
 void append_c_unsigned(std::string &source, std::size_t value) {
@@ -2783,6 +3339,22 @@ CEmissionResult emit_rewrite_c_source_impl(
     diagnostic.primary = parsed.diagnostic.primary;
     diagnostic.context = parsed.diagnostic.context;
     diagnostic.related = parsed.diagnostic.related;
+    return CEmissionResult{
+        false, {}, public_error_from_diagnostic(source, diagnostic)};
+  }
+  if (parsed.program.parameter_header.present) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::parse;
+    diagnostic.primary = parsed.program.parameter_header.keyword_span;
+    diagnostic.context = parsed.program.parameter_header.span;
+    diagnostic.related = parsed.program.parameter_header.keyword_span;
+    diagnostic.rewrite = RewriteDiagnostic{
+        RewriteParseError::none,
+        diagnostic.primary,
+        diagnostic.context,
+        diagnostic.related,
+        ParameterErrorReason::unsupported_parameterized_surface};
     return CEmissionResult{
         false, {}, public_error_from_diagnostic(source, diagnostic)};
   }
@@ -3259,6 +3831,9 @@ std::string_view node_kind_name(RewriteNodeKind kind) {
   }
   if (kind == RewriteNodeKind::parameter_reference) {
     return "parameter_reference";
+  }
+  if (kind == RewriteNodeKind::unresolved_name) {
+    return "unresolved_name";
   }
   return "primitive_call";
 }
@@ -3778,8 +4353,6 @@ TEST_CASE("rewrite parser rejects normative invalid syntax at exact spans") {
       {"add[1 2)", RewriteParseError::mismatched_delimiter, 8U, 9U},
       {"(1 2", RewriteParseError::missing_delimiter, 5U, 5U},
       {"]", RewriteParseError::mismatched_delimiter, 1U, 2U},
-      {"inc5", RewriteParseError::primitive_requires_application, 1U, 5U},
-      {"inc\n5", RewriteParseError::primitive_requires_application, 1U, 4U},
       {"Int( )", RewriteParseError::invalid_vector_element, 1U, 4U},
       {"(1, 2)", RewriteParseError::invalid_byte, 3U, 4U},
       {"true false", RewriteParseError::trailing_input, 6U, 11U},
@@ -3940,6 +4513,41 @@ TEST_CASE("typed lowering is value independent and retains dynamic shape data") 
   CHECK(lowered.program.nodes[4].parameter_index == 7U);
   CHECK(lowered.program.nodes[5].element_type == ScalarType::double_precision);
   CHECK(lowered.program.nodes[5].parameter_index == 8U);
+}
+
+TEST_CASE("PARG-004-PARAMETER-LOWERING-METADATA") {
+  RewriteParseResult parsed =
+      parse_rewrite("parameters[n Int]\niota[n]");
+  REQUIRE(parsed.ok);
+  REQUIRE(parsed.program.parameter_header.present);
+  REQUIRE(parsed.program.parameter_header.declarations.size() == 1U);
+  CHECK(span_is(parsed.program.parameter_header.span, 1U, 1U, 1U, 18U, 1U,
+                18U));
+  CHECK(span_is(parsed.program.parameter_header.declarations[0].span, 12U, 1U,
+                12U, 17U, 1U, 17U));
+  CHECK(span_is(parsed.program.parameter_header.declarations[0].name_span, 12U,
+                1U, 12U, 13U, 1U, 13U));
+  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+  REQUIRE(parsed.program.nodes.size() == 2U);
+  const RewriteNode &reference = parsed.program.nodes[0];
+  CHECK(reference.kind == RewriteNodeKind::parameter_reference);
+  CHECK(reference.element_type == ScalarType::integer);
+  CHECK(reference.first_element == 0U);
+  CHECK(span_is(reference.span, 24U, 2U, 6U, 25U, 2U, 7U));
+  CHECK(span_is(reference.declaration_name_span, 12U, 1U, 12U, 13U, 1U,
+                13U));
+
+  const RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  REQUIRE(lowered.ok);
+  REQUIRE(lowered.program.nodes.size() == 2U);
+  const RewriteLoweringNode &lowered_reference = lowered.program.nodes[0];
+  CHECK(lowered_reference.kind == RewriteNodeKind::parameter_reference);
+  CHECK(lowered_reference.parameter_index == 0U);
+  CHECK(lowered_reference.element_type == ScalarType::integer);
+  CHECK(lowered_reference.cardinality == RewriteCardinality::scalar);
+  CHECK(span_is(lowered_reference.source_span, 24U, 2U, 6U, 25U, 2U, 7U));
+  CHECK(span_is(lowered_reference.declaration_name_span, 12U, 1U, 12U, 13U,
+                1U, 13U));
 }
 
 TEST_CASE("typed lowering applies whole-program phase precedence") {
@@ -4930,7 +5538,7 @@ ValueResult evaluate_expression(
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
-      evaluate_rewrite_source_impl(source, creation, true);
+      evaluate_rewrite_source_impl(source, creation, true, {});
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
@@ -4953,16 +5561,30 @@ ValueResult evaluate_expression(
 }
 
 ProgramResult evaluate_source(std::string_view source) {
-  return evaluate_source(source, trusted_local_evaluation_configuration());
+  return evaluate_source(source, std::span<const Value>{},
+                         trusted_local_evaluation_configuration());
 }
 
 ProgramResult evaluate_source(
     std::string_view source,
     const EvaluationConfiguration &configuration) {
+  return evaluate_source(source, std::span<const Value>{}, configuration);
+}
+
+ProgramResult evaluate_source(std::string_view source,
+                              std::span<const Value> arguments) {
+  return evaluate_source(source, arguments,
+                         trusted_local_evaluation_configuration());
+}
+
+ProgramResult evaluate_source(
+    std::string_view source, std::span<const Value> arguments,
+    const EvaluationConfiguration &configuration) {
   const RewriteEvaluationCreationData creation{
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
-  RewriteEvaluationResult evaluated = evaluate_rewrite_source(source, creation);
+  RewriteEvaluationResult evaluated =
+      evaluate_rewrite_source_impl(source, creation, false, arguments);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
