@@ -17,16 +17,26 @@ enum class LiftingMode {
 };
 
 enum class PrimitiveImplementation {
-  none,
-  inc_integer,
-  inc_double,
-  add_integer,
-  add_double,
-  equals_boolean,
-  equals_integer,
-  equals_double,
-  logical_not_boolean,
-  iota_integer,
+  none = 0,
+  inc_integer = 1,
+  inc_double = 2,
+  add_integer = 3,
+  add_double = 4,
+  equals_boolean = 5,
+  equals_integer = 6,
+  equals_double = 7,
+  logical_not_boolean = 8,
+  iota_integer = 9,
+  dec_integer = 10,
+  dec_double = 11,
+  neg_integer = 12,
+  neg_double = 13,
+  abs_integer = 14,
+  abs_double = 15,
+  sub_integer = 16,
+  sub_double = 17,
+  mul_integer = 18,
+  mul_double = 19,
 };
 
 struct ValueType {

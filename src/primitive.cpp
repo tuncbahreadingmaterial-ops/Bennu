@@ -44,6 +44,36 @@ constexpr std::array<PrimitiveSignature, 2> add_signatures{{
     {double_parameters.data(), double_parameters.size(), scalar_double,
      PrimitiveImplementation::add_double},
 }};
+constexpr std::array<PrimitiveSignature, 2> dec_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_int,
+     PrimitiveImplementation::dec_integer},
+    {double_parameter.data(), double_parameter.size(), scalar_double,
+     PrimitiveImplementation::dec_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> neg_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_int,
+     PrimitiveImplementation::neg_integer},
+    {double_parameter.data(), double_parameter.size(), scalar_double,
+     PrimitiveImplementation::neg_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> abs_signatures{{
+    {int_parameter.data(), int_parameter.size(), scalar_int,
+     PrimitiveImplementation::abs_integer},
+    {double_parameter.data(), double_parameter.size(), scalar_double,
+     PrimitiveImplementation::abs_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> sub_signatures{{
+    {int_parameters.data(), int_parameters.size(), scalar_int,
+     PrimitiveImplementation::sub_integer},
+    {double_parameters.data(), double_parameters.size(), scalar_double,
+     PrimitiveImplementation::sub_double},
+}};
+constexpr std::array<PrimitiveSignature, 2> mul_signatures{{
+    {int_parameters.data(), int_parameters.size(), scalar_int,
+     PrimitiveImplementation::mul_integer},
+    {double_parameters.data(), double_parameters.size(), scalar_double,
+     PrimitiveImplementation::mul_double},
+}};
 constexpr std::array<PrimitiveSignature, 3> equals_signatures{{
     {bool_parameters.data(), bool_parameters.size(), scalar_bool,
      PrimitiveImplementation::equals_boolean},
@@ -61,7 +91,7 @@ constexpr std::array<PrimitiveSignature, 1> iota_signatures{{
      PrimitiveImplementation::iota_integer},
 }};
 
-constexpr std::array<PrimitiveDescriptor, 5> production_descriptors{{
+constexpr std::array<PrimitiveDescriptor, 10> production_descriptors{{
     {PrimitiveId::inc, "inc", LiftingMode::elementwise, inc_signatures.data(),
      inc_signatures.size()},
     {PrimitiveId::add, "add", LiftingMode::elementwise, add_signatures.data(),
@@ -72,6 +102,16 @@ constexpr std::array<PrimitiveDescriptor, 5> production_descriptors{{
      not_signatures.data(), not_signatures.size()},
     {PrimitiveId::iota, "iota", LiftingMode::none, iota_signatures.data(),
      iota_signatures.size()},
+    {PrimitiveId::dec, "dec", LiftingMode::elementwise, dec_signatures.data(),
+     dec_signatures.size()},
+    {PrimitiveId::neg, "neg", LiftingMode::elementwise, neg_signatures.data(),
+     neg_signatures.size()},
+    {PrimitiveId::abs, "abs", LiftingMode::elementwise, abs_signatures.data(),
+     abs_signatures.size()},
+    {PrimitiveId::sub, "sub", LiftingMode::elementwise, sub_signatures.data(),
+     sub_signatures.size()},
+    {PrimitiveId::mul, "mul", LiftingMode::elementwise, mul_signatures.data(),
+     mul_signatures.size()},
 }};
 
 PrimitiveTableValidationResult valid_table() {
@@ -174,6 +214,45 @@ bool implementation_matches(PrimitiveId id,
            signature.parameters[0].element == ScalarType::integer &&
            signature.result.container == ContainerKind::vector &&
            signature.result.element == ScalarType::integer;
+  case PrimitiveImplementation::dec_integer:
+    return id == PrimitiveId::dec &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::integer);
+  case PrimitiveImplementation::dec_double:
+    return id == PrimitiveId::dec &&
+           scalar_parameters_match({ScalarType::double_precision},
+                                   ScalarType::double_precision);
+  case PrimitiveImplementation::neg_integer:
+    return id == PrimitiveId::neg &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::integer);
+  case PrimitiveImplementation::neg_double:
+    return id == PrimitiveId::neg &&
+           scalar_parameters_match({ScalarType::double_precision},
+                                   ScalarType::double_precision);
+  case PrimitiveImplementation::abs_integer:
+    return id == PrimitiveId::abs &&
+           scalar_parameters_match({ScalarType::integer}, ScalarType::integer);
+  case PrimitiveImplementation::abs_double:
+    return id == PrimitiveId::abs &&
+           scalar_parameters_match({ScalarType::double_precision},
+                                   ScalarType::double_precision);
+  case PrimitiveImplementation::sub_integer:
+    return id == PrimitiveId::sub &&
+           scalar_parameters_match(
+               {ScalarType::integer, ScalarType::integer}, ScalarType::integer);
+  case PrimitiveImplementation::sub_double:
+    return id == PrimitiveId::sub &&
+           scalar_parameters_match(
+               {ScalarType::double_precision, ScalarType::double_precision},
+               ScalarType::double_precision);
+  case PrimitiveImplementation::mul_integer:
+    return id == PrimitiveId::mul &&
+           scalar_parameters_match(
+               {ScalarType::integer, ScalarType::integer}, ScalarType::integer);
+  case PrimitiveImplementation::mul_double:
+    return id == PrimitiveId::mul &&
+           scalar_parameters_match(
+               {ScalarType::double_precision, ScalarType::double_precision},
+               ScalarType::double_precision);
   }
   return false;
 }
@@ -607,15 +686,37 @@ bool binary64_is_infinity(double value) {
          binary64_exponent_mask;
 }
 
-bool strict_binary64_add(double left, double right, double &result) {
+bool binary64_is_zero(double value) {
+  return (std::bit_cast<std::uint64_t>(value) &
+          ~UINT64_C(0x8000000000000000)) == 0;
+}
+
+enum class StrictBinary64Operation : std::uint8_t {
+  add,
+  subtract,
+  multiply,
+};
+
+bool strict_binary64_arithmetic(double left, double right,
+                                StrictBinary64Operation operation,
+                                double &result) {
   if (binary64_is_nan(left) || binary64_is_nan(right)) {
     result = std::bit_cast<double>(canonical_nan_bits);
     return true;
   }
-  if (binary64_is_infinity(left) && binary64_is_infinity(right) &&
+  const bool signs_differ =
       ((std::bit_cast<std::uint64_t>(left) ^
         std::bit_cast<std::uint64_t>(right)) &
-       (UINT64_C(1) << 63U)) != 0) {
+       (UINT64_C(1) << 63U)) != 0;
+  const bool invalid_infinity_arithmetic =
+      binary64_is_infinity(left) && binary64_is_infinity(right) &&
+      ((operation == StrictBinary64Operation::add && signs_differ) ||
+       (operation == StrictBinary64Operation::subtract && !signs_differ));
+  const bool invalid_infinity_product =
+      operation == StrictBinary64Operation::multiply &&
+      ((binary64_is_infinity(left) && binary64_is_zero(right)) ||
+       (binary64_is_zero(left) && binary64_is_infinity(right)));
+  if (invalid_infinity_arithmetic || invalid_infinity_product) {
     result = std::bit_cast<double>(canonical_nan_bits);
     return true;
   }
@@ -651,7 +752,18 @@ bool strict_binary64_add(double left, double right, double &result) {
 #endif
   volatile double strict_left = left;
   volatile double strict_right = right;
-  volatile double strict_result = strict_left + strict_right;
+  volatile double strict_result = 0.0;
+  switch (operation) {
+  case StrictBinary64Operation::add:
+    strict_result = strict_left + strict_right;
+    break;
+  case StrictBinary64Operation::subtract:
+    strict_result = strict_left - strict_right;
+    break;
+  case StrictBinary64Operation::multiply:
+    strict_result = strict_left * strict_right;
+    break;
+  }
   result = strict_result;
 #if defined(__x86_64__) || defined(_M_X64)
   _mm_setcsr(original_control);
@@ -693,7 +805,8 @@ ScalarKernelResult invoke_scalar_kernel(
         make_int_value(operands[0].integer + std::int64_t{1}).scalar);
   case PrimitiveImplementation::inc_double: {
     double result = 0.0;
-    if (!strict_binary64_add(operands[0].double_precision, 1.0, result)) {
+    if (!strict_binary64_arithmetic(operands[0].double_precision, 1.0,
+                                    StrictBinary64Operation::add, result)) {
       return invalid_kernel_invocation();
     }
     return successful_kernel(make_double_value(result).scalar);
@@ -709,8 +822,9 @@ ScalarKernelResult invoke_scalar_kernel(
   }
   case PrimitiveImplementation::add_double: {
     double result = 0.0;
-    if (!strict_binary64_add(operands[0].double_precision,
-                             operands[1].double_precision, result)) {
+    if (!strict_binary64_arithmetic(
+            operands[0].double_precision, operands[1].double_precision,
+            StrictBinary64Operation::add, result)) {
       return invalid_kernel_invocation();
     }
     return successful_kernel(make_double_value(result).scalar);
@@ -732,6 +846,97 @@ ScalarKernelResult invoke_scalar_kernel(
             .scalar);
   case PrimitiveImplementation::logical_not_boolean:
     return successful_kernel(make_bool_value(!operands[0].boolean).scalar);
+  case PrimitiveImplementation::dec_integer:
+    if (operands[0].integer == std::numeric_limits<std::int64_t>::min()) {
+      return integer_overflow(descriptor, signature, operands, call_location);
+    }
+    return successful_kernel(
+        make_int_value(operands[0].integer - INT64_C(1)).scalar);
+  case PrimitiveImplementation::neg_integer:
+    if (operands[0].integer == std::numeric_limits<std::int64_t>::min()) {
+      return integer_overflow(descriptor, signature, operands, call_location);
+    }
+    return successful_kernel(make_int_value(-operands[0].integer).scalar);
+  case PrimitiveImplementation::abs_integer:
+    if (operands[0].integer == std::numeric_limits<std::int64_t>::min()) {
+      return integer_overflow(descriptor, signature, operands, call_location);
+    }
+    return successful_kernel(
+        make_int_value(operands[0].integer < 0 ? -operands[0].integer
+                                              : operands[0].integer)
+            .scalar);
+  case PrimitiveImplementation::sub_integer: {
+    const std::int64_t left = operands[0].integer;
+    const std::int64_t right = operands[1].integer;
+    if ((right > 0 &&
+         left < std::numeric_limits<std::int64_t>::min() + right) ||
+        (right < 0 &&
+         left > std::numeric_limits<std::int64_t>::max() + right)) {
+      return integer_overflow(descriptor, signature, operands, call_location);
+    }
+    return successful_kernel(make_int_value(left - right).scalar);
+  }
+  case PrimitiveImplementation::mul_integer: {
+    const std::int64_t left = operands[0].integer;
+    const std::int64_t right = operands[1].integer;
+    bool overflow = false;
+    if (left > 0) {
+      overflow = right > 0
+                     ? left > std::numeric_limits<std::int64_t>::max() / right
+                     : right < std::numeric_limits<std::int64_t>::min() / left;
+    } else if (left < 0) {
+      overflow = right > 0
+                     ? left < std::numeric_limits<std::int64_t>::min() / right
+                     : right < 0 &&
+                           right < std::numeric_limits<std::int64_t>::max() /
+                                       left;
+    }
+    if (overflow) {
+      return integer_overflow(descriptor, signature, operands, call_location);
+    }
+    return successful_kernel(make_int_value(left * right).scalar);
+  }
+  case PrimitiveImplementation::dec_double: {
+    double result = 0.0;
+    if (!strict_binary64_arithmetic(operands[0].double_precision, 1.0,
+                                    StrictBinary64Operation::subtract,
+                                    result)) {
+      return invalid_kernel_invocation();
+    }
+    return successful_kernel(make_double_value(result).scalar);
+  }
+  case PrimitiveImplementation::neg_double: {
+    const std::uint64_t result_bits =
+        std::bit_cast<std::uint64_t>(operands[0].double_precision) ^
+        (UINT64_C(1) << 63U);
+    return successful_kernel(
+        make_double_value(std::bit_cast<double>(result_bits)).scalar);
+  }
+  case PrimitiveImplementation::abs_double: {
+    const std::uint64_t result_bits =
+        std::bit_cast<std::uint64_t>(operands[0].double_precision) &
+        ~(UINT64_C(1) << 63U);
+    return successful_kernel(
+        make_double_value(std::bit_cast<double>(result_bits)).scalar);
+  }
+  case PrimitiveImplementation::sub_double: {
+    double result = 0.0;
+    if (!strict_binary64_arithmetic(
+            operands[0].double_precision, operands[1].double_precision,
+            StrictBinary64Operation::subtract, result)) {
+      return invalid_kernel_invocation();
+    }
+    return successful_kernel(make_double_value(result).scalar);
+  }
+  case PrimitiveImplementation::mul_double: {
+    double result = 0.0;
+    if (!strict_binary64_arithmetic(
+            operands[0].double_precision, operands[1].double_precision,
+            StrictBinary64Operation::multiply, result)) {
+      return invalid_kernel_invocation();
+    }
+    return successful_kernel(make_double_value(result).scalar);
+  }
   case PrimitiveImplementation::none:
   case PrimitiveImplementation::iota_integer:
     return invalid_kernel_invocation();
@@ -742,27 +947,39 @@ ScalarKernelResult invoke_scalar_kernel(
 TEST_CASE("production primitive descriptors are static explicit and valid") {
   const std::span<const PrimitiveDescriptor> descriptors =
       production_primitive_descriptors();
-  REQUIRE(descriptors.size() == 5);
+  REQUIRE(descriptors.size() == 10);
 
-  constexpr std::array<PrimitiveId, 5> expected_ids{{
+  constexpr std::array<PrimitiveId, 10> expected_ids{{
       PrimitiveId::inc,
       PrimitiveId::add,
       PrimitiveId::equals,
       PrimitiveId::logical_not,
       PrimitiveId::iota,
+      PrimitiveId::dec,
+      PrimitiveId::neg,
+      PrimitiveId::abs,
+      PrimitiveId::sub,
+      PrimitiveId::mul,
   }};
-  constexpr std::array<std::string_view, 5> expected_names{{
-      "inc", "add", "equals", "not", "iota",
+  constexpr std::array<std::string_view, 10> expected_names{{
+      "inc", "add", "equals", "not", "iota", "dec", "neg", "abs", "sub",
+      "mul",
   }};
-  constexpr std::array<LiftingMode, 5> expected_lifting{{
+  constexpr std::array<LiftingMode, 10> expected_lifting{{
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::elementwise,
       LiftingMode::none,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
+      LiftingMode::elementwise,
   }};
-  constexpr std::array<std::size_t, 5> expected_signature_counts{{2, 2, 3, 1,
-                                                                  1}};
+  constexpr std::array<std::size_t, 10> expected_signature_counts{{
+      2, 2, 3, 1, 1, 2, 2, 2, 2, 2,
+  }};
 
   for (std::size_t index = 0; index < descriptors.size(); ++index) {
     CAPTURE(index);
@@ -1393,6 +1610,287 @@ TEST_CASE("scalar kernel dispatch rejects unselected or structural invocation") 
   CHECK(invoke_scalar_kernel(inc, inc.signatures[0], malformed_operands,
                              {0, 1, 1})
             .status == ScalarKernelStatus::invalid_invocation);
+}
+
+TEST_CASE("checked arithmetic primitives expose the required stable signatures") {
+  struct ExpectedPrimitive {
+    std::string_view name;
+    std::size_t arity;
+  };
+  constexpr std::array<ExpectedPrimitive, 5> expected{{
+      {"dec", 1U},
+      {"neg", 1U},
+      {"abs", 1U},
+      {"sub", 2U},
+      {"mul", 2U},
+  }};
+
+  for (const ExpectedPrimitive &entry : expected) {
+    CAPTURE(std::string(entry.name));
+    const PrimitiveDescriptor *descriptor = find_primitive(entry.name);
+    CHECK(descriptor != nullptr);
+    if (descriptor == nullptr) {
+      continue;
+    }
+    CHECK(descriptor->lifting == LiftingMode::elementwise);
+    REQUIRE(descriptor->signature_count == 2U);
+    CHECK(descriptor->signatures[0].parameter_count == entry.arity);
+    CHECK(descriptor->signatures[0].result.element == ScalarType::integer);
+    CHECK(descriptor->signatures[1].parameter_count == entry.arity);
+    CHECK(descriptor->signatures[1].result.element ==
+          ScalarType::double_precision);
+  }
+  CHECK(production_primitive_table_validation().ok);
+}
+
+TEST_CASE("checked Int arithmetic kernels cover boundaries without partial arithmetic") {
+  struct IntegerCase {
+    std::string_view primitive;
+    std::int64_t left;
+    std::int64_t right;
+    bool success;
+    std::int64_t expected;
+  };
+  constexpr std::array<IntegerCase, 55> cases{{
+      {"dec", INT64_MIN, 0, false, 0},
+      {"dec", INT64_MIN + 1, 0, true, INT64_MIN},
+      {"dec", -1, 0, true, -2},
+      {"dec", 0, 0, true, -1},
+      {"dec", 1, 0, true, 0},
+      {"dec", INT64_MAX, 0, true, INT64_MAX - 1},
+      {"neg", INT64_MIN, 0, false, 0},
+      {"neg", INT64_MIN + 1, 0, true, INT64_MAX},
+      {"neg", -1, 0, true, 1},
+      {"neg", 0, 0, true, 0},
+      {"neg", 1, 0, true, -1},
+      {"neg", INT64_MAX, 0, true, -INT64_MAX},
+      {"abs", INT64_MIN, 0, false, 0},
+      {"abs", INT64_MIN + 1, 0, true, INT64_MAX},
+      {"abs", -1, 0, true, 1},
+      {"abs", 0, 0, true, 0},
+      {"abs", 1, 0, true, 1},
+      {"abs", INT64_MAX, 0, true, INT64_MAX},
+      {"sub", INT64_MIN, 1, false, 0},
+      {"sub", INT64_MAX, -1, false, 0},
+      {"sub", 0, INT64_MIN, false, 0},
+      {"sub", INT64_MIN, -1, true, INT64_MIN + 1},
+      {"sub", -1, INT64_MAX, true, INT64_MIN},
+      {"sub", INT64_MAX, 1, true, INT64_MAX - 1},
+      {"sub", INT64_MIN, 0, true, INT64_MIN},
+      {"sub", INT64_MAX, 0, true, INT64_MAX},
+      {"sub", 0, INT64_MAX, true, -INT64_MAX},
+      {"sub", 0, -1, true, 1},
+      {"sub", -1, 0, true, -1},
+      {"sub", 1, -1, true, 2},
+      {"sub", -1, 1, true, -2},
+      {"mul", INT64_MIN, -1, false, 0},
+      {"mul", -1, INT64_MIN, false, 0},
+      {"mul", INT64_MIN, 0, true, 0},
+      {"mul", 0, INT64_MIN, true, 0},
+      {"mul", INT64_MIN, 1, true, INT64_MIN},
+      {"mul", 1, INT64_MIN, true, INT64_MIN},
+      {"mul", INT64_MAX, -1, true, -INT64_MAX},
+      {"mul", -1, INT64_MAX, true, -INT64_MAX},
+      {"mul", INT64_MAX, 1, true, INT64_MAX},
+      {"mul", 1, INT64_MAX, true, INT64_MAX},
+      {"mul", 2, -3, true, -6},
+      {"mul", -3, 2, true, -6},
+      {"mul", -2, -3, true, 6},
+      {"mul", -3, -2, true, 6},
+      {"mul", INT64_MAX / 2, 2, true, INT64_MAX - 1},
+      {"mul", 2, INT64_MAX / 2, true, INT64_MAX - 1},
+      {"mul", INT64_MAX / 2 + 1, 2, false, 0},
+      {"mul", 2, INT64_MAX / 2 + 1, false, 0},
+      {"mul", INT64_MIN / 2, 2, true, INT64_MIN},
+      {"mul", 2, INT64_MIN / 2, true, INT64_MIN},
+      {"mul", INT64_MIN / 2 - 1, 2, false, 0},
+      {"mul", 2, INT64_MIN / 2 - 1, false, 0},
+      {"mul", INT64_C(3037000499), INT64_C(3037000499), true,
+       INT64_C(9223372030926249001)},
+      {"mul", INT64_C(3037000500), INT64_C(3037000500), false, 0},
+  }};
+
+  constexpr SourceLocation location{41U, 7U, 3U};
+  for (const IntegerCase &integer_case : cases) {
+    CAPTURE(std::string(integer_case.primitive));
+    CAPTURE(integer_case.left);
+    CAPTURE(integer_case.right);
+    const PrimitiveDescriptor *descriptor =
+        find_primitive(integer_case.primitive);
+    REQUIRE(descriptor != nullptr);
+    const std::array<ScalarValue, 2> operands{{
+        make_int_value(integer_case.left).scalar,
+        make_int_value(integer_case.right).scalar,
+    }};
+    const std::size_t arity = descriptor->signatures[0].parameter_count;
+    const ScalarKernelResult result = invoke_scalar_kernel(
+        *descriptor, descriptor->signatures[0],
+        std::span<const ScalarValue>(operands.data(), arity), location);
+    CHECK((result.status == ScalarKernelStatus::success) ==
+          integer_case.success);
+    if (integer_case.success) {
+      CHECK(result.value.type == ScalarType::integer);
+      CHECK(result.value.integer == integer_case.expected);
+      CHECK(result.error.kind == ErrorKind::none);
+    } else {
+      CHECK(result.status == ScalarKernelStatus::domain_error);
+      CHECK(result.error.kind == ErrorKind::domain_error);
+      REQUIRE(result.error.domain.has_value());
+      CHECK(result.error.domain->reason ==
+            DomainErrorReason::integer_overflow);
+      CHECK(result.error.domain->operands.size() == arity);
+      CHECK(result.error.location.offset == location.offset);
+      REQUIRE(result.error.primitive.has_value());
+      CHECK(result.error.primitive->name == integer_case.primitive);
+    }
+  }
+}
+
+TEST_CASE("checked Double arithmetic preserves exact binary64 semantics and the host environment") {
+  struct DoubleCase {
+    std::string_view primitive;
+    std::uint64_t left_bits;
+    std::uint64_t right_bits;
+    std::uint64_t expected_bits;
+  };
+  constexpr std::array<DoubleCase, 30> cases{{
+      {"dec", UINT64_C(0x0000000000000000), 0,
+       UINT64_C(0xbff0000000000000)},
+      {"dec", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0xbff0000000000000)},
+      {"dec", UINT64_C(0x7fefffffffffffff), 0,
+       UINT64_C(0x7fefffffffffffff)},
+      {"dec", UINT64_C(0xfff0000000000000), 0,
+       UINT64_C(0xfff0000000000000)},
+      {"dec", UINT64_C(0x7ff0000000000001), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"neg", UINT64_C(0x0000000000000000), 0,
+       UINT64_C(0x8000000000000000)},
+      {"neg", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"neg", UINT64_C(0x7ff0000000000000), 0,
+       UINT64_C(0xfff0000000000000)},
+      {"neg", UINT64_C(0x7ff8000000000000), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"neg", UINT64_C(0x7ff0000000000001), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"abs", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"abs", UINT64_C(0xfff0000000000000), 0,
+       UINT64_C(0x7ff0000000000000)},
+      {"abs", UINT64_C(0xffefffffffffffff), 0,
+       UINT64_C(0x7fefffffffffffff)},
+      {"abs", UINT64_C(0x800fffffffffffff), 0,
+       UINT64_C(0x000fffffffffffff)},
+      {"abs", UINT64_C(0x7ff8000000000000), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"abs", UINT64_C(0xfff8123456789abc), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"sub", UINT64_C(0x0000000000000000),
+       UINT64_C(0x8000000000000000), UINT64_C(0x0000000000000000)},
+      {"sub", UINT64_C(0x8000000000000000),
+       UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000)},
+      {"sub", UINT64_C(0x0010000000000000),
+       UINT64_C(0x000fffffffffffff), UINT64_C(0x0000000000000001)},
+      {"sub", UINT64_C(0x3ff0000000000000),
+       UINT64_C(0x3c90000000000000), UINT64_C(0x3ff0000000000000)},
+      {"sub", UINT64_C(0x7ff0000000000000),
+       UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {"sub", UINT64_C(0xfff0000000000000),
+       UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000)},
+      {"mul", UINT64_C(0x8000000000000000),
+       UINT64_C(0x4000000000000000), UINT64_C(0x8000000000000000)},
+      {"mul", UINT64_C(0x0000000000000001),
+       UINT64_C(0x4000000000000000), UINT64_C(0x0000000000000002)},
+      {"mul", UINT64_C(0x0000000000000001),
+       UINT64_C(0x3fe0000000000000), UINT64_C(0x0000000000000000)},
+      {"mul", UINT64_C(0x8000000000000001),
+       UINT64_C(0x3fe0000000000000), UINT64_C(0x8000000000000000)},
+      {"mul", UINT64_C(0x3ff0000000000001),
+       UINT64_C(0x3ff0000000000001), UINT64_C(0x3ff0000000000002)},
+      {"mul", UINT64_C(0x7fefffffffffffff),
+       UINT64_C(0x4000000000000000), UINT64_C(0x7ff0000000000000)},
+      {"mul", UINT64_C(0x7ff0000000000000),
+       UINT64_C(0x0000000000000000), UINT64_C(0x7ff8000000000000)},
+      {"mul", UINT64_C(0xbff0000000000000),
+       UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000)},
+  }};
+
+  constexpr SourceLocation location{81U, 9U, 5U};
+  for (const DoubleCase &double_case : cases) {
+    CAPTURE(std::string(double_case.primitive));
+    CAPTURE(double_case.left_bits);
+    CAPTURE(double_case.right_bits);
+    const PrimitiveDescriptor *descriptor =
+        find_primitive(double_case.primitive);
+    REQUIRE(descriptor != nullptr);
+    const std::array<ScalarValue, 2> operands{{
+        make_double_value(std::bit_cast<double>(double_case.left_bits)).scalar,
+        make_double_value(std::bit_cast<double>(double_case.right_bits)).scalar,
+    }};
+    const std::size_t arity = descriptor->signatures[1].parameter_count;
+    const ScalarKernelResult result = invoke_scalar_kernel(
+        *descriptor, descriptor->signatures[1],
+        std::span<const ScalarValue>(operands.data(), arity), location);
+    REQUIRE(result.status == ScalarKernelStatus::success);
+    CHECK(result.value.type == ScalarType::double_precision);
+    CHECK(std::bit_cast<std::uint64_t>(result.value.double_precision) ==
+          double_case.expected_bits);
+  }
+
+  std::fenv_t original_environment{};
+  REQUIRE(std::fegetenv(&original_environment) == 0);
+  const int original_rounding = std::fegetround();
+  REQUIRE(original_rounding != -1);
+  struct RoundingCase {
+    std::string_view primitive;
+    std::uint64_t left_bits;
+    std::uint64_t right_bits;
+    std::uint64_t expected_bits;
+  };
+  constexpr std::array<RoundingCase, 5> rounding_cases{{
+      {"dec", UINT64_C(0x7fefffffffffffff), 0,
+       UINT64_C(0x7fefffffffffffff)},
+      {"neg", UINT64_C(0x0000000000000000), 0,
+       UINT64_C(0x8000000000000000)},
+      {"abs", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"sub", UINT64_C(0x3ff0000000000000),
+       UINT64_C(0x3c90000000000000), UINT64_C(0x3ff0000000000000)},
+      {"mul", UINT64_C(0x3ff0000000000001),
+       UINT64_C(0x3ff0000000000001), UINT64_C(0x3ff0000000000002)},
+  }};
+  for (const int rounding_mode : {FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    CAPTURE(rounding_mode);
+    REQUIRE(std::fesetround(rounding_mode) == 0);
+    REQUIRE(std::feclearexcept(FE_ALL_EXCEPT) == 0);
+    REQUIRE(std::feraiseexcept(FE_INVALID | FE_INEXACT) == 0);
+    const int expected_exceptions = std::fetestexcept(FE_ALL_EXCEPT);
+    REQUIRE(expected_exceptions != 0);
+    for (const RoundingCase &rounding_case : rounding_cases) {
+      CAPTURE(std::string(rounding_case.primitive));
+      const PrimitiveDescriptor *descriptor =
+          find_primitive(rounding_case.primitive);
+      REQUIRE(descriptor != nullptr);
+      const std::array<ScalarValue, 2> operands{{
+          make_double_value(std::bit_cast<double>(rounding_case.left_bits))
+              .scalar,
+          make_double_value(std::bit_cast<double>(rounding_case.right_bits))
+              .scalar,
+      }};
+      const std::size_t arity = descriptor->signatures[1].parameter_count;
+      const ScalarKernelResult result = invoke_scalar_kernel(
+          *descriptor, descriptor->signatures[1],
+          std::span<const ScalarValue>(operands.data(), arity), location);
+      REQUIRE(result.status == ScalarKernelStatus::success);
+      CHECK(std::bit_cast<std::uint64_t>(result.value.double_precision) ==
+            rounding_case.expected_bits);
+      CHECK(std::fegetround() == rounding_mode);
+      CHECK(std::fetestexcept(FE_ALL_EXCEPT) == expected_exceptions);
+    }
+  }
+  REQUIRE(std::fesetenv(&original_environment) == 0);
+  CHECK(std::fegetround() == original_rounding);
 }
 
 } // namespace bennu

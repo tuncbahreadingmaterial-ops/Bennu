@@ -48,6 +48,11 @@ TEST_CASE("CUTOVER-02 public evaluator exposes exactly the rewrite primitives") 
       {"inc 5", "6"},
       {"inc[5]", "6"},
       {"inc inc 5", "7"},
+      {"dec 5", "4"},
+      {"neg[-3]", "3"},
+      {"abs[-2.5]", "2.5"},
+      {"sub[(10 20) 0.5]", "(9.5 19.5)"},
+      {"mul[2 (3 4)]", "(6 8)"},
       {"add[10 (1 2 3)]", "(11 12 13)"},
       {"equals[2 (1 2 3 2)]", "(false true false true)"},
       {"not[(false true)]", "(true false)"},
@@ -100,6 +105,19 @@ TEST_CASE("CUTOVER-03 public APIs preserve structured located rewrite errors") {
   CHECK(domain.error.domain->reason ==
         bennu::DomainErrorReason::integer_overflow);
   CHECK(domain.error.location.column == 1U);
+
+  bennu::ValueResult lifted_domain = bennu::evaluate_expression(
+      "mul[(1 3037000500) (1 3037000500)]");
+  REQUIRE_FALSE(lifted_domain.ok);
+  CHECK(lifted_domain.error.kind == bennu::ErrorKind::domain_error);
+  REQUIRE(lifted_domain.error.domain.has_value());
+  CHECK(lifted_domain.error.domain->reason ==
+        bennu::DomainErrorReason::integer_overflow);
+  REQUIRE(lifted_domain.error.element_index.has_value());
+  CHECK(*lifted_domain.error.element_index == 1U);
+  REQUIRE(lifted_domain.error.primitive.has_value());
+  CHECK(lifted_domain.error.primitive->name == "mul");
+  CHECK(lifted_domain.error.domain->operands.size() == 2U);
 }
 
 TEST_CASE("CUTOVER-04 public source evaluation is transactional") {
@@ -124,12 +142,22 @@ TEST_CASE("CUTOVER-04 public source evaluation is transactional") {
 TEST_CASE("CUTOVER-05 public emitter lowers arbitrary typed vector contents") {
   const std::string source =
       "inc[(7 -3 11 0)]\n"
+      "dec[(7 -3 11 0)]\n"
+      "neg[-3.5]\n"
+      "abs[-4]\n"
+      "sub[(7 -3 11 0) 2]\n"
+      "mul[(7 -3 11 0) 2.0]\n"
       "equals[true (false true)]\n"
       "add[Int() 0.5]\n"
       "iota[3]\n";
   const bennu::CEmissionResult emitted = bennu::emit_c_source(source);
   REQUIRE(emitted.ok);
   CHECK(emitted.source.find("BENNU_IMPL_INC_INT") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_DEC_INT") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_NEG_DOUBLE") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_ABS_INT") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_SUB_INT") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_MUL_DOUBLE") != std::string::npos);
   CHECK(emitted.source.find("BENNU_IMPL_EQUALS_BOOL") != std::string::npos);
   CHECK(emitted.source.find("BENNU_IMPL_ADD_DOUBLE") != std::string::npos);
   CHECK(emitted.source.find("BENNU_IMPL_IOTA_INT") != std::string::npos);

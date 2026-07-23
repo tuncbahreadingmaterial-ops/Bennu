@@ -123,14 +123,15 @@ function(check_public_dynamic_failure case_name source_text line column
 
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${c_output}" "/Fe:${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
               -pedantic-errors
               "${c_output}" -o "${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
@@ -205,6 +206,17 @@ check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
 check_public_dynamic_failure(domain_vector
   "add[(0 9223372036854775807) (0 1)]" 1 1
   "DomainError" "add failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_dec "dec -9223372036854775808" 1 1
+  "DomainError" "dec failed: integer_overflow")
+check_public_dynamic_failure(domain_neg "neg -9223372036854775808" 1 1
+  "DomainError" "neg failed: integer_overflow")
+check_public_dynamic_failure(domain_abs "abs -9223372036854775808" 1 1
+  "DomainError" "abs failed: integer_overflow")
+check_public_dynamic_failure(domain_sub "sub[-9223372036854775808 1]" 1 1
+  "DomainError" "sub failed: integer_overflow")
+check_public_dynamic_failure(domain_mul_vector
+  "mul[(1 3037000500) (1 3037000500)]" 1 1
+  "DomainError" "mul failed: integer_overflow at result index 1")
 check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
   "ResourceError" "iota resource request failed: size_overflow")
 check_public_dynamic_failure(resource_child_before_shape

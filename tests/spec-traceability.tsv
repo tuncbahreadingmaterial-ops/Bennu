@@ -16,11 +16,14 @@ BENNU-SPEC-0002 section 9|src/rewrite.cpp|rewrite parser retains typed homogeneo
 BENNU-SPEC-0002 sections 10 through 12|src/rewrite.cpp|rewrite parser rejects normative invalid syntax at exact spans
 BENNU-SPEC-0002 sections 13 and 14|tests/public_cutover_conformance.cpp|CUTOVER-02 public evaluator exposes exactly the rewrite primitives
 BENNU-SPEC-0003 sections 4 and 5|src/primitive.cpp|integer scalar kernels cover every boundary and structured overflow
+BENNU-SPEC-0003 sections 4 and 5 checked arithmetic|src/primitive.cpp|checked Int arithmetic kernels cover boundaries without partial arithmetic
 BENNU-SPEC-0003 sections 6 through 9|src/primitive.cpp|Double inc and add kernels match every normative binary64 vector
+BENNU-SPEC-0003 sections 6 through 9 checked arithmetic|src/primitive.cpp|checked Double arithmetic preserves exact binary64 semantics and the host environment
 BENNU-SPEC-0003 section 10|src/primitive.cpp|scalar projection conversion covers every type pair and Int64 bits
 BENNU-SPEC-0003 section 11|src/primitive.cpp|equals and not kernels cover Bool Int and Double domains
 BENNU-SPEC-0003 sections 12 and 13|tests/public_cutover_conformance.cpp|CUTOVER-03 public APIs preserve structured located rewrite errors
 BENNU-SPEC-0003 sections 14 and 15|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CORPUS
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic|tests/c_emission_contract.cmake|CHECKED-ARITHMETIC-CROSS-PATH-BYTES
 BENNU-SPEC-0004 sections 3 and 4|src/resources.cpp|trusted profile omits policy limits but retains mandatory safety
 BENNU-SPEC-0004 sections 5 through 7|src/resources.cpp|each profile limit honors zero one exact and one-past semantics
 BENNU-SPEC-0004 section 8|src/error.cpp|errors retain semantic context independently of presentation text

@@ -114,14 +114,15 @@ foreach(c_file profile refusal iota lifted late context_probe size_probe
   set(executable "${${c_file}_emitted}")
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${source}" "/Fe:${executable}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
               -pedantic-errors
               "${source}" -o "${executable}"
       WORKING_DIRECTORY "${work_directory}"

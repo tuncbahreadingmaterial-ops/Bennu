@@ -2509,6 +2509,26 @@ std::string_view c_implementation_name(PrimitiveImplementation implementation) {
     return "BENNU_IMPL_NOT_BOOL";
   case PrimitiveImplementation::iota_integer:
     return "BENNU_IMPL_IOTA_INT";
+  case PrimitiveImplementation::dec_integer:
+    return "BENNU_IMPL_DEC_INT";
+  case PrimitiveImplementation::dec_double:
+    return "BENNU_IMPL_DEC_DOUBLE";
+  case PrimitiveImplementation::neg_integer:
+    return "BENNU_IMPL_NEG_INT";
+  case PrimitiveImplementation::neg_double:
+    return "BENNU_IMPL_NEG_DOUBLE";
+  case PrimitiveImplementation::abs_integer:
+    return "BENNU_IMPL_ABS_INT";
+  case PrimitiveImplementation::abs_double:
+    return "BENNU_IMPL_ABS_DOUBLE";
+  case PrimitiveImplementation::sub_integer:
+    return "BENNU_IMPL_SUB_INT";
+  case PrimitiveImplementation::sub_double:
+    return "BENNU_IMPL_SUB_DOUBLE";
+  case PrimitiveImplementation::mul_integer:
+    return "BENNU_IMPL_MUL_INT";
+  case PrimitiveImplementation::mul_double:
+    return "BENNU_IMPL_MUL_DOUBLE";
   case PrimitiveImplementation::none:
     break;
   }
@@ -2527,6 +2547,16 @@ std::string_view c_primitive_id_name(PrimitiveId id) {
     return "BENNU_PRIMITIVE_NOT";
   case PrimitiveId::iota:
     return "BENNU_PRIMITIVE_IOTA";
+  case PrimitiveId::dec:
+    return "BENNU_PRIMITIVE_DEC";
+  case PrimitiveId::neg:
+    return "BENNU_PRIMITIVE_NEG";
+  case PrimitiveId::abs:
+    return "BENNU_PRIMITIVE_ABS";
+  case PrimitiveId::sub:
+    return "BENNU_PRIMITIVE_SUB";
+  case PrimitiveId::mul:
+    return "BENNU_PRIMITIVE_MUL";
   }
   return "BENNU_PRIMITIVE_NONE";
 }

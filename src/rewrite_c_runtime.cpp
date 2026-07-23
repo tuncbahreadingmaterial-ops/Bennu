@@ -11,6 +11,14 @@ void append_rewrite_c_runtime(std::string &source) {
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <xmmintrin.h>
+#endif
+#endif
+
 #ifndef BENNU_RUNTIME_MALLOC
 #define BENNU_RUNTIME_MALLOC(size) malloc(size)
 #endif
@@ -40,7 +48,17 @@ typedef enum BennuImplementation {
   BENNU_IMPL_EQUALS_INT = 6,
   BENNU_IMPL_EQUALS_DOUBLE = 7,
   BENNU_IMPL_NOT_BOOL = 8,
-  BENNU_IMPL_IOTA_INT = 9
+  BENNU_IMPL_IOTA_INT = 9,
+  BENNU_IMPL_DEC_INT = 10,
+  BENNU_IMPL_DEC_DOUBLE = 11,
+  BENNU_IMPL_NEG_INT = 12,
+  BENNU_IMPL_NEG_DOUBLE = 13,
+  BENNU_IMPL_ABS_INT = 14,
+  BENNU_IMPL_ABS_DOUBLE = 15,
+  BENNU_IMPL_SUB_INT = 16,
+  BENNU_IMPL_SUB_DOUBLE = 17,
+  BENNU_IMPL_MUL_INT = 18,
+  BENNU_IMPL_MUL_DOUBLE = 19
 } BennuImplementation;
 
 typedef enum BennuPrimitiveId {
@@ -49,7 +67,12 @@ typedef enum BennuPrimitiveId {
   BENNU_PRIMITIVE_ADD = 1,
   BENNU_PRIMITIVE_EQUALS = 2,
   BENNU_PRIMITIVE_NOT = 3,
-  BENNU_PRIMITIVE_IOTA = 4
+  BENNU_PRIMITIVE_IOTA = 4,
+  BENNU_PRIMITIVE_DEC = 5,
+  BENNU_PRIMITIVE_NEG = 6,
+  BENNU_PRIMITIVE_ABS = 7,
+  BENNU_PRIMITIVE_SUB = 8,
+  BENNU_PRIMITIVE_MUL = 9
 } BennuPrimitiveId;
 
 typedef enum BennuFailure {
@@ -509,9 +532,45 @@ static BennuScalar bennu_project(const BennuValue *value, size_t index) {
 }
 
 static double bennu_int_to_double(int64_t value) {
-  volatile int64_t source = value;
-  volatile double converted = (double)source;
-  return converted;
+  const int negative = value < INT64_C(0);
+  const uint64_t magnitude =
+      negative != 0
+          ? (uint64_t)(-(value + INT64_C(1))) + UINT64_C(1)
+          : (uint64_t)value;
+  uint64_t scan = magnitude;
+  uint64_t significand = UINT64_C(0);
+  uint64_t fraction = UINT64_C(0);
+  uint64_t exponent = UINT64_C(0);
+  unsigned int most_significant = 0U;
+  if (magnitude == UINT64_C(0)) {
+    return 0.0;
+  }
+  while (scan > UINT64_C(1)) {
+    scan >>= 1U;
+    ++most_significant;
+  }
+  if (most_significant <= 52U) {
+    significand = magnitude << (52U - most_significant);
+  } else {
+    const unsigned int shift = most_significant - 52U;
+    const uint64_t remainder_mask = (UINT64_C(1) << shift) - UINT64_C(1);
+    const uint64_t remainder = magnitude & remainder_mask;
+    const uint64_t halfway = UINT64_C(1) << (shift - 1U);
+    significand = magnitude >> shift;
+    if (remainder > halfway ||
+        (remainder == halfway && (significand & UINT64_C(1)) != UINT64_C(0))) {
+      ++significand;
+      if (significand == (UINT64_C(1) << 53U)) {
+        significand >>= 1U;
+        ++most_significant;
+      }
+    }
+  }
+  exponent = (uint64_t)(most_significant + 1023U) << 52U;
+  fraction = significand & UINT64_C(0x000fffffffffffff);
+  return bennu_double_from_bits(
+      (negative != 0 ? UINT64_C(0x8000000000000000) : UINT64_C(0)) |
+      exponent | fraction);
 }
 
 static BennuScalar bennu_convert(BennuScalar value, BennuType type) {
@@ -532,11 +591,126 @@ static int bennu_add_int(int64_t left, int64_t right, int64_t *result) {
   return 1;
 }
 
+static int bennu_sub_int(int64_t left, int64_t right, int64_t *result) {
+  if ((right > INT64_C(0) && left < INT64_MIN + right) ||
+      (right < INT64_C(0) && left > INT64_MAX + right)) {
+    return 0;
+  }
+  *result = left - right;
+  return 1;
+}
+
+static int bennu_mul_int(int64_t left, int64_t right, int64_t *result) {
+  int overflow = 0;
+  if (left > INT64_C(0)) {
+    overflow = right > INT64_C(0) ? left > INT64_MAX / right
+                                  : right < INT64_MIN / left;
+  } else if (left < INT64_C(0)) {
+    overflow = right > INT64_C(0)
+                   ? left < INT64_MIN / right
+                   : right < INT64_C(0) && right < INT64_MAX / left;
+  }
+  if (overflow != 0) {
+    return 0;
+  }
+  *result = left * right;
+  return 1;
+}
+
+typedef enum BennuDoubleOperation {
+  BENNU_DOUBLE_ADD = 0,
+  BENNU_DOUBLE_SUB = 1,
+  BENNU_DOUBLE_MUL = 2
+} BennuDoubleOperation;
+
+static int bennu_double_is_nan(double value) {
+  const uint64_t bits = bennu_double_bits(value);
+  return (bits & UINT64_C(0x7ff0000000000000)) ==
+             UINT64_C(0x7ff0000000000000) &&
+         (bits & UINT64_C(0x000fffffffffffff)) != UINT64_C(0);
+}
+
+static int bennu_double_is_infinity(double value) {
+  return (bennu_double_bits(value) & UINT64_C(0x7fffffffffffffff)) ==
+         UINT64_C(0x7ff0000000000000);
+}
+
+static int bennu_double_is_zero(double value) {
+  return (bennu_double_bits(value) & UINT64_C(0x7fffffffffffffff)) ==
+         UINT64_C(0);
+}
+
+static double bennu_double_arithmetic(double left, double right,
+                                      BennuDoubleOperation operation) {
+  const int signs_differ =
+      ((bennu_double_bits(left) ^ bennu_double_bits(right)) &
+       UINT64_C(0x8000000000000000)) != UINT64_C(0);
+  if (bennu_double_is_nan(left) != 0 || bennu_double_is_nan(right) != 0 ||
+      (bennu_double_is_infinity(left) != 0 &&
+       bennu_double_is_infinity(right) != 0 &&
+       ((operation == BENNU_DOUBLE_ADD && signs_differ != 0) ||
+        (operation == BENNU_DOUBLE_SUB && signs_differ == 0))) ||
+      (operation == BENNU_DOUBLE_MUL &&
+       ((bennu_double_is_infinity(left) != 0 &&
+         bennu_double_is_zero(right) != 0) ||
+        (bennu_double_is_zero(left) != 0 &&
+         bennu_double_is_infinity(right) != 0)))) {
+    return bennu_double_from_bits(UINT64_C(0x7ff8000000000000));
+  }
+#if defined(__x86_64__) || defined(_M_X64)
+  {
+    const unsigned int original_control = _mm_getcsr();
+    const unsigned int strict_control =
+        (original_control | 0x1f80U) &
+        ~(0x003fU | 0x0040U | 0x6000U | 0x8000U);
+    volatile double volatile_left = left;
+    volatile double volatile_right = right;
+    volatile double result = 0.0;
+    _mm_setcsr(strict_control);
+    if (operation == BENNU_DOUBLE_ADD) {
+      result = volatile_left + volatile_right;
+    } else if (operation == BENNU_DOUBLE_SUB) {
+      result = volatile_left - volatile_right;
+    } else {
+      result = volatile_left * volatile_right;
+    }
+    _mm_setcsr(original_control);
+    return bennu_normalize_double(result);
+  }
+#elif defined(__aarch64__)
+  {
+    uint64_t original_control = UINT64_C(0);
+    uint64_t original_status = UINT64_C(0);
+    uint64_t strict_control = UINT64_C(0);
+    const uint64_t clear_status = UINT64_C(0);
+    volatile double volatile_left = left;
+    volatile double volatile_right = right;
+    volatile double result = 0.0;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
+    strict_control = original_control &
+                     ~(UINT64_C(0x00009f00) | UINT64_C(0x00c00000) |
+                       UINT64_C(0x03000000));
+    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(strict_control) : "memory");
+    __asm__ volatile("msr fpsr, %0" : : "r"(clear_status) : "memory");
+    if (operation == BENNU_DOUBLE_ADD) {
+      result = volatile_left + volatile_right;
+    } else if (operation == BENNU_DOUBLE_SUB) {
+      result = volatile_left - volatile_right;
+    } else {
+      result = volatile_left * volatile_right;
+    }
+    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+    __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+    return bennu_normalize_double(result);
+  }
+#else
+#error "Bennu requires an x86-64 or AArch64 floating-point environment"
+#endif
+}
+
 static double bennu_add_double(double left, double right) {
-  volatile double volatile_left = left;
-  volatile double volatile_right = right;
-  volatile double result = volatile_left + volatile_right;
-  return bennu_normalize_double(result);
+  return bennu_double_arithmetic(left, right, BENNU_DOUBLE_ADD);
 }
 )bennu_c";
   source += R"bennu_c(
@@ -548,7 +722,12 @@ static BennuType bennu_result_type(BennuImplementation implementation) {
     return BENNU_BOOL;
   }
   if (implementation == BENNU_IMPL_INC_DOUBLE ||
-      implementation == BENNU_IMPL_ADD_DOUBLE) {
+      implementation == BENNU_IMPL_ADD_DOUBLE ||
+      implementation == BENNU_IMPL_DEC_DOUBLE ||
+      implementation == BENNU_IMPL_NEG_DOUBLE ||
+      implementation == BENNU_IMPL_ABS_DOUBLE ||
+      implementation == BENNU_IMPL_SUB_DOUBLE ||
+      implementation == BENNU_IMPL_MUL_DOUBLE) {
     return BENNU_DOUBLE;
   }
   return BENNU_INT;
@@ -596,6 +775,51 @@ static int bennu_kernel(BennuResources *resources,
     result->boolean = (uint8_t)(left.double_precision == right.double_precision);
   } else if (implementation == BENNU_IMPL_NOT_BOOL) {
     result->boolean = (uint8_t)(left.boolean == 0U);
+  } else if (implementation == BENNU_IMPL_DEC_INT) {
+    if (left.integer == INT64_MIN) {
+      bennu_set_failure(resources, BENNU_FAILURE_DOMAIN);
+      return 0;
+    }
+    result->integer = left.integer - INT64_C(1);
+  } else if (implementation == BENNU_IMPL_DEC_DOUBLE) {
+    result->double_precision =
+        bennu_double_arithmetic(left.double_precision, 1.0, BENNU_DOUBLE_SUB);
+  } else if (implementation == BENNU_IMPL_NEG_INT) {
+    if (left.integer == INT64_MIN) {
+      bennu_set_failure(resources, BENNU_FAILURE_DOMAIN);
+      return 0;
+    }
+    result->integer = -left.integer;
+  } else if (implementation == BENNU_IMPL_NEG_DOUBLE) {
+    result->double_precision = bennu_normalize_double(bennu_double_from_bits(
+        bennu_double_bits(left.double_precision) ^
+        UINT64_C(0x8000000000000000)));
+  } else if (implementation == BENNU_IMPL_ABS_INT) {
+    if (left.integer == INT64_MIN) {
+      bennu_set_failure(resources, BENNU_FAILURE_DOMAIN);
+      return 0;
+    }
+    result->integer = left.integer < INT64_C(0) ? -left.integer : left.integer;
+  } else if (implementation == BENNU_IMPL_ABS_DOUBLE) {
+    result->double_precision = bennu_normalize_double(bennu_double_from_bits(
+        bennu_double_bits(left.double_precision) &
+        UINT64_C(0x7fffffffffffffff)));
+  } else if (implementation == BENNU_IMPL_SUB_INT) {
+    if (!bennu_sub_int(left.integer, right.integer, &result->integer)) {
+      bennu_set_failure(resources, BENNU_FAILURE_DOMAIN);
+      return 0;
+    }
+  } else if (implementation == BENNU_IMPL_SUB_DOUBLE) {
+    result->double_precision = bennu_double_arithmetic(
+        left.double_precision, right.double_precision, BENNU_DOUBLE_SUB);
+  } else if (implementation == BENNU_IMPL_MUL_INT) {
+    if (!bennu_mul_int(left.integer, right.integer, &result->integer)) {
+      bennu_set_failure(resources, BENNU_FAILURE_DOMAIN);
+      return 0;
+    }
+  } else if (implementation == BENNU_IMPL_MUL_DOUBLE) {
+    result->double_precision = bennu_double_arithmetic(
+        left.double_precision, right.double_precision, BENNU_DOUBLE_MUL);
   } else {
     bennu_set_failure(resources, BENNU_FAILURE_INTERNAL);
     return 0;
@@ -652,6 +876,11 @@ static int bennu_apply(BennuResources *resources,
   }
   if (implementation == BENNU_IMPL_INC_DOUBLE ||
       implementation == BENNU_IMPL_ADD_DOUBLE ||
+      implementation == BENNU_IMPL_DEC_DOUBLE ||
+      implementation == BENNU_IMPL_NEG_DOUBLE ||
+      implementation == BENNU_IMPL_ABS_DOUBLE ||
+      implementation == BENNU_IMPL_SUB_DOUBLE ||
+      implementation == BENNU_IMPL_MUL_DOUBLE ||
       implementation == BENNU_IMPL_EQUALS_DOUBLE) {
     parameter_type = BENNU_DOUBLE;
   } else if (implementation == BENNU_IMPL_EQUALS_BOOL ||
@@ -919,7 +1148,34 @@ static int bennu_failure_context_valid(const BennuResources *resources) {
         resources->failure_primitive_id == BENNU_PRIMITIVE_ADD &&
         resources->failure_signature.parameter_count == 2U &&
         resources->failure_operand_count == 2U;
-    return (valid_inc != 0 || valid_add != 0) &&
+    const int valid_dec =
+        resources->failure_implementation == BENNU_IMPL_DEC_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_DEC &&
+        resources->failure_signature.parameter_count == 1U &&
+        resources->failure_operand_count == 1U;
+    const int valid_neg =
+        resources->failure_implementation == BENNU_IMPL_NEG_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_NEG &&
+        resources->failure_signature.parameter_count == 1U &&
+        resources->failure_operand_count == 1U;
+    const int valid_abs =
+        resources->failure_implementation == BENNU_IMPL_ABS_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_ABS &&
+        resources->failure_signature.parameter_count == 1U &&
+        resources->failure_operand_count == 1U;
+    const int valid_sub =
+        resources->failure_implementation == BENNU_IMPL_SUB_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_SUB &&
+        resources->failure_signature.parameter_count == 2U &&
+        resources->failure_operand_count == 2U;
+    const int valid_mul =
+        resources->failure_implementation == BENNU_IMPL_MUL_INT &&
+        resources->failure_primitive_id == BENNU_PRIMITIVE_MUL &&
+        resources->failure_signature.parameter_count == 2U &&
+        resources->failure_operand_count == 2U;
+    return (valid_inc != 0 || valid_add != 0 || valid_dec != 0 ||
+            valid_neg != 0 || valid_abs != 0 || valid_sub != 0 ||
+            valid_mul != 0) &&
            resources->failure_signature.parameter_types[0] == BENNU_INT &&
            resources->failure_signature.result_type == BENNU_INT &&
            resources->failure_left_operand.type == BENNU_INT &&

@@ -55,7 +55,7 @@ if(MSVC)
   )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set_source_files_properties(src/primitive.cpp PROPERTIES
-    COMPILE_OPTIONS "-frounding-math;-fno-fast-math"
+    COMPILE_OPTIONS "-frounding-math;-ffp-contract=off;-fno-fast-math"
   )
 endif()
 
