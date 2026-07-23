@@ -2645,7 +2645,8 @@ void append_resource_initialization(
       "0, 0U, 0, 0U, 0, 0U, BENNU_IMPL_NONE, "
       "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
       "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
-      "BENNU_PRIMITIVE_NONE, {0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
+      "BENNU_PRIMITIVE_NONE, BENNU_DOMAIN_NONE, "
+      "{0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
       "0U, {{0U, 1U, 1U}, {0U, 1U, 1U}}, "
       "{{0U, 1U, 1U}, {0U, 1U, 1U}}};\n";
 }

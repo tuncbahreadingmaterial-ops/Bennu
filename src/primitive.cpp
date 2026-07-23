@@ -1643,6 +1643,7 @@ TEST_CASE("checked arithmetic primitives expose the required stable signatures")
   CHECK(production_primitive_table_validation().ok);
 }
 
+// TEST-ID: CHECKED-ARITHMETIC-EVALUATOR-STRUCTURED-OVERFLOW
 TEST_CASE("checked Int arithmetic kernels cover boundaries without partial arithmetic") {
   struct IntegerCase {
     std::string_view primitive;
@@ -1740,86 +1741,173 @@ TEST_CASE("checked Int arithmetic kernels cover boundaries without partial arith
             DomainErrorReason::integer_overflow);
       CHECK(result.error.domain->operands.size() == arity);
       CHECK(result.error.location.offset == location.offset);
+      CHECK(result.error.location.line == location.line);
+      CHECK(result.error.location.column == location.column);
+      CHECK_FALSE(result.error.element_index.has_value());
       REQUIRE(result.error.primitive.has_value());
+      REQUIRE(result.error.primitive->id.has_value());
+      CHECK(*result.error.primitive->id == descriptor->id);
       CHECK(result.error.primitive->name ==
             std::string(integer_case.primitive));
+      REQUIRE(result.error.domain->signature.parameter_types.size() == arity);
+      for (std::size_t index = 0; index < arity; ++index) {
+        CHECK(result.error.domain->signature.parameter_types[index] ==
+              ScalarType::integer);
+        CHECK(result.error.domain->operands[index].type == ScalarType::integer);
+        CHECK(result.error.domain->operands[index].integer ==
+              operands[index].integer);
+      }
+      CHECK(result.error.domain->signature.result_type == ScalarType::integer);
     }
   }
 }
 
+// TEST-ID: CHECKED-ARITHMETIC-EVALUATOR-EXACT-BITS
 TEST_CASE("checked Double arithmetic preserves exact binary64 semantics and the host environment") {
   struct DoubleCase {
     std::string_view primitive;
+    std::string_view category;
     std::uint64_t left_bits;
     std::uint64_t right_bits;
     std::uint64_t expected_bits;
   };
-  constexpr std::array<DoubleCase, 30> cases{{
-      {"dec", UINT64_C(0x0000000000000000), 0,
+  constexpr std::array<DoubleCase, 65> cases{{
+      {"dec", "+zero", UINT64_C(0x0000000000000000), 0,
        UINT64_C(0xbff0000000000000)},
-      {"dec", UINT64_C(0x8000000000000000), 0,
+      {"dec", "-zero", UINT64_C(0x8000000000000000), 0,
        UINT64_C(0xbff0000000000000)},
-      {"dec", UINT64_C(0x7fefffffffffffff), 0,
+      {"dec", "smallest-subnormal", UINT64_C(0x0000000000000001), 0,
+       UINT64_C(0xbff0000000000000)},
+      {"dec", "largest-subnormal", UINT64_C(0x000fffffffffffff), 0,
+       UINT64_C(0xbff0000000000000)},
+      {"dec", "smallest-normal", UINT64_C(0x0010000000000000), 0,
+       UINT64_C(0xbff0000000000000)},
+      {"dec", "largest-finite", UINT64_C(0x7fefffffffffffff), 0,
        UINT64_C(0x7fefffffffffffff)},
-      {"dec", UINT64_C(0xfff0000000000000), 0,
-       UINT64_C(0xfff0000000000000)},
-      {"dec", UINT64_C(0x7ff0000000000001), 0,
-       UINT64_C(0x7ff8000000000000)},
-      {"neg", UINT64_C(0x0000000000000000), 0,
-       UINT64_C(0x8000000000000000)},
-      {"neg", UINT64_C(0x8000000000000000), 0,
-       UINT64_C(0x0000000000000000)},
-      {"neg", UINT64_C(0x7ff0000000000000), 0,
-       UINT64_C(0xfff0000000000000)},
-      {"neg", UINT64_C(0x7ff8000000000000), 0,
-       UINT64_C(0x7ff8000000000000)},
-      {"neg", UINT64_C(0x7ff0000000000001), 0,
-       UINT64_C(0x7ff8000000000000)},
-      {"abs", UINT64_C(0x8000000000000000), 0,
-       UINT64_C(0x0000000000000000)},
-      {"abs", UINT64_C(0xfff0000000000000), 0,
+      {"dec", "+infinity", UINT64_C(0x7ff0000000000000), 0,
        UINT64_C(0x7ff0000000000000)},
-      {"abs", UINT64_C(0xffefffffffffffff), 0,
-       UINT64_C(0x7fefffffffffffff)},
-      {"abs", UINT64_C(0x800fffffffffffff), 0,
+      {"dec", "-infinity", UINT64_C(0xfff0000000000000), 0,
+       UINT64_C(0xfff0000000000000)},
+      {"dec", "+quiet-nan", UINT64_C(0x7ff8123456789abc), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"dec", "-quiet-nan", UINT64_C(0xfff8123456789abc), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"dec", "+signaling-nan", UINT64_C(0x7ff0000000000001), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"dec", "-signaling-nan", UINT64_C(0xfff0000000000001), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"dec", "canonical-nan", UINT64_C(0x7ff8000000000000), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"dec", "halfway-to-even", UINT64_C(0x4340000000000001), 0,
+       UINT64_C(0x4340000000000000)},
+      {"neg", "+zero", UINT64_C(0x0000000000000000), 0,
+       UINT64_C(0x8000000000000000)},
+      {"neg", "-zero", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"neg", "smallest-subnormal", UINT64_C(0x0000000000000001), 0,
+       UINT64_C(0x8000000000000001)},
+      {"neg", "largest-subnormal", UINT64_C(0x000fffffffffffff), 0,
+       UINT64_C(0x800fffffffffffff)},
+      {"neg", "smallest-normal", UINT64_C(0x0010000000000000), 0,
+       UINT64_C(0x8010000000000000)},
+      {"neg", "largest-finite", UINT64_C(0x7fefffffffffffff), 0,
+       UINT64_C(0xffefffffffffffff)},
+      {"neg", "+infinity", UINT64_C(0x7ff0000000000000), 0,
+       UINT64_C(0xfff0000000000000)},
+      {"neg", "-infinity", UINT64_C(0xfff0000000000000), 0,
+       UINT64_C(0x7ff0000000000000)},
+      {"neg", "+quiet-nan", UINT64_C(0x7ff8123456789abc), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"neg", "-signaling-nan", UINT64_C(0xfff0000000000001), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"neg", "canonical-nan", UINT64_C(0x7ff8000000000000), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"abs", "+zero", UINT64_C(0x0000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"abs", "-zero", UINT64_C(0x8000000000000000), 0,
+       UINT64_C(0x0000000000000000)},
+      {"abs", "smallest-subnormal", UINT64_C(0x8000000000000001), 0,
+       UINT64_C(0x0000000000000001)},
+      {"abs", "largest-subnormal", UINT64_C(0x800fffffffffffff), 0,
        UINT64_C(0x000fffffffffffff)},
-      {"abs", UINT64_C(0x7ff8000000000000), 0,
+      {"abs", "smallest-normal", UINT64_C(0x8010000000000000), 0,
+       UINT64_C(0x0010000000000000)},
+      {"abs", "largest-finite", UINT64_C(0xffefffffffffffff), 0,
+       UINT64_C(0x7fefffffffffffff)},
+      {"abs", "+infinity", UINT64_C(0x7ff0000000000000), 0,
+       UINT64_C(0x7ff0000000000000)},
+      {"abs", "-infinity", UINT64_C(0xfff0000000000000), 0,
+       UINT64_C(0x7ff0000000000000)},
+      {"abs", "+signaling-nan", UINT64_C(0x7ff0000000000001), 0,
        UINT64_C(0x7ff8000000000000)},
-      {"abs", UINT64_C(0xfff8123456789abc), 0,
+      {"abs", "-quiet-nan", UINT64_C(0xfff8123456789abc), 0,
        UINT64_C(0x7ff8000000000000)},
-      {"sub", UINT64_C(0x0000000000000000),
+      {"abs", "canonical-nan", UINT64_C(0x7ff8000000000000), 0,
+       UINT64_C(0x7ff8000000000000)},
+      {"sub", "signed-zero", UINT64_C(0x0000000000000000),
        UINT64_C(0x8000000000000000), UINT64_C(0x0000000000000000)},
-      {"sub", UINT64_C(0x8000000000000000),
+      {"sub", "negative-zero", UINT64_C(0x8000000000000000),
        UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000)},
-      {"sub", UINT64_C(0x0010000000000000),
+      {"sub", "smallest-subnormal", UINT64_C(0x0010000000000000),
        UINT64_C(0x000fffffffffffff), UINT64_C(0x0000000000000001)},
-      {"sub", UINT64_C(0x3ff0000000000000),
+      {"sub", "largest-subnormal", UINT64_C(0x000fffffffffffff),
+       UINT64_C(0x0000000000000000), UINT64_C(0x000fffffffffffff)},
+      {"sub", "smallest-normal", UINT64_C(0x0010000000000000),
+       UINT64_C(0x0000000000000000), UINT64_C(0x0010000000000000)},
+      {"sub", "largest-finite", UINT64_C(0x7fefffffffffffff),
+       UINT64_C(0x0000000000000000), UINT64_C(0x7fefffffffffffff)},
+      {"sub", "+infinity", UINT64_C(0x7ff0000000000000),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000000)},
+      {"sub", "-infinity", UINT64_C(0xfff0000000000000),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000000)},
+      {"sub", "halfway-to-even", UINT64_C(0x3ff0000000000000),
        UINT64_C(0x3c90000000000000), UINT64_C(0x3ff0000000000000)},
-      {"sub", UINT64_C(0x7ff0000000000000),
+      {"sub", "arithmetic-nan", UINT64_C(0x7ff0000000000000),
        UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff8000000000000)},
-      {"sub", UINT64_C(0xfff0000000000000),
-       UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000)},
-      {"mul", UINT64_C(0x8000000000000000),
+      {"sub", "overflow", UINT64_C(0x7fefffffffffffff),
+       UINT64_C(0xffefffffffffffff), UINT64_C(0x7ff0000000000000)},
+      {"sub", "+quiet-nan", UINT64_C(0x7ff8123456789abc),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {"sub", "-signaling-nan", UINT64_C(0x3ff0000000000000),
+       UINT64_C(0xfff0000000000001), UINT64_C(0x7ff8000000000000)},
+      {"sub", "canonical-nan", UINT64_C(0x7ff8000000000000),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {"mul", "signed-zero", UINT64_C(0x8000000000000000),
        UINT64_C(0x4000000000000000), UINT64_C(0x8000000000000000)},
-      {"mul", UINT64_C(0x0000000000000001),
+      {"mul", "smallest-subnormal", UINT64_C(0x0000000000000001),
        UINT64_C(0x4000000000000000), UINT64_C(0x0000000000000002)},
-      {"mul", UINT64_C(0x0000000000000001),
+      {"mul", "largest-subnormal", UINT64_C(0x000fffffffffffff),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x000fffffffffffff)},
+      {"mul", "smallest-normal", UINT64_C(0x0010000000000000),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x0010000000000000)},
+      {"mul", "largest-finite", UINT64_C(0x7fefffffffffffff),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7fefffffffffffff)},
+      {"mul", "underflow-to-positive-zero", UINT64_C(0x0000000000000001),
        UINT64_C(0x3fe0000000000000), UINT64_C(0x0000000000000000)},
-      {"mul", UINT64_C(0x8000000000000001),
+      {"mul", "underflow-to-negative-zero", UINT64_C(0x8000000000000001),
        UINT64_C(0x3fe0000000000000), UINT64_C(0x8000000000000000)},
-      {"mul", UINT64_C(0x3ff0000000000001),
-       UINT64_C(0x3ff0000000000001), UINT64_C(0x3ff0000000000002)},
-      {"mul", UINT64_C(0x7fefffffffffffff),
+      {"mul", "halfway-to-even-subnormal", UINT64_C(0x0000000000000001),
+       UINT64_C(0x3ff8000000000000), UINT64_C(0x0000000000000002)},
+      {"mul", "overflow", UINT64_C(0x7fefffffffffffff),
        UINT64_C(0x4000000000000000), UINT64_C(0x7ff0000000000000)},
-      {"mul", UINT64_C(0x7ff0000000000000),
+      {"mul", "arithmetic-nan", UINT64_C(0x7ff0000000000000),
        UINT64_C(0x0000000000000000), UINT64_C(0x7ff8000000000000)},
-      {"mul", UINT64_C(0xbff0000000000000),
+      {"mul", "+infinity", UINT64_C(0x3ff0000000000000),
+       UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff0000000000000)},
+      {"mul", "-infinity", UINT64_C(0xbff0000000000000),
        UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000)},
+      {"mul", "+quiet-nan", UINT64_C(0x7ff8123456789abc),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {"mul", "-signaling-nan", UINT64_C(0x3ff0000000000000),
+       UINT64_C(0xfff0000000000001), UINT64_C(0x7ff8000000000000)},
+      {"mul", "canonical-nan", UINT64_C(0x7ff8000000000000),
+       UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
   }};
 
   constexpr SourceLocation location{81U, 9U, 5U};
   for (const DoubleCase &double_case : cases) {
     CAPTURE(std::string(double_case.primitive));
+    CAPTURE(std::string(double_case.category));
     CAPTURE(double_case.left_bits);
     CAPTURE(double_case.right_bits);
     const PrimitiveDescriptor *descriptor =

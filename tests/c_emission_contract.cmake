@@ -1,7 +1,7 @@
 # TEST-ID: PUBLIC-SUCCESS-CORPUS
 # TEST-ID: PUBLIC-SUCCESS-CROSS-PATH-BYTES
 # TEST-ID: PUBLIC-SUCCESS-NATIVE
-# TEST-ID: CHECKED-ARITHMETIC-CROSS-PATH-BYTES
+# TEST-ID: CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES
 foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -147,7 +147,7 @@ string(REPLACE "${normal_main}" "${hostile_main}" hostile_source
        "${emitted_source}")
 if(hostile_source STREQUAL emitted_source)
   message(FATAL_ERROR
-    "CHECKED-ARITHMETIC-CROSS-PATH-BYTES could not install hostile FP harness")
+    "CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES could not install hostile FP harness")
 endif()
 file(WRITE "${hostile_file}" "${hostile_source}")
 
@@ -167,14 +167,14 @@ if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
 else()
   execute_process(
     COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math -ffp-contract=off
-            -fno-fast-math -Wall -Wextra -Wpedantic -Werror
+            -fno-fast-math -Wall -Wextra -Werror -pedantic-errors
             "${generated_file}" -o "${generated_executable}"
     WORKING_DIRECTORY "${work_directory}"
     RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
     ERROR_VARIABLE compile_stderr)
   execute_process(
     COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math -ffp-contract=off
-            -fno-fast-math -Wall -Wextra -Wpedantic -Werror
+            -fno-fast-math -Wall -Wextra -Werror -pedantic-errors
             "${hostile_file}" -o "${hostile_executable}"
     WORKING_DIRECTORY "${work_directory}"
     RESULT_VARIABLE hostile_compile_exit OUTPUT_VARIABLE hostile_compile_stdout

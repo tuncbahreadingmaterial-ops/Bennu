@@ -3,6 +3,8 @@
 
 #include "doctest/doctest.h"
 
+#include <array>
+#include <cstdint>
 #include <initializer_list>
 #include <string>
 
@@ -118,6 +120,91 @@ TEST_CASE("CUTOVER-03 public APIs preserve structured located rewrite errors") {
   REQUIRE(lifted_domain.error.primitive.has_value());
   CHECK(lifted_domain.error.primitive->name == "mul");
   CHECK(lifted_domain.error.domain->operands.size() == 2U);
+}
+
+// TEST-ID: CHECKED-ARITHMETIC-STRUCTURED-EVALUATOR
+TEST_CASE("checked arithmetic evaluator errors preserve every structured overflow field") {
+  struct OverflowCase {
+    const char *name;
+    bennu::PrimitiveId id;
+    const char *scalar_source;
+    const char *lifted_source;
+    std::array<std::int64_t, 2> operands;
+    std::size_t arity;
+  };
+  constexpr std::array<OverflowCase, 5> cases{{
+      {"dec", bennu::PrimitiveId::dec, "dec[-9223372036854775808]",
+       "dec[(0 -9223372036854775808 -9223372036854775808)]",
+       {INT64_MIN, 0}, 1U},
+      {"neg", bennu::PrimitiveId::neg, "neg[-9223372036854775808]",
+       "neg[(0 -9223372036854775808 -9223372036854775808)]",
+       {INT64_MIN, 0}, 1U},
+      {"abs", bennu::PrimitiveId::abs, "abs[-9223372036854775808]",
+       "abs[(0 -9223372036854775808 -9223372036854775808)]",
+       {INT64_MIN, 0}, 1U},
+      {"sub", bennu::PrimitiveId::sub, "sub[-9223372036854775808 1]",
+       "sub[(0 -9223372036854775808 -9223372036854775808) 1]",
+       {INT64_MIN, 1}, 2U},
+      {"mul", bennu::PrimitiveId::mul, "mul[-9223372036854775808 -1]",
+       "mul[(1 -9223372036854775808 -9223372036854775808) -1]",
+       {INT64_MIN, -1}, 2U},
+  }};
+
+  for (const OverflowCase &overflow_case : cases) {
+    CAPTURE(std::string(overflow_case.name));
+    for (const bool lifted : {false, true}) {
+      CAPTURE(lifted);
+      bennu::ValueResult result = bennu::evaluate_expression(
+          lifted ? overflow_case.lifted_source : overflow_case.scalar_source);
+      REQUIRE_FALSE(result.ok);
+      CHECK(result.error.kind == bennu::ErrorKind::domain_error);
+      REQUIRE(result.error.primitive.has_value());
+      REQUIRE(result.error.primitive->id.has_value());
+      CHECK(*result.error.primitive->id == overflow_case.id);
+      CHECK(result.error.primitive->name == overflow_case.name);
+      REQUIRE(result.error.domain.has_value());
+      CHECK(result.error.domain->reason ==
+            bennu::DomainErrorReason::integer_overflow);
+      REQUIRE(result.error.domain->signature.parameter_types.size() ==
+              overflow_case.arity);
+      CHECK(result.error.domain->signature.result_type ==
+            bennu::ScalarType::integer);
+      REQUIRE(result.error.domain->operands.size() == overflow_case.arity);
+      for (std::size_t index = 0; index < overflow_case.arity; ++index) {
+        CHECK(result.error.domain->signature.parameter_types[index] ==
+              bennu::ScalarType::integer);
+        CHECK(result.error.domain->operands[index].type ==
+              bennu::ScalarType::integer);
+        CHECK(result.error.domain->operands[index].integer ==
+              overflow_case.operands[index]);
+      }
+      if (lifted) {
+        REQUIRE(result.error.element_index.has_value());
+        CHECK(*result.error.element_index == 1U);
+      } else {
+        CHECK_FALSE(result.error.element_index.has_value());
+      }
+      CHECK(result.error.location.offset == 1U);
+      CHECK(result.error.location.line == 1U);
+      CHECK(result.error.location.column == 1U);
+      CHECK(result.value.container == bennu::ContainerKind::scalar);
+      CHECK(result.value.vector.booleans.get() == nullptr);
+      CHECK(result.value.vector.integers.get() == nullptr);
+      CHECK(result.value.vector.doubles.get() == nullptr);
+    }
+  }
+
+  bennu::ProgramResult transactional = bennu::evaluate_source(
+      "dec[(1 2)]\n"
+      "mul[(1 -9223372036854775808 -9223372036854775808) -1]\n"
+      "abs[(3 4)]\n");
+  REQUIRE_FALSE(transactional.ok);
+  CHECK(transactional.values.empty());
+  REQUIRE(transactional.error.element_index.has_value());
+  CHECK(*transactional.error.element_index == 1U);
+  CHECK(transactional.error.location.offset == 12U);
+  CHECK(transactional.error.location.line == 2U);
+  CHECK(transactional.error.location.column == 1U);
 }
 
 TEST_CASE("CUTOVER-04 public source evaluation is transactional") {

@@ -85,6 +85,11 @@ typedef enum BennuFailure {
   BENNU_FAILURE_INTERNAL = 6
 } BennuFailure;
 
+typedef enum BennuDomainReason {
+  BENNU_DOMAIN_NONE = 0,
+  BENNU_DOMAIN_INTEGER_OVERFLOW = 1
+} BennuDomainReason;
+
 typedef enum BennuProfile {
   BENNU_PROFILE_TRUSTED_LOCAL_V1 = 0,
   BENNU_PROFILE_BOUNDED_V1 = 1
@@ -161,6 +166,7 @@ typedef struct BennuResources {
   BennuScalar failure_left_operand;
   BennuScalar failure_right_operand;
   BennuPrimitiveId failure_primitive_id;
+  BennuDomainReason failure_domain_reason;
   BennuScalarSignature failure_signature;
   size_t failure_operand_count;
   BennuSourceSpan failure_primary_span;
@@ -270,6 +276,7 @@ static void bennu_set_domain_context(
     resources->failure_left_operand = left;
     resources->failure_right_operand = right;
     resources->failure_primitive_id = primitive_id;
+    resources->failure_domain_reason = BENNU_DOMAIN_INTEGER_OVERFLOW;
     resources->failure_signature = signature;
     resources->failure_operand_count = operand_count;
     resources->failure_has_element_index = has_element_index;
@@ -1189,7 +1196,8 @@ static int bennu_failure_context_valid(const BennuResources *resources) {
         resources->failure_primitive_id == BENNU_PRIMITIVE_MUL &&
         resources->failure_signature.parameter_count == 2U &&
         resources->failure_operand_count == 2U;
-    return (valid_inc != 0 || valid_add != 0 || valid_dec != 0 ||
+    return resources->failure_domain_reason == BENNU_DOMAIN_INTEGER_OVERFLOW &&
+           (valid_inc != 0 || valid_add != 0 || valid_dec != 0 ||
             valid_neg != 0 || valid_abs != 0 || valid_sub != 0 ||
             valid_mul != 0) &&
            resources->failure_signature.parameter_types[0] == BENNU_INT &&
@@ -1257,11 +1265,15 @@ static int bennu_report_failure(const BennuResources *resources) {
       return fprintf(
                  stderr,
                  "bennu-source:%" PRIuMAX ":%" PRIuMAX
-                 ": DomainError: %s failed: integer_overflow at result index "
+                 ": DomainError: %s failed: %s at result index "
                  "%" PRIuMAX "\n",
                  (uintmax_t)resources->failure_source_location.line,
                  (uintmax_t)resources->failure_source_location.column,
                  resources->failure_admission_point,
+                 resources->failure_domain_reason ==
+                         BENNU_DOMAIN_INTEGER_OVERFLOW
+                     ? "integer_overflow"
+                     : "unknown",
                  (uintmax_t)resources->failure_element_index) < 0
                  ? 0
                  : 1;
@@ -1269,10 +1281,13 @@ static int bennu_report_failure(const BennuResources *resources) {
     return fprintf(
                stderr,
                "bennu-source:%" PRIuMAX ":%" PRIuMAX
-               ": DomainError: %s failed: integer_overflow\n",
+               ": DomainError: %s failed: %s\n",
                (uintmax_t)resources->failure_source_location.line,
                (uintmax_t)resources->failure_source_location.column,
-               resources->failure_admission_point) < 0
+               resources->failure_admission_point,
+               resources->failure_domain_reason == BENNU_DOMAIN_INTEGER_OVERFLOW
+                   ? "integer_overflow"
+                   : "unknown") < 0
                ? 0
                : 1;
   }
