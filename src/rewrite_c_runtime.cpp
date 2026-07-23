@@ -40,7 +40,8 @@ typedef enum BennuFailure {
   BENNU_FAILURE_PROFILE = 2,
   BENNU_FAILURE_ALLOCATION = 3,
   BENNU_FAILURE_DOMAIN = 4,
-  BENNU_FAILURE_INTERNAL = 5
+  BENNU_FAILURE_SHAPE = 5,
+  BENNU_FAILURE_INTERNAL = 6
 } BennuFailure;
 
 typedef enum BennuProfile {
@@ -152,6 +153,28 @@ static void bennu_set_profile_failure(
     resources->failure_admission_point = admission_point;
     resources->failure_source_location = source_location;
   }
+}
+
+static int bennu_require_shape(
+    BennuResources *resources, const char *primitive, size_t argument_position,
+    size_t expected_count, const BennuValue *argument,
+    BennuSourceLocation source_location) {
+  if (argument->container != BENNU_VECTOR) {
+    bennu_set_failure(resources, BENNU_FAILURE_INTERNAL);
+    return 0;
+  }
+  if (argument->count == expected_count) {
+    return 1;
+  }
+  if (resources->failure == BENNU_FAILURE_NONE) {
+    resources->failure = BENNU_FAILURE_SHAPE;
+    resources->failure_configured_limit = expected_count;
+    resources->failure_usage_before = argument->count;
+    resources->failure_refused_charge = argument_position;
+    resources->failure_admission_point = primitive;
+    resources->failure_source_location = source_location;
+  }
+  return 0;
 }
 
 static int bennu_charge_work(BennuResources *resources, size_t work,
@@ -725,6 +748,20 @@ static int bennu_report_failure(const BennuResources *resources) {
     message = "ResourceError: allocation_unavailable\n";
   } else if (resources->failure == BENNU_FAILURE_DOMAIN) {
     message = "DomainError: integer_overflow\n";
+  } else if (resources->failure == BENNU_FAILURE_SHAPE) {
+    return fprintf(
+               stderr,
+               "bennu-source:%" PRIuMAX ":%" PRIuMAX
+               ": ShapeMismatch: %s argument %" PRIuMAX
+               " expected shape [%" PRIuMAX "], got [%" PRIuMAX "]\n",
+               (uintmax_t)resources->failure_source_location.line,
+               (uintmax_t)resources->failure_source_location.column,
+               resources->failure_admission_point,
+               (uintmax_t)resources->failure_refused_charge,
+               (uintmax_t)resources->failure_configured_limit,
+               (uintmax_t)resources->failure_usage_before) < 0
+               ? 0
+               : 1;
   }
   return fputs(message, stderr) == EOF ? 0 : 1;
 }
