@@ -23,16 +23,6 @@ Error no_error() {
   return make_error(ErrorKind::none, SourceLocation{0, 1, 1});
 }
 
-std::string_view profile_name(ExecutionProfile profile) {
-  switch (profile) {
-  case ExecutionProfile::trusted_local_v1:
-    return "trusted-local-v1";
-  case ExecutionProfile::bounded_v1:
-    return "bounded-v1";
-  }
-  return "";
-}
-
 Value empty_vector(ScalarType element_type) {
   return Value{
       ContainerKind::vector,
@@ -71,7 +61,8 @@ Error make_resource_failure(
     std::optional<ResourceLimitKind> limit_kind,
     std::optional<std::size_t> configured_limit,
     std::optional<std::size_t> usage_before,
-    std::optional<std::size_t> refused_charge) {
+    std::optional<std::size_t> refused_charge,
+    std::optional<std::size_t> allocation_ordinal = std::nullopt) {
   Error error = make_error(ErrorKind::resource_error, location);
   if (!producer_name.empty()) {
     error.primitive = PrimitiveErrorContext{std::string(producer_name)};
@@ -80,11 +71,12 @@ Error make_resource_failure(
       reason,
       requested_elements,
       requested_bytes,
-      std::string(profile_name(resources.profile)),
+      std::string(execution_profile_name(resources.profile)),
       limit_kind,
       configured_limit,
       usage_before,
       refused_charge,
+      allocation_ordinal,
   };
   return error;
 }
@@ -96,7 +88,8 @@ validate_profile_configuration(const EvaluationResources &resources,
   const bool has_configured_limit =
       resources.limits.max_vector_bytes.has_value() ||
       resources.limits.max_live_evaluation_bytes.has_value() ||
-      resources.limits.max_work_units.has_value();
+      resources.limits.max_work_units.has_value() ||
+      resources.limits.max_tuple_table_bytes.has_value();
   std::string_view message;
   switch (resources.profile) {
   case ExecutionProfile::trusted_local_v1:
@@ -106,10 +99,25 @@ validate_profile_configuration(const EvaluationResources &resources,
     message = "trusted-local-v1 requires every resource limit to be omitted";
     break;
   case ExecutionProfile::bounded_v1:
+    if (has_configured_limit &&
+        !resources.limits.max_tuple_table_bytes.has_value()) {
+      return std::nullopt;
+    }
+    message = resources.limits.max_tuple_table_bytes.has_value()
+                  ? "bounded-v1 does not support max_tuple_table_bytes"
+                  : "bounded-v1 requires at least one configured resource limit";
+    break;
+  case ExecutionProfile::trusted_local_v2:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v2 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v2:
     if (has_configured_limit) {
       return std::nullopt;
     }
-    message = "bounded-v1 requires at least one configured resource limit";
+    message = "bounded-v2 requires at least one configured resource limit";
     break;
   default:
     message = "execution profile tag is unknown";
@@ -213,6 +221,20 @@ VectorAllocationResult allocation_failure(Value, Error error) {
 
 } // namespace
 
+std::string_view execution_profile_name(ExecutionProfile profile) {
+  switch (profile) {
+  case ExecutionProfile::trusted_local_v1:
+    return "trusted-local-v1";
+  case ExecutionProfile::bounded_v1:
+    return "bounded-v1";
+  case ExecutionProfile::trusted_local_v2:
+    return "trusted-local-v2";
+  case ExecutionProfile::bounded_v2:
+    return "bounded-v2";
+  }
+  return "";
+}
+
 EvaluationResources make_trusted_local_resources(
     AllocationFailureInjection allocation_failure) {
   return EvaluationResources{
@@ -233,6 +255,28 @@ EvaluationResources make_bounded_resources(
                              0,
                              0,
                              0};
+}
+
+EvaluationResources make_trusted_local_v2_resources(
+    AllocationFailureInjection allocation_failure) {
+  return EvaluationResources{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt, std::nullopt},
+      allocation_failure,
+      0U,
+      0U,
+      0U,
+  };
+}
+
+EvaluationResources make_bounded_v2_resources(
+    ResourceLimits limits, AllocationFailureInjection allocation_failure) {
+  return EvaluationResources{ExecutionProfile::bounded_v2,
+                             limits,
+                             allocation_failure,
+                             0U,
+                             0U,
+                             0U};
 }
 
 VectorAllocationResult allocate_vector(EvaluationResources &resources,
@@ -291,7 +335,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
         make_resource_failure(
             resources, ResourceErrorReason::allocation_unavailable, location,
             producer_name, element_count, byte_count, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt));
+            std::nullopt, std::nullopt, std::nullopt, ordinal));
   }
 
   void *storage = std::malloc(byte_count);
@@ -301,7 +345,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
         make_resource_failure(
             resources, ResourceErrorReason::allocation_unavailable, location,
             producer_name, element_count, byte_count, std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt));
+            std::nullopt, std::nullopt, std::nullopt, ordinal));
   }
   std::memset(storage, 0, byte_count);
   switch (element_type) {
@@ -320,6 +364,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
     candidate.vector.double_count = element_count;
     break;
   }
+  candidate.vector.canonical_bytes = byte_count;
+  candidate.vector.accounting_active = true;
   commit_admission(resources, admission);
   return VectorAllocationResult{true, std::move(candidate), ValueInvariant::none,
                                 no_error()};
@@ -406,7 +452,7 @@ WorkspaceReservationResult reserve_workspace(
         make_resource_failure(
             resources, ResourceErrorReason::allocation_unavailable, location,
             producer_name, std::nullopt, byte_count, std::nullopt, std::nullopt,
-            std::nullopt, std::nullopt),
+            std::nullopt, std::nullopt, ordinal),
     };
   }
   void *storage = std::malloc(byte_count);
@@ -417,7 +463,7 @@ WorkspaceReservationResult reserve_workspace(
         make_resource_failure(
             resources, ResourceErrorReason::allocation_unavailable, location,
             producer_name, std::nullopt, byte_count, std::nullopt, std::nullopt,
-            std::nullopt, std::nullopt),
+            std::nullopt, std::nullopt, ordinal),
     };
   }
   commit_admission(resources, admission);
@@ -449,6 +495,237 @@ WorkChargeResult charge_work(EvaluationResources &resources,
   return WorkChargeResult{true, no_error()};
 }
 
+TupleReservationResult reserve_tuple_table(
+    EvaluationResources &resources, std::size_t element_count,
+    SourceLocation location, std::string_view producer_name) {
+  std::optional<Error> profile_error =
+      validate_profile_configuration(resources, location, producer_name);
+  if (profile_error.has_value()) {
+    return TupleReservationResult{false, TupleTableReservation{},
+                                  std::move(*profile_error)};
+  }
+
+  constexpr std::size_t tuple_element_slot_bytes = 16U;
+  if (element_count > std::numeric_limits<std::size_t>::max() /
+                          tuple_element_slot_bytes) {
+    return TupleReservationResult{
+        false,
+        TupleTableReservation{},
+        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+                              location, producer_name, element_count,
+                              std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt),
+    };
+  }
+  const std::size_t byte_count = element_count * tuple_element_slot_bytes;
+  if (resources.limits.max_tuple_table_bytes.has_value() &&
+      byte_count > *resources.limits.max_tuple_table_bytes) {
+    return TupleReservationResult{
+        false,
+        TupleTableReservation{},
+        make_resource_failure(
+            resources, ResourceErrorReason::profile_limit, location,
+            producer_name, element_count, byte_count,
+            ResourceLimitKind::max_tuple_table_bytes,
+            resources.limits.max_tuple_table_bytes, 0U, byte_count),
+    };
+  }
+
+  AdmissionResult admission =
+      preflight(resources, std::nullopt, byte_count, 0U, location,
+                producer_name, element_count, byte_count);
+  if (!admission.ok) {
+    return TupleReservationResult{false, TupleTableReservation{},
+                                  std::move(admission.error)};
+  }
+  if (byte_count == 0U) {
+    commit_admission(resources, admission);
+    TupleTableReservation reservation;
+    reservation.accounting_active = true;
+    return TupleReservationResult{true, std::move(reservation), no_error()};
+  }
+
+  const std::size_t ordinal = resources.reservation_ordinal;
+  ++resources.reservation_ordinal;
+  if (resources.allocation_failure.fail_at_reservation_ordinal.has_value() &&
+      ordinal ==
+          *resources.allocation_failure.fail_at_reservation_ordinal) {
+    Error error = make_resource_failure(
+        resources, ResourceErrorReason::allocation_unavailable, location,
+        producer_name, element_count, byte_count, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt);
+    error.resource->allocation_ordinal = ordinal;
+    return TupleReservationResult{false, TupleTableReservation{},
+                                  std::move(error)};
+  }
+  void *storage = std::malloc(byte_count);
+  if (storage == nullptr) {
+    Error error = make_resource_failure(
+        resources, ResourceErrorReason::allocation_unavailable, location,
+        producer_name, element_count, byte_count, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt);
+    error.resource->allocation_ordinal = ordinal;
+    return TupleReservationResult{false, TupleTableReservation{},
+                                  std::move(error)};
+  }
+  std::memset(storage, 0, byte_count);
+  commit_admission(resources, admission);
+  TupleTableReservation reservation;
+  reservation.storage.reset(static_cast<std::byte *>(storage));
+  reservation.element_count = element_count;
+  reservation.canonical_bytes = byte_count;
+  reservation.accounting_active = true;
+  return TupleReservationResult{true, std::move(reservation), no_error()};
+}
+
+TupleConstructionResult make_tuple_value(
+    EvaluationResources &resources, std::span<Value> elements,
+    SourceLocation location, std::string_view producer_name) {
+  std::optional<Error> configuration_error =
+      validate_profile_configuration(resources, location, producer_name);
+  if (configuration_error.has_value()) {
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none,
+                                   std::move(*configuration_error)};
+  }
+  if (resources.profile == ExecutionProfile::trusted_local_v1 ||
+      resources.profile == ExecutionProfile::bounded_v1) {
+    Error error = make_error(ErrorKind::profile_error, location);
+    if (!producer_name.empty()) {
+      error.primitive = PrimitiveErrorContext{std::string(producer_name)};
+    }
+    error.profile = ProfileErrorContext{
+        ProfileErrorReason::unsupported_value_kind,
+        std::string(execution_profile_name(resources.profile)), TypeKind::tuple};
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none, std::move(error)};
+  }
+
+  std::size_t node_count = elements.size();
+  std::size_t edge_count = elements.size();
+  std::size_t payload_count = 0U;
+  std::size_t reservation_count = 0U;
+  for (const Value &element : elements) {
+    const ValueValidationResult validation = validate_value(element);
+    if (!validation.ok) {
+      return TupleConstructionResult{false, make_int_value(0),
+                                     validation.invariant, no_error()};
+    }
+    if (element.container == ContainerKind::vector) {
+      ++payload_count;
+      continue;
+    }
+    if (element.container != ContainerKind::tuple) {
+      continue;
+    }
+    if (element.tuple.nodes.size() >
+            std::numeric_limits<std::size_t>::max() - node_count ||
+        element.tuple.child_indexes.size() >
+            std::numeric_limits<std::size_t>::max() - edge_count ||
+        element.tuple.vector_payloads.size() >
+            std::numeric_limits<std::size_t>::max() - payload_count ||
+        element.tuple.reservations.size() + 1U >
+            std::numeric_limits<std::size_t>::max() - reservation_count) {
+      Error error = make_resource_failure(
+          resources, ResourceErrorReason::size_overflow, location,
+          producer_name, elements.size(), std::nullopt, std::nullopt,
+          std::nullopt, std::nullopt, std::nullopt);
+      return TupleConstructionResult{false, make_int_value(0),
+                                     ValueInvariant::none, std::move(error)};
+    }
+    node_count += element.tuple.nodes.size();
+    edge_count += element.tuple.child_indexes.size();
+    payload_count += element.tuple.vector_payloads.size();
+    reservation_count += element.tuple.reservations.size() + 1U;
+  }
+
+  Value result{ContainerKind::tuple,
+               ScalarValue{ScalarType::boolean, false, 0, 0.0},
+               VectorValue{ScalarType::boolean,
+                           {nullptr, &std::free},
+                           0U,
+                           {nullptr, &std::free},
+                           0U,
+                           {nullptr, &std::free},
+                           0U}};
+  result.tuple.nodes.reserve(node_count);
+  result.tuple.child_indexes.reserve(edge_count);
+  result.tuple.vector_payloads.reserve(payload_count);
+  result.tuple.reservations.reserve(reservation_count);
+  std::vector<std::size_t> roots;
+  roots.reserve(elements.size());
+
+  TupleReservationResult reserved = reserve_tuple_table(
+      resources, elements.size(), location, producer_name);
+  if (!reserved.ok) {
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none,
+                                   std::move(reserved.error)};
+  }
+
+  for (Value &element : elements) {
+    Value moved = move_value(element);
+    if (moved.container != ContainerKind::tuple) {
+      roots.push_back(result.tuple.nodes.size());
+      std::size_t payload_index = 0U;
+      if (moved.container == ContainerKind::vector) {
+        payload_index = result.tuple.vector_payloads.size();
+        result.tuple.vector_payloads.push_back(std::move(moved.vector));
+      }
+      result.tuple.nodes.push_back(ValueNode{moved.container, moved.scalar, 0U,
+                                             0U, 0U, payload_index});
+      moved.claimed = false;
+      continue;
+    }
+
+    const std::size_t node_offset = result.tuple.nodes.size();
+    const std::size_t edge_offset = result.tuple.child_indexes.size();
+    const std::size_t payload_offset = result.tuple.vector_payloads.size();
+    const std::size_t reservation_offset = result.tuple.reservations.size();
+    for (ValueNode &source_node : moved.tuple.nodes) {
+      if (source_node.container == ContainerKind::tuple) {
+        source_node.first_child += edge_offset;
+        source_node.tuple_reservation_index += reservation_offset;
+      } else if (source_node.container == ContainerKind::vector) {
+        source_node.vector_payload_index += payload_offset;
+      }
+      result.tuple.nodes.push_back(std::move(source_node));
+    }
+    for (const std::size_t child_index : moved.tuple.child_indexes) {
+      result.tuple.child_indexes.push_back(child_index + node_offset);
+    }
+    for (VectorValue &payload : moved.tuple.vector_payloads) {
+      result.tuple.vector_payloads.push_back(std::move(payload));
+    }
+    for (TupleTableReservation &reservation : moved.tuple.reservations) {
+      result.tuple.reservations.push_back(std::move(reservation));
+    }
+    const std::size_t root_reservation_index =
+        result.tuple.reservations.size();
+    result.tuple.reservations.push_back(
+        std::move(moved.tuple.root_reservation));
+    roots.push_back(result.tuple.nodes.size());
+    result.tuple.nodes.push_back(ValueNode{
+        ContainerKind::tuple,
+        moved.scalar,
+        moved.tuple.first_child + edge_offset,
+        moved.tuple.child_count,
+        root_reservation_index,
+        0U,
+    });
+    moved.claimed = false;
+  }
+
+  result.tuple.first_child = result.tuple.child_indexes.size();
+  result.tuple.child_indexes.insert(result.tuple.child_indexes.end(),
+                                    roots.begin(), roots.end());
+  result.tuple.child_count = roots.size();
+  result.tuple.root_index = result.tuple.nodes.size();
+  result.tuple.root_reservation = std::move(reserved.reservation);
+  return TupleConstructionResult{true, std::move(result), ValueInvariant::none,
+                                 no_error()};
+}
+
 void release_vector_reservation(EvaluationResources &resources, Value &value) {
   if (value.container != ContainerKind::vector) {
     return;
@@ -470,11 +747,14 @@ void release_vector_reservation(EvaluationResources &resources, Value &value) {
   if (width.has_value() &&
       element_count <= std::numeric_limits<std::size_t>::max() / *width) {
     const std::size_t bytes = element_count * *width;
-    if (bytes <= resources.live_evaluation_bytes) {
+    if (value.vector.accounting_active &&
+        bytes == value.vector.canonical_bytes &&
+        bytes <= resources.live_evaluation_bytes) {
       resources.live_evaluation_bytes -= bytes;
     }
   }
-  destroy_value(value);
+  value.vector.accounting_active = false;
+  value = make_int_value(0);
 }
 
 void release_workspace(EvaluationResources &resources,
@@ -484,6 +764,112 @@ void release_workspace(EvaluationResources &resources,
   }
   reservation.storage.reset();
   reservation.bytes = 0;
+}
+
+ValueReleaseResult release_value_reservations(EvaluationResources &resources,
+                                              Value &value) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    return ValueReleaseResult{false, validation.invariant};
+  }
+  if (value.container == ContainerKind::vector) {
+    release_vector_reservation(resources, value);
+    (void)destroy_value(value);
+    return ValueReleaseResult{true, ValueInvariant::none};
+  }
+  if (value.container == ContainerKind::scalar) {
+    (void)destroy_value(value);
+    return ValueReleaseResult{true, ValueInvariant::none};
+  }
+
+  const auto set_parent = [&value](std::size_t child_index,
+                                   std::size_t parent_index) {
+    ValueNode &child = value.tuple.nodes[child_index];
+    if (child.container == ContainerKind::tuple) {
+      child.vector_payload_index = parent_index;
+    } else {
+      child.first_child = parent_index;
+    }
+  };
+  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size();
+       ++node_index) {
+    const ValueNode &node = value.tuple.nodes[node_index];
+    if (node.container != ContainerKind::tuple) {
+      continue;
+    }
+    for (std::size_t offset = 0U; offset < node.child_count; ++offset) {
+      set_parent(value.tuple.child_indexes[node.first_child + offset],
+                 node_index);
+    }
+  }
+  for (std::size_t offset = 0U; offset < value.tuple.child_count; ++offset) {
+    set_parent(value.tuple.child_indexes[value.tuple.first_child + offset],
+               value.tuple.root_index);
+  }
+
+  std::size_t node_index = value.tuple.root_index;
+  while (true) {
+    const bool root = node_index == value.tuple.root_index;
+    ValueNode *node = root ? nullptr : &value.tuple.nodes[node_index];
+    const ContainerKind container =
+        root ? ContainerKind::tuple : node->container;
+    if (container == ContainerKind::tuple) {
+      const std::size_t first_child =
+          root ? value.tuple.first_child : node->first_child;
+      std::size_t &remaining_children =
+          root ? value.tuple.child_count : node->child_count;
+      if (remaining_children != 0U) {
+        --remaining_children;
+        node_index =
+            value.tuple.child_indexes[first_child + remaining_children];
+        continue;
+      }
+
+      TupleTableReservation &reservation =
+          root ? value.tuple.root_reservation
+               : value.tuple.reservations[node->tuple_reservation_index];
+      if (reservation.accounting_active &&
+          reservation.canonical_bytes <= resources.live_evaluation_bytes) {
+        resources.live_evaluation_bytes -= reservation.canonical_bytes;
+      }
+      reservation.accounting_active = false;
+    } else if (container == ContainerKind::vector) {
+      VectorValue &vector =
+          value.tuple.vector_payloads[node->vector_payload_index];
+      std::size_t element_count = 0U;
+      switch (vector.element_type) {
+      case ScalarType::boolean:
+        element_count = vector.boolean_count;
+        break;
+      case ScalarType::integer:
+        element_count = vector.integer_count;
+        break;
+      case ScalarType::double_precision:
+        element_count = vector.double_count;
+        break;
+      }
+      const std::optional<std::size_t> width = element_width(vector.element_type);
+      if (width.has_value() &&
+          element_count <= std::numeric_limits<std::size_t>::max() / *width) {
+        const std::size_t bytes = element_count * *width;
+        if (vector.accounting_active && bytes == vector.canonical_bytes &&
+            bytes <= resources.live_evaluation_bytes) {
+          resources.live_evaluation_bytes -= bytes;
+        }
+        vector.accounting_active = false;
+      }
+    }
+
+    if (root) {
+      break;
+    }
+    node_index = container == ContainerKind::tuple ? node->vector_payload_index
+                                                   : node->first_child;
+  }
+  Value empty_owner = make_int_value(0);
+  (void)destroy_value(empty_owner);
+  value = std::move(empty_owner);
+  return ValueReleaseResult{true, ValueInvariant::none};
 }
 
 namespace {
