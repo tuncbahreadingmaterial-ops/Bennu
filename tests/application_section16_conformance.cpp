@@ -26,9 +26,10 @@ struct PrimitiveMatrixRow {
   std::size_t arity;
 };
 
-// BENNU-SPEC-0001 froze this matrix for the Level 2 primitive set. Later
-// primitive additions have their own issue-scoped conformance matrices while
-// continuing to use the same apply_primitive lifting path.
+// BENNU-SPEC-0001 froze this matrix for the Level 2 primitive set. Issue #54's
+// later additions retain a separate exhaustive matrix in ISSUE54-LIFTING,
+// ISSUE54-VALIDATION, and ISSUE54-WORK-CHARGE while exercising this same
+// apply_primitive lifting path.
 constexpr std::array<PrimitiveMatrixRow, 4> elementwise_matrix{{
     {PrimitiveId::inc, "inc", 1},
     {PrimitiveId::add, "add", 2},
