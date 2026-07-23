@@ -1014,7 +1014,16 @@ int main(void) {
   const int checked_environment =
       bennu_probe_hostile_checked_double_environment();
   const int checked_contexts = bennu_probe_checked_int_contexts();
-  const int checked_resources = bennu_probe_checked_resource_matrix();
+  int checked_resources = 0;
+  {
+    size_t iteration = 0U;
+    for (iteration = 0U; iteration < 2U; ++iteration) {
+      checked_resources = bennu_probe_checked_resource_matrix();
+      if (checked_resources != 0) {
+        break;
+      }
+    }
+  }
   if (domain != 0) {
     return 20 + domain;
   }
