@@ -84,7 +84,7 @@ TEST_CASE("ISSUE54-BOOLEAN and and or use ordinary pointwise truth tables") {
 
   for (const BooleanCase &test_case : cases) {
     INFO(std::string(test_case.source));
-    CHECK(issue54_evaluate(test_case.source) == test_case.expected);
+    CHECK(issue54_evaluate(test_case.source) == std::string(test_case.expected));
   }
 }
 
@@ -175,7 +175,7 @@ TEST_CASE("ISSUE54-PARITY handles negative values and Int64 extrema without over
   }};
   for (const PredicateCase &test_case : cases) {
     INFO(std::string(test_case.source));
-    CHECK(issue54_evaluate(test_case.source) == test_case.expected);
+    CHECK(issue54_evaluate(test_case.source) == std::string(test_case.expected));
   }
 }
 
@@ -206,7 +206,7 @@ TEST_CASE("ISSUE54-SIGN handles extrema zeros infinities NaN and raw NaN normali
   }};
   for (const PredicateCase &test_case : cases) {
     INFO(std::string(test_case.source));
-    CHECK(issue54_evaluate(test_case.source) == test_case.expected);
+    CHECK(issue54_evaluate(test_case.source) == std::string(test_case.expected));
   }
 
   const double raw_nan =
@@ -250,7 +250,7 @@ TEST_CASE("ISSUE54-ORDERING preserves written operands and IEEE unordered cases"
   }};
   for (const OrderingCase &test_case : cases) {
     INFO(std::string(test_case.source));
-    CHECK(issue54_evaluate(test_case.source) == test_case.expected);
+    CHECK(issue54_evaluate(test_case.source) == std::string(test_case.expected));
   }
 }
 
