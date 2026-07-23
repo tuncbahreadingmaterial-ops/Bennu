@@ -3065,6 +3065,26 @@ std::string_view c_implementation_name(PrimitiveImplementation implementation) {
     return "BENNU_IMPL_NOT_BOOL";
   case PrimitiveImplementation::iota_integer:
     return "BENNU_IMPL_IOTA_INT";
+  case PrimitiveImplementation::dec_integer:
+    return "BENNU_IMPL_DEC_INT";
+  case PrimitiveImplementation::dec_double:
+    return "BENNU_IMPL_DEC_DOUBLE";
+  case PrimitiveImplementation::neg_integer:
+    return "BENNU_IMPL_NEG_INT";
+  case PrimitiveImplementation::neg_double:
+    return "BENNU_IMPL_NEG_DOUBLE";
+  case PrimitiveImplementation::abs_integer:
+    return "BENNU_IMPL_ABS_INT";
+  case PrimitiveImplementation::abs_double:
+    return "BENNU_IMPL_ABS_DOUBLE";
+  case PrimitiveImplementation::sub_integer:
+    return "BENNU_IMPL_SUB_INT";
+  case PrimitiveImplementation::sub_double:
+    return "BENNU_IMPL_SUB_DOUBLE";
+  case PrimitiveImplementation::mul_integer:
+    return "BENNU_IMPL_MUL_INT";
+  case PrimitiveImplementation::mul_double:
+    return "BENNU_IMPL_MUL_DOUBLE";
   case PrimitiveImplementation::none:
     break;
   }
@@ -3083,6 +3103,16 @@ std::string_view c_primitive_id_name(PrimitiveId id) {
     return "BENNU_PRIMITIVE_NOT";
   case PrimitiveId::iota:
     return "BENNU_PRIMITIVE_IOTA";
+  case PrimitiveId::dec:
+    return "BENNU_PRIMITIVE_DEC";
+  case PrimitiveId::neg:
+    return "BENNU_PRIMITIVE_NEG";
+  case PrimitiveId::abs:
+    return "BENNU_PRIMITIVE_ABS";
+  case PrimitiveId::sub:
+    return "BENNU_PRIMITIVE_SUB";
+  case PrimitiveId::mul:
+    return "BENNU_PRIMITIVE_MUL";
   }
   return "BENNU_PRIMITIVE_NONE";
 }
@@ -3171,7 +3201,8 @@ void append_resource_initialization(
       "0, 0U, 0, 0U, 0, 0U, BENNU_IMPL_NONE, "
       "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
       "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
-      "BENNU_PRIMITIVE_NONE, {0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
+      "BENNU_PRIMITIVE_NONE, BENNU_DOMAIN_NONE, "
+      "{0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
       "0U, {{0U, 1U, 1U}, {0U, 1U, 1U}}, "
       "{{0U, 1U, 1U}, {0U, 1U, 1U}}};\n";
 }
@@ -3438,9 +3469,16 @@ CEmissionResult emit_rewrite_c_source_impl(
     }
   }
   for (const std::size_t root : lowering.roots) {
-    generated += "  if (!bennu_print_value(&bennu_values[" +
-                 std::to_string(root) +
-                 "])) { goto bennu_output_failure; }\n";
+    generated +=
+        "  { BennuStrictEnvironment bennu_print_environment;\n"
+        "    int bennu_print_succeeded = 0;\n"
+        "    bennu_begin_strict_environment(&bennu_print_environment);\n"
+        "    bennu_print_succeeded = bennu_print_value(&bennu_values[" +
+        std::to_string(root) +
+        "]);\n"
+        "    bennu_restore_strict_environment(&bennu_print_environment);\n"
+        "    if (!bennu_print_succeeded) { goto bennu_output_failure; }\n"
+        "  }\n";
   }
   if (!lowering.nodes.empty()) {
     generated += "  { size_t bennu_index = 0U;\n"

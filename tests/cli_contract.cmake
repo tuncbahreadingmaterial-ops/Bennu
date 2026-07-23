@@ -237,7 +237,7 @@ elseif(CASE STREQUAL "emit_c_example")
   endif()
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${output_file}" "/Fe:${output_executable}"
       RESULT_VARIABLE compile_exit
       OUTPUT_VARIABLE compile_stdout
@@ -245,7 +245,8 @@ elseif(CASE STREQUAL "emit_c_example")
     )
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Wpedantic -Werror
               "${output_file}" -o "${output_executable}"
       RESULT_VARIABLE compile_exit
       OUTPUT_VARIABLE compile_stdout
@@ -316,7 +317,7 @@ elseif(CASE STREQUAL "emit_c_empty_program")
   )
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${output_file}" "/Fe:${output_executable}"
       RESULT_VARIABLE compile_exit
       OUTPUT_VARIABLE compile_stdout
@@ -324,7 +325,8 @@ elseif(CASE STREQUAL "emit_c_empty_program")
     )
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Wpedantic -Werror
               "${output_file}" -o "${output_executable}"
       RESULT_VARIABLE compile_exit
       OUTPUT_VARIABLE compile_stdout

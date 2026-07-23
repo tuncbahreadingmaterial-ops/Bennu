@@ -16,11 +16,23 @@ BENNU-SPEC-0002 section 9|src/rewrite.cpp|rewrite parser retains typed homogeneo
 BENNU-SPEC-0002 sections 10 through 12|src/rewrite.cpp|rewrite parser rejects normative invalid syntax at exact spans
 BENNU-SPEC-0002 sections 13 and 14|tests/public_cutover_conformance.cpp|CUTOVER-02 public evaluator exposes exactly the rewrite primitives
 BENNU-SPEC-0003 sections 4 and 5|src/primitive.cpp|integer scalar kernels cover every boundary and structured overflow
+BENNU-SPEC-0003 sections 4 and 5 checked arithmetic evaluator structured overflow|src/primitive.cpp|checked Int arithmetic kernels cover boundaries without partial arithmetic
 BENNU-SPEC-0003 sections 6 through 9|src/primitive.cpp|Double inc and add kernels match every normative binary64 vector
+BENNU-SPEC-0003 sections 6 through 9 checked arithmetic evaluator exact binary64 bits|src/primitive.cpp|checked Double arithmetic preserves exact binary64 semantics and the host environment
 BENNU-SPEC-0003 section 10|src/primitive.cpp|scalar projection conversion covers every type pair and Int64 bits
 BENNU-SPEC-0003 section 11|src/primitive.cpp|equals and not kernels cover Bool Int and Double domains
 BENNU-SPEC-0003 sections 12 and 13|tests/public_cutover_conformance.cpp|CUTOVER-03 public APIs preserve structured located rewrite errors
 BENNU-SPEC-0003 sections 14 and 15|tests/c_emission_contract.cmake|PUBLIC-SUCCESS-CORPUS
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic formatted public surface|tests/c_emission_contract.cmake|CHECKED-ARITHMETIC-FORMATTED-CROSS-PATH-BYTES
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic emitted and native exact binary64 bits|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-EXACT-BITS
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic hostile environment trap containment and exact restoration|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-HOSTILE-FP-TRAP-RESTORATION
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic standard C ambient rounding emitted isolation|tests/c_emission_contract.cmake|CHECKED-ARITHMETIC-STANDARD-FENV-EMITTED
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic standard C ambient rounding native isolation|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-STANDARD-FENV-NATIVE
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic generated and native structured overflow|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-STRUCTURED-OVERFLOW
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic generated and native resource cleanup|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-GENERATED-NATIVE-RESOURCE-MATRIX
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic direct evaluator resource refusal|tests/public_resource_contract.cmake|CHECKED-ARITHMETIC-DIRECT-RESOURCE-MATRIX
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic public dynamic failures|tests/public_path_error_matrix.cmake|CHECKED-ARITHMETIC-PUBLIC-ERROR-MATRIX
+BENNU-SPEC-0003 sections 14 and 15 checked arithmetic evaluator structured errors|tests/public_cutover_conformance.cpp|checked arithmetic evaluator errors preserve every structured overflow field
 BENNU-SPEC-0004 sections 3 and 4|src/resources.cpp|trusted profile omits policy limits but retains mandatory safety
 BENNU-SPEC-0004 sections 5 through 7|src/resources.cpp|each profile limit honors zero one exact and one-past semantics
 BENNU-SPEC-0004 section 8|src/error.cpp|errors retain semantic context independently of presentation text
@@ -40,6 +52,7 @@ WP10 comprehensive public success corpus|tests/c_emission_contract.cmake|PUBLIC-
 WP10 trusted CLI profile|tests/public_cutover_conformance.cpp|CUTOVER-06 trusted local public evaluation omits arbitrary policy caps
 WP10 public CLI error and resource atomicity|tests/public_path_error_matrix.cmake|PUBLIC-ERROR-CLI-MATRIX
 WP10 documentation|tests/documentation_smoke.cmake|DOCS-SMOKE
+Issue 55 public primitive and deliberate Anka-difference documentation|tests/documentation_smoke.cmake|CHECKED-ARITHMETIC-DOCS-CONTRACT
 WP10 obsolete-surface deletion|tests/obsolete_surface_contract.cmake|OBSOLETE-SURFACE
 BENNU-SPEC-0005 sections 6.1 and 6.2|src/rewrite.cpp|typed lowering applies whole-program phase precedence
 BENNU-SPEC-0005 section 6.2|src/rewrite.cpp|typed lowering checks type errors before static shape errors across roots

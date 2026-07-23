@@ -2,7 +2,8 @@
 
 **Status:** Proposed
 
-**Related issue:** [#25](https://github.com/tuncbahreadingmaterial-ops/Bennu/issues/25)
+**Related issues:** [#25](https://github.com/tuncbahreadingmaterial-ops/Bennu/issues/25),
+[#55](https://github.com/tuncbahreadingmaterial-ops/Bennu/issues/55)
 
 **Parent specification:** [BENNU-SPEC-0001](bennu-spec-0001-scalar-lifting.md)
 
@@ -10,7 +11,7 @@
 
 **Program parameters:** [BENNU-SPEC-0005](bennu-spec-0005-program-parameters.md)
 
-**Target:** Bennu language rewrite; initial Bool, Int, and Double scalar kernels
+**Target:** Bennu language rewrite; Bool, Int, and Double scalar kernels
 
 **Compatibility:** These semantics deliberately replace, rather than extend,
 the bootstrap Level 1 scalar contract.
@@ -32,8 +33,18 @@ host-independent value-domain, conversion, result, and error contract:
 ```text
 inc    : Int -> Int
 inc    : Double -> Double
+dec    : Int -> Int
+dec    : Double -> Double
+neg    : Int -> Int
+neg    : Double -> Double
+abs    : Int -> Int
+abs    : Double -> Double
 add    : Int Int -> Int
 add    : Double Double -> Double
+sub    : Int Int -> Int
+sub    : Double Double -> Double
+mul    : Int Int -> Int
+mul    : Double Double -> Double
 equals : Bool Bool -> Bool
 equals : Int Int -> Bool
 equals : Double Double -> Bool
@@ -42,7 +53,8 @@ not    : Bool -> Bool
 
 It defines:
 
-- signed Int64 overflow behavior for `inc` and `add`;
+- signed Int64 overflow behavior for `inc`, `dec`, `neg`, `abs`, `add`,
+  `sub`, and `mul`;
 - strict IEEE 754 binary64 arithmetic and rounding behavior;
 - normalization and non-observability of NaN sign, payload, and signaling state;
 - Double equality for finite values, signed zero, infinities, and NaN;
@@ -106,8 +118,18 @@ The initial kernels have these result domains:
 | --- | --- |
 | `inc : Int -> Int` | Success when the mathematical result is in the Int domain; otherwise `integer_overflow`. |
 | `inc : Double -> Double` | Success for every Double input. |
+| `dec : Int -> Int` | Success when the mathematical result is in the Int domain; otherwise `integer_overflow`. |
+| `dec : Double -> Double` | Success for every Double input. |
+| `neg : Int -> Int` | Success except for `INT64_MIN`, which reports `integer_overflow`. |
+| `neg : Double -> Double` | Always succeeds by complementing the sign bit, followed by NaN normalization. |
+| `abs : Int -> Int` | Success except for `INT64_MIN`, which reports `integer_overflow`. |
+| `abs : Double -> Double` | Always succeeds by clearing the sign bit, followed by NaN normalization. |
 | `add : Int Int -> Int` | Success when the mathematical result is in the Int domain; otherwise `integer_overflow`. |
 | `add : Double Double -> Double` | Success for every Double input pair. |
+| `sub : Int Int -> Int` | Success when the mathematical result is in the Int domain; otherwise `integer_overflow`. |
+| `sub : Double Double -> Double` | Success for every Double input pair. |
+| `mul : Int Int -> Int` | Success when the mathematical result is in the Int domain; otherwise `integer_overflow`. |
+| `mul : Double Double -> Double` | Success for every Double input pair. |
 | `equals : Bool Bool -> Bool` | Always succeeds. |
 | `equals : Int Int -> Bool` | Always succeeds. |
 | `equals : Double Double -> Bool` | Always succeeds. |
@@ -172,11 +194,83 @@ Required exact cases:
 
 The same table with left and right exchanged has the same expected results.
 
+### 5.3 Decrement
+
+For `x : Int`, define the mathematical integer `r = x - 1`.
+
+```text
+dec(x) = success(Int(r))                 when r >= INT64_MIN
+dec(x) = DomainError(integer_overflow)   otherwise
+```
+
+Only `dec(INT64_MIN)` fails. Required successful boundaries are
+`dec(INT64_MIN + 1) = INT64_MIN` and `dec(INT64_MAX) = INT64_MAX - 1`.
+
+### 5.4 Negation and absolute value
+
+For `x : Int`, `neg` computes the mathematical integer `-x`, and `abs` computes
+`x` when `x >= 0` or `-x` otherwise. Both operations fail with
+`integer_overflow` exactly when `x == INT64_MIN`; every other input succeeds.
+Required boundaries include:
+
+| Input | `neg` | `abs` |
+| ---: | ---: | ---: |
+| `INT64_MIN` | `DomainError(integer_overflow)` | `DomainError(integer_overflow)` |
+| `INT64_MIN + 1` | `INT64_MAX` | `INT64_MAX` |
+| `-1` | `1` | `1` |
+| `0` | `0` | `0` |
+| `INT64_MAX` | `-INT64_MAX` | `INT64_MAX` |
+
+### 5.5 Subtraction
+
+For `x, y : Int`, define the mathematical integer `r = x - y` without first
+negating `y` or performing a potentially overflowing fixed-width subtraction.
+
+```text
+sub(x, y) = success(Int(r))                 when INT64_MIN <= r <= INT64_MAX
+sub(x, y) = DomainError(integer_overflow)   otherwise
+```
+
+Subtraction is ordered: exchanging operands generally changes the result and
+may change whether the operation overflows. Required boundary cases are:
+
+| Left | Right | Expected result |
+| ---: | ---: | --- |
+| `INT64_MIN` | `1` | `DomainError(integer_overflow)` |
+| `INT64_MIN` | `-1` | `INT64_MIN + 1` |
+| `-1` | `INT64_MAX` | `INT64_MIN` |
+| `0` | `INT64_MIN` | `DomainError(integer_overflow)` |
+| `INT64_MAX` | `-1` | `DomainError(integer_overflow)` |
+| `INT64_MAX` | `1` | `INT64_MAX - 1` |
+
+### 5.6 Multiplication
+
+For `x, y : Int`, define the mathematical integer `r = x * y` without first
+performing a potentially overflowing fixed-width multiplication.
+
+```text
+mul(x, y) = success(Int(r))                 when INT64_MIN <= r <= INT64_MAX
+mul(x, y) = DomainError(integer_overflow)   otherwise
+```
+
+Multiplication is commutative. Zero times any Int is zero. Required boundary
+cases, including their exchanged forms, are:
+
+| Left | Right | Expected result |
+| ---: | ---: | --- |
+| `INT64_MIN` | `-1` | `DomainError(integer_overflow)` |
+| `INT64_MIN` | `0` | `0` |
+| `INT64_MIN` | `1` | `INT64_MIN` |
+| `INT64_MAX` | `-1` | `-INT64_MAX` |
+| `3037000499` | `3037000499` | `9223372030926249001` |
+| `3037000500` | `3037000500` | `DomainError(integer_overflow)` |
+
 ## 6. Binary64 execution contract
 
-Every Double `inc` and `add` operation is one IEEE 754 binary64 addition. The
-operation is correctly rounded directly to binary64 using round-to-nearest,
-ties-to-even, also called `roundTiesToEven`.
+Every Double `inc`, `dec`, `add`, `sub`, and `mul` operation is exactly one IEEE
+754 binary64 arithmetic operation. `neg` and `abs` are exact sign-bit
+transformations. Arithmetic is correctly rounded directly to binary64 using
+round-to-nearest, ties-to-even, also called `roundTiesToEven`.
 
 This rule is independent of the ambient host rounding mode. A conforming
 implementation must:
@@ -249,6 +343,67 @@ Required bit-pattern cases:
 
 The raw NaN rows exercise normalization at the value boundary immediately
 before kernel dispatch; noncanonical NaNs are not valid stored operands.
+
+### 7.3 Double decrement
+
+```text
+dec(x) = binary64_subtract_roundTiesToEven(x, 1.0)
+```
+
+Required cases include positive and negative zero producing negative one,
+negative infinity remaining negative infinity, the largest finite value
+remaining unchanged, and every NaN producing canonical NaN. The largest-finite
+case must remain unchanged under an ambient directed rounding mode and the
+ambient mode must be restored.
+
+### 7.4 Double negation
+
+`neg` complements only the binary64 sign bit and then applies section 8
+normalization. It maps positive zero to negative zero, negative zero to positive
+zero, positive infinity to negative infinity, and negative infinity to positive
+infinity. NaN remains the canonical positive NaN because its sign is not
+observable.
+
+### 7.5 Double absolute value
+
+`abs` clears only the binary64 sign bit and then applies section 8 normalization.
+It maps either signed zero to positive zero, negative infinity to positive
+infinity, and every finite value to the same magnitude with a clear sign bit.
+NaN remains canonical NaN.
+
+### 7.6 Double subtraction
+
+```text
+sub(x, y) = binary64_subtract_roundTiesToEven(x, y)
+```
+
+Required bit-pattern cases are:
+
+| Left bits | Right bits | Expected result bits | Purpose |
+| --- | --- | --- | --- |
+| `0x0000000000000000` | `0x8000000000000000` | `0x0000000000000000` | Positive zero minus negative zero is positive zero. |
+| `0x8000000000000000` | `0x0000000000000000` | `0x8000000000000000` | Negative zero minus positive zero is negative zero. |
+| `0x0010000000000000` | `0x000fffffffffffff` | `0x0000000000000001` | Normal-minus-subnormal preserves the smallest subnormal. |
+| `0x3ff0000000000000` | `0x3c90000000000000` | `0x3ff0000000000000` | Halfway subtraction selects the even significand. |
+| `0x7ff0000000000000` | `0x7ff0000000000000` | `0x7ff8000000000000` | Infinity minus itself produces canonical NaN. |
+| `0xfff0000000000000` | `0x7ff0000000000000` | `0xfff0000000000000` | Negative infinity minus positive infinity remains negative infinity. |
+
+### 7.7 Double multiplication
+
+```text
+mul(x, y) = binary64_multiply_roundTiesToEven(x, y)
+```
+
+Required bit-pattern cases are:
+
+| Left bits | Right bits | Expected result bits | Purpose |
+| --- | --- | --- | --- |
+| `0x8000000000000000` | `0x4000000000000000` | `0x8000000000000000` | Negative zero times positive two is negative zero. |
+| `0x0000000000000001` | `0x4000000000000000` | `0x0000000000000002` | Exact subnormal multiplication is preserved. |
+| `0x3ff0000000000001` | `0x3ff0000000000001` | `0x3ff0000000000002` | Rounding-sensitive finite multiplication. |
+| `0x7fefffffffffffff` | `0x4000000000000000` | `0x7ff0000000000000` | Finite overflow produces positive infinity. |
+| `0x7ff0000000000000` | `0x0000000000000000` | `0x7ff8000000000000` | Infinity times zero produces canonical NaN. |
+| `0xbff0000000000000` | `0x7ff0000000000000` | `0xfff0000000000000` | Negative one times positive infinity is negative infinity. |
 
 ## 8. NaN normalization and observability
 
@@ -400,14 +555,15 @@ defined by BENNU-SPEC-0001; it is not a scalar `DomainError`.
 
 ## 12. DomainError reason and context
 
-The only `DomainError` reason used by the initial scalar kernels is the stable,
+The only `DomainError` reason used by the checked arithmetic scalar kernels is
+the stable,
 lowercase identifier:
 
 ```text
 integer_overflow
 ```
 
-The primitive identity already distinguishes increment from addition, so
+The primitive identity already distinguishes each checked operation, so
 separate operation-specific overflow reasons are not used. Future primitive
 specifications may add reason identifiers without changing this one. This
 specification does not reserve or define reasons for primitives outside the
@@ -468,7 +624,8 @@ treated as conforming:
   `memcpy` rather than type-punning with undefined behavior;
 - checked Int arithmetic before any possibly overflowing signed operation;
 - correctly rounded `Int -> Double` conversion for every vector in section 10;
-- strict binary64 addition under the environment in section 6; and
+- strict binary64 addition, subtraction, and multiplication plus exact sign-bit
+  negation and absolute value under the environment in section 6; and
 - canonical NaN normalization at every Bennu value boundary.
 
 An implementation may use hardware arithmetic, the C/C++ floating-point
@@ -484,11 +641,13 @@ or ignore required floating-point-environment access are not conforming.
 
 At minimum, automated tests must cover:
 
-1. every Int exact-value case in section 5, with operands exchanged for `add`;
+1. every Int exact-value case in section 5, with operands exchanged for `add`
+   and `mul` and ordered boundary cases for `sub`;
 2. overflow immediately outside both Int64 result boundaries;
 3. scalar and lifted `integer_overflow` structured fields;
 4. lowest-index lifted overflow and absence of a partial result;
-5. every Double bit-pattern vector in sections 7 through 10;
+5. every Double bit-pattern vector in sections 7 through 10, including `dec`,
+   `neg`, `abs`, `sub`, and `mul`;
 6. positive and negative zero results and comparisons;
 7. smallest and largest subnormals, smallest normal, and largest finite values;
 8. positive and negative finite overflow to infinity;
@@ -520,7 +679,9 @@ user-observable floating-point flags, or source syntax beyond BENNU-SPEC-0002.
 
 Bennu deliberately chooses checked Int overflow instead of modular or saturating
 arithmetic, and one canonical semantic NaN instead of observable payload or
-signaling behavior. These choices prioritize data integrity, deterministic
+signaling behavior. Checked `dec`, `neg`, `abs`, `sub`, and `mul` deliberately
+reuse the same lifting, overload, promotion, and `integer_overflow` model as
+`inc` and `add`. These choices prioritize data integrity, deterministic
 cross-backend behavior, and a small scalar contract. They are Bennu decisions;
 they do not assert compatibility with Anka or the bootstrap Level 1
 implementation.

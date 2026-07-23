@@ -580,12 +580,13 @@ make_c_compiler_arguments(NativePlatform platform,
                           std::string_view native_output_path) {
   const NativePlatform style = compiler_platform(platform, compiler);
   if (style == NativePlatform::windows_msvc) {
-    return {"/nologo", "/std:c11", std::string(c_source_path),
+    return {"/nologo", "/std:c11", "/fp:strict", std::string(c_source_path),
             "/Fe:" + std::string(native_output_path),
             "/Fo:" + std::string(native_output_path) + ".obj"};
   }
-  return {"-std=c11", std::string(c_source_path), "-o",
-          std::string(native_output_path)};
+  return {"-std=c11",       "-frounding-math", "-ffp-contract=off",
+          "-fno-fast-math", std::string(c_source_path),
+          "-o",             std::string(native_output_path), "-lm"};
 }
 
 NativeBuildResult build_native(const NativeBuildRequest &request) {
@@ -832,13 +833,15 @@ TEST_CASE("native compiler command lines preserve argument boundaries") {
   const std::vector<std::string> gcc = make_c_compiler_arguments(
       NativePlatform::gcc_like, "clang", "/tmp/source ; $.c",
       "/tmp/output ; $");
-  CHECK(gcc == std::vector<std::string>{"-std=c11", "/tmp/source ; $.c", "-o",
-                                        "/tmp/output ; $"});
+  CHECK(gcc == std::vector<std::string>{
+                   "-std=c11", "-frounding-math", "-ffp-contract=off",
+                   "-fno-fast-math", "/tmp/source ; $.c", "-o",
+                   "/tmp/output ; $", "-lm"});
 
   const std::vector<std::string> msvc = make_c_compiler_arguments(
       NativePlatform::windows_msvc, "cl.exe", "C:\\source ; $.c",
       "C:\\output ; $.exe");
-  CHECK(msvc == std::vector<std::string>{"/nologo", "/std:c11",
+  CHECK(msvc == std::vector<std::string>{"/nologo", "/std:c11", "/fp:strict",
                                          "C:\\source ; $.c",
                                          "/Fe:C:\\output ; $.exe",
                                          "/Fo:C:\\output ; $.exe.obj"});

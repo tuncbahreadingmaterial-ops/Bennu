@@ -161,6 +161,101 @@ bool emit_probe_and_build(
   return built.ok;
 }
 
+std::optional<std::string> generated_standard_fenv_probe() {
+  const bennu::CEmissionResult emitted = bennu::emit_c_source(
+      "dec[1.7976931348623157e308]\n"
+      "sub[1.0 5.551115123125783e-17]\n"
+      "mul[1.0000000000000002 1.0000000000000002]\n"
+      "mul[5e-324 1.5]\n"
+      "sub[1e-323 5e-324]\n");
+  if (!emitted.ok ||
+      emitted.source.find("static int bennu_execute(BennuResources *snapshot)") ==
+          std::string::npos) {
+    return std::nullopt;
+  }
+  std::string source = R"bennu_c(#include <fenv.h>
+#define main bennu_generated_main
+)bennu_c";
+  source += emitted.source;
+  source += R"bennu_c(
+#undef main
+
+int main(void) {
+  static const int rounding_modes[] = {
+      FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+  const int original_rounding = fegetround();
+  size_t index = 0U;
+  int result = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+  const unsigned int original_control = _mm_getcsr();
+#elif defined(__aarch64__)
+  uint64_t original_control = UINT64_C(0);
+  uint64_t original_status = UINT64_C(0);
+  __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
+  __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
+#endif
+  if (original_rounding == -1) {
+    return 97;
+  }
+  for (index = 0U;
+       index < sizeof(rounding_modes) / sizeof(rounding_modes[0]); ++index) {
+    int caller_exceptions = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned int caller_control = 0U;
+#elif defined(__aarch64__)
+    uint64_t caller_control = UINT64_C(0);
+    uint64_t caller_status = UINT64_C(0);
+#endif
+    if (fesetround(rounding_modes[index]) != 0) {
+      result = 96;
+      break;
+    }
+    caller_exceptions = fetestexcept(FE_ALL_EXCEPT);
+#if defined(__x86_64__) || defined(_M_X64)
+    caller_control = _mm_getcsr();
+#elif defined(__aarch64__)
+    __asm__ volatile("mrs %0, fpcr" : "=r"(caller_control));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(caller_status));
+#endif
+    result = bennu_execute(NULL);
+    if (result != 0 || fegetround() != rounding_modes[index] ||
+        fetestexcept(FE_ALL_EXCEPT) != caller_exceptions) {
+      if (result == 0) {
+        result = 99;
+      }
+      break;
+    }
+#if defined(__x86_64__) || defined(_M_X64)
+    if (_mm_getcsr() != caller_control) {
+      result = 99;
+      break;
+    }
+#elif defined(__aarch64__)
+    {
+      uint64_t restored_control = UINT64_C(0);
+      uint64_t restored_status = UINT64_C(0);
+      __asm__ volatile("mrs %0, fpcr" : "=r"(restored_control));
+      __asm__ volatile("mrs %0, fpsr" : "=r"(restored_status));
+      if (restored_control != caller_control || restored_status != caller_status) {
+        result = 99;
+        break;
+      }
+    }
+#endif
+  }
+  (void)fesetround(original_rounding);
+#if defined(__x86_64__) || defined(_M_X64)
+  _mm_setcsr(original_control);
+#elif defined(__aarch64__)
+  __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+  __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+#endif
+  return result;
+}
+)bennu_c";
+  return source;
+}
+
 constexpr std::string_view allocation_iota_assertions = R"bennu_assert(
         snapshot.failure != BENNU_FAILURE_ALLOCATION ||
         snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
@@ -330,18 +425,27 @@ static void bennu_probe_free(void *data);
 #undef main
 
 static size_t bennu_probe_outstanding_allocations = 0U;
+static size_t bennu_probe_total_allocations = 0U;
+static size_t bennu_probe_total_frees = 0U;
+static int bennu_probe_invalid_free = 0;
 
 static void *bennu_probe_malloc(size_t size) {
   void *data = malloc(size);
   if (data != NULL) {
     bennu_probe_outstanding_allocations += 1U;
+    bennu_probe_total_allocations += 1U;
   }
   return data;
 }
 
 static void bennu_probe_free(void *data) {
   if (data != NULL) {
-    bennu_probe_outstanding_allocations -= 1U;
+    if (bennu_probe_outstanding_allocations == 0U) {
+      bennu_probe_invalid_free = 1;
+    } else {
+      bennu_probe_outstanding_allocations -= 1U;
+    }
+    bennu_probe_total_frees += 1U;
   }
   free(data);
 }
@@ -512,6 +616,446 @@ static int bennu_probe_shape_context(void) {
              : 2;
 }
 
+typedef struct BennuCheckedDoubleCase {
+  BennuImplementation implementation;
+  uint64_t left_bits;
+  uint64_t right_bits;
+  uint64_t expected_bits;
+} BennuCheckedDoubleCase;
+
+static int bennu_probe_checked_double_bits(void) {
+  static const BennuCheckedDoubleCase cases[] = {
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x0000000000000000), UINT64_C(0), UINT64_C(0xbff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x8000000000000000), UINT64_C(0), UINT64_C(0xbff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0), UINT64_C(0xbff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x000fffffffffffff), UINT64_C(0), UINT64_C(0xbff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x0010000000000000), UINT64_C(0), UINT64_C(0xbff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0), UINT64_C(0x7fefffffffffffff)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0xfff0000000000000), UINT64_C(0), UINT64_C(0xfff0000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x7ff8123456789abc), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0xfff8123456789abc), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x7ff0000000000001), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0xfff0000000000001), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x7ff8000000000000), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x4340000000000001), UINT64_C(0), UINT64_C(0x4340000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x0000000000000000), UINT64_C(0), UINT64_C(0x8000000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x8000000000000000), UINT64_C(0), UINT64_C(0x0000000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0), UINT64_C(0x8000000000000001)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x000fffffffffffff), UINT64_C(0), UINT64_C(0x800fffffffffffff)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x0010000000000000), UINT64_C(0), UINT64_C(0x8010000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0), UINT64_C(0xffefffffffffffff)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0), UINT64_C(0xfff0000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0xfff0000000000000), UINT64_C(0), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x7ff8123456789abc), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0xfff0000000000001), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x7ff8000000000000), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x0000000000000000), UINT64_C(0), UINT64_C(0x0000000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x8000000000000000), UINT64_C(0), UINT64_C(0x0000000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x8000000000000001), UINT64_C(0), UINT64_C(0x0000000000000001)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x800fffffffffffff), UINT64_C(0), UINT64_C(0x000fffffffffffff)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x8010000000000000), UINT64_C(0), UINT64_C(0x0010000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0xffefffffffffffff), UINT64_C(0), UINT64_C(0x7fefffffffffffff)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0xfff0000000000000), UINT64_C(0), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x7ff0000000000001), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0xfff8123456789abc), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x7ff8000000000000), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000), UINT64_C(0x0000000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x8000000000000000), UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x0010000000000000), UINT64_C(0x000fffffffffffff), UINT64_C(0x0000000000000001)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x000fffffffffffff), UINT64_C(0), UINT64_C(0x000fffffffffffff)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x0010000000000000), UINT64_C(0), UINT64_C(0x0010000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0), UINT64_C(0x7fefffffffffffff)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0xfff0000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x3ff0000000000000), UINT64_C(0x3c90000000000000), UINT64_C(0x3ff0000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0xffefffffffffffff), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7ff8123456789abc), UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x7ff8000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x8000000000000000), UINT64_C(0x4000000000000000), UINT64_C(0x8000000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0x4000000000000000), UINT64_C(0x0000000000000002)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x000fffffffffffff), UINT64_C(0x3ff0000000000000), UINT64_C(0x000fffffffffffff)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x0010000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0x0010000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0x3ff0000000000000), UINT64_C(0x7fefffffffffffff)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0x3fe0000000000000), UINT64_C(0x0000000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x8000000000000001), UINT64_C(0x3fe0000000000000), UINT64_C(0x8000000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0x3ff8000000000000), UINT64_C(0x0000000000000002)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x7fefffffffffffff), UINT64_C(0x4000000000000000), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x7ff0000000000000), UINT64_C(0), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000000), UINT64_C(0x7ff0000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0xbff0000000000000), UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x7ff8123456789abc), UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x3ff0000000000000), UINT64_C(0xfff0000000000001), UINT64_C(0x7ff8000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x7ff8000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000000)}};
+  size_t index = 0U;
+  for (index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+    BennuResources resources = {0};
+    BennuScalar left = {BENNU_DOUBLE, 0U, INT64_C(0),
+                        bennu_double_from_bits(cases[index].left_bits)};
+    BennuScalar right = {BENNU_DOUBLE, 0U, INT64_C(0),
+                         bennu_double_from_bits(cases[index].right_bits)};
+    BennuScalar result = {0};
+    if (!bennu_kernel(&resources, cases[index].implementation, left, right,
+                      &result) ||
+        resources.failure != BENNU_FAILURE_NONE ||
+        result.type != BENNU_DOUBLE ||
+        bennu_double_bits(result.double_precision) != cases[index].expected_bits) {
+      return 1;
+    }
+  }
+  return 0;
+}
+)bennu_c";
+  source += R"bennu_c(
+
+static int bennu_probe_hostile_checked_double_environment(void) {
+  static const BennuCheckedDoubleCase cases[] = {
+      {BENNU_IMPL_DEC_DOUBLE, UINT64_C(0x4340000000000001), UINT64_C(0), UINT64_C(0x4340000000000000)},
+      {BENNU_IMPL_NEG_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0), UINT64_C(0x8000000000000001)},
+      {BENNU_IMPL_ABS_DOUBLE, UINT64_C(0x8000000000000001), UINT64_C(0), UINT64_C(0x0000000000000001)},
+      {BENNU_IMPL_SUB_DOUBLE, UINT64_C(0x3ff0000000000000), UINT64_C(0x3c90000000000000), UINT64_C(0x3ff0000000000000)},
+      {BENNU_IMPL_MUL_DOUBLE, UINT64_C(0x0000000000000001), UINT64_C(0x3ff8000000000000), UINT64_C(0x0000000000000002)}};
+  size_t round_index = 0U;
+  size_t case_index = 0U;
+#if defined(__x86_64__) || defined(_M_X64)
+  static const unsigned int rounds[] = {0x2000U, 0x4000U, 0x6000U};
+  const unsigned int original = _mm_getcsr();
+  for (round_index = 0U; round_index < sizeof(rounds) / sizeof(rounds[0]); ++round_index) {
+    const unsigned int hostile =
+        (original & ~(0x003fU | 0x6000U)) | 0x0021U | 0x0040U | 0x8000U |
+        rounds[round_index];
+    _mm_setcsr(hostile);
+    for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+      BennuResources resources = {0};
+      BennuScalar left = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(cases[case_index].left_bits)};
+      BennuScalar right = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(cases[case_index].right_bits)};
+      BennuScalar result = {0};
+      if (!bennu_kernel(&resources, cases[case_index].implementation, left, right, &result) ||
+          bennu_double_bits(result.double_precision) != cases[case_index].expected_bits ||
+          _mm_getcsr() != hostile) {
+        _mm_setcsr(original);
+        return 1;
+      }
+    }
+  }
+  {
+    const unsigned int enabled_overflow_trap =
+        (original & ~(0x003fU | 0x6000U | 0x0400U)) |
+        0x0021U | (0x1f80U & ~0x0400U) | 0x0040U | 0x8000U | 0x2000U;
+    BennuResources resources = {0};
+    BennuScalar left = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(UINT64_C(0x7fefffffffffffff))};
+    BennuScalar right = {BENNU_DOUBLE, 0U, INT64_C(0), 2.0};
+    BennuScalar result = {0};
+    _mm_setcsr(enabled_overflow_trap);
+    if (!bennu_kernel(&resources, BENNU_IMPL_MUL_DOUBLE, left, right, &result) ||
+        bennu_double_bits(result.double_precision) != UINT64_C(0x7ff0000000000000) ||
+        _mm_getcsr() != enabled_overflow_trap) {
+      _mm_setcsr(original);
+      return 2;
+    }
+  }
+  _mm_setcsr(original);
+#elif defined(__aarch64__)
+  static const uint64_t rounds[] = {UINT64_C(0x00400000), UINT64_C(0x00800000), UINT64_C(0x00c00000)};
+  uint64_t original_control = UINT64_C(0);
+  uint64_t original_status = UINT64_C(0);
+  uint64_t hostile_status = UINT64_C(0);
+  __asm__ volatile("mrs %0, fpcr" : "=r"(original_control));
+  __asm__ volatile("mrs %0, fpsr" : "=r"(original_status));
+  hostile_status = original_status | UINT64_C(0x00000011);
+  __asm__ volatile("msr fpsr, %0" : : "r"(hostile_status) : "memory");
+  for (round_index = 0U; round_index < sizeof(rounds) / sizeof(rounds[0]); ++round_index) {
+    const uint64_t hostile = (original_control & ~UINT64_C(0x00c00000)) |
+                             UINT64_C(0x01000000) | rounds[round_index];
+    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(hostile) : "memory");
+    for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+      BennuResources resources = {0};
+      BennuScalar left = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(cases[case_index].left_bits)};
+      BennuScalar right = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(cases[case_index].right_bits)};
+      BennuScalar result = {0};
+      uint64_t restored_control = UINT64_C(0);
+      uint64_t restored_status = UINT64_C(0);
+      if (!bennu_kernel(&resources, cases[case_index].implementation, left, right, &result) ||
+          bennu_double_bits(result.double_precision) != cases[case_index].expected_bits) {
+        __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+        __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+        return 1;
+      }
+      __asm__ volatile("mrs %0, fpcr" : "=r"(restored_control));
+      __asm__ volatile("mrs %0, fpsr" : "=r"(restored_status));
+      if (restored_control != hostile || restored_status != hostile_status) {
+        __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+        __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+        return 2;
+      }
+    }
+  }
+  {
+    const uint64_t enabled_overflow_trap =
+        (original_control & ~(UINT64_C(0x00c00000) | UINT64_C(0x00009f00))) |
+        UINT64_C(0x01000000) | UINT64_C(0x00800000) | UINT64_C(0x00000400);
+    BennuResources resources = {0};
+    BennuScalar left = {BENNU_DOUBLE, 0U, INT64_C(0), bennu_double_from_bits(UINT64_C(0x7fefffffffffffff))};
+    BennuScalar right = {BENNU_DOUBLE, 0U, INT64_C(0), 2.0};
+    BennuScalar result = {0};
+    uint64_t restored_control = UINT64_C(0);
+    uint64_t restored_status = UINT64_C(0);
+    __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(enabled_overflow_trap) : "memory");
+    __asm__ volatile("msr fpsr, %0" : : "r"(hostile_status) : "memory");
+    if (!bennu_kernel(&resources, BENNU_IMPL_MUL_DOUBLE, left, right, &result)) {
+      __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+      __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+      return 3;
+    }
+    __asm__ volatile("mrs %0, fpcr" : "=r"(restored_control));
+    __asm__ volatile("mrs %0, fpsr" : "=r"(restored_status));
+    if (restored_control != enabled_overflow_trap || restored_status != hostile_status ||
+        bennu_double_bits(result.double_precision) != UINT64_C(0x7ff0000000000000)) {
+      __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+      __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+      return 4;
+    }
+  }
+  __asm__ volatile("msr fpcr, %0\n\tisb" : : "r"(original_control) : "memory");
+  __asm__ volatile("msr fpsr, %0" : : "r"(original_status) : "memory");
+#else
+  return 5;
+#endif
+  return 0;
+}
+
+typedef struct BennuCheckedIntCase {
+  const char *name;
+  BennuImplementation implementation;
+  BennuPrimitiveId primitive_id;
+  size_t arity;
+  int64_t right;
+} BennuCheckedIntCase;
+
+static int bennu_probe_checked_int_contexts(void) {
+  static const BennuCheckedIntCase cases[] = {
+      {"dec", BENNU_IMPL_DEC_INT, BENNU_PRIMITIVE_DEC, 1U, INT64_C(0)},
+      {"neg", BENNU_IMPL_NEG_INT, BENNU_PRIMITIVE_NEG, 1U, INT64_C(0)},
+      {"abs", BENNU_IMPL_ABS_INT, BENNU_PRIMITIVE_ABS, 1U, INT64_C(0)},
+      {"sub", BENNU_IMPL_SUB_INT, BENNU_PRIMITIVE_SUB, 2U, INT64_C(1)},
+      {"mul", BENNU_IMPL_MUL_INT, BENNU_PRIMITIVE_MUL, 2U, -INT64_C(1)}};
+  const BennuSourceSpan primary = bennu_source_span(
+      bennu_source_location(7U, 3U, 2U), bennu_source_location(11U, 3U, 6U));
+  const BennuSourceSpan context = bennu_source_span(
+      bennu_source_location(5U, 3U, 1U), bennu_source_location(40U, 3U, 36U));
+  size_t case_index = 0U;
+  for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+    size_t iteration = 0U;
+    for (iteration = 0U; iteration < 2U; ++iteration) {
+      BennuResources scalar_resources = {0};
+      BennuValue scalar_left = bennu_scalar_int(INT64_MIN);
+      BennuValue scalar_right = bennu_scalar_int(cases[case_index].right);
+      BennuValue scalar_result = {0};
+      scalar_resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+      if (bennu_apply(&scalar_resources, cases[case_index].implementation,
+                      &scalar_result, &scalar_left, &scalar_right,
+                      cases[case_index].arity, cases[case_index].name,
+                      cases[case_index].primitive_id, primary, context) ||
+          scalar_resources.failure != BENNU_FAILURE_DOMAIN ||
+          scalar_resources.failure_implementation != cases[case_index].implementation ||
+          scalar_resources.failure_primitive_id != cases[case_index].primitive_id ||
+          scalar_resources.failure_domain_reason !=
+              BENNU_DOMAIN_INTEGER_OVERFLOW ||
+          strcmp(scalar_resources.failure_admission_point, cases[case_index].name) != 0 ||
+          scalar_resources.failure_signature.parameter_count != cases[case_index].arity ||
+          scalar_resources.failure_signature.parameter_types[0] != BENNU_INT ||
+          scalar_resources.failure_signature.result_type != BENNU_INT ||
+          scalar_resources.failure_operand_count != cases[case_index].arity ||
+          scalar_resources.failure_left_operand.type != BENNU_INT ||
+          scalar_resources.failure_left_operand.integer != INT64_MIN ||
+          (cases[case_index].arity == 2U &&
+           (scalar_resources.failure_signature.parameter_types[1] != BENNU_INT ||
+            scalar_resources.failure_right_operand.type != BENNU_INT ||
+            scalar_resources.failure_right_operand.integer != cases[case_index].right)) ||
+          scalar_resources.failure_has_element_index != 0 ||
+          scalar_resources.failure_primary_span.begin.offset != 7U ||
+          scalar_resources.failure_primary_span.begin.line != 3U ||
+          scalar_resources.failure_primary_span.begin.column != 2U ||
+          scalar_resources.failure_primary_span.end.offset != 11U ||
+          scalar_resources.failure_primary_span.end.line != 3U ||
+          scalar_resources.failure_primary_span.end.column != 6U ||
+          scalar_resources.failure_context_span.begin.offset != 5U ||
+          scalar_resources.failure_context_span.begin.line != 3U ||
+          scalar_resources.failure_context_span.begin.column != 1U ||
+          scalar_resources.failure_context_span.end.offset != 40U ||
+          scalar_resources.failure_context_span.end.line != 3U ||
+          scalar_resources.failure_context_span.end.column != 36U ||
+          scalar_resources.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+          scalar_resources.work_units != 1U ||
+          scalar_resources.live_bytes != 0U ||
+          scalar_resources.reservation_ordinal != 0U ||
+          scalar_result.data != NULL ||
+          !bennu_failure_context_valid(&scalar_resources)) {
+        return 1;
+      }
+      {
+        BennuResources lifted_resources = {0};
+        BennuValue lifted_left = {0};
+        BennuValue lifted_right = bennu_scalar_int(cases[case_index].right);
+        BennuValue lifted_result = {0};
+        const int64_t values[] = {
+            cases[case_index].implementation == BENNU_IMPL_MUL_INT ? INT64_C(1) : INT64_C(0),
+            INT64_MIN, INT64_MIN};
+        const size_t allocations_before = bennu_probe_outstanding_allocations;
+        lifted_resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+        if (!bennu_literal_int(&lifted_resources, &lifted_left, values, 3U,
+                               "vector-literal", context, context) ||
+            bennu_apply(&lifted_resources, cases[case_index].implementation,
+                        &lifted_result, &lifted_left, &lifted_right,
+                        cases[case_index].arity, cases[case_index].name,
+                        cases[case_index].primitive_id, primary, context) ||
+            lifted_resources.failure != BENNU_FAILURE_DOMAIN ||
+            lifted_resources.failure_implementation != cases[case_index].implementation ||
+            lifted_resources.failure_primitive_id != cases[case_index].primitive_id ||
+            lifted_resources.failure_domain_reason !=
+                BENNU_DOMAIN_INTEGER_OVERFLOW ||
+            strcmp(lifted_resources.failure_admission_point, cases[case_index].name) != 0 ||
+            lifted_resources.failure_signature.parameter_count != cases[case_index].arity ||
+            lifted_resources.failure_signature.parameter_types[0] != BENNU_INT ||
+            lifted_resources.failure_signature.result_type != BENNU_INT ||
+            lifted_resources.failure_operand_count != cases[case_index].arity ||
+            lifted_resources.failure_left_operand.type != BENNU_INT ||
+            lifted_resources.failure_left_operand.integer != INT64_MIN ||
+            (cases[case_index].arity == 2U &&
+             (lifted_resources.failure_signature.parameter_types[1] != BENNU_INT ||
+              lifted_resources.failure_right_operand.type != BENNU_INT ||
+              lifted_resources.failure_right_operand.integer != cases[case_index].right)) ||
+            lifted_resources.failure_has_element_index == 0 ||
+            lifted_resources.failure_element_index != 1U ||
+            lifted_resources.failure_primary_span.begin.offset != 7U ||
+            lifted_resources.failure_primary_span.begin.line != 3U ||
+            lifted_resources.failure_primary_span.begin.column != 2U ||
+            lifted_resources.failure_primary_span.end.offset != 11U ||
+            lifted_resources.failure_primary_span.end.line != 3U ||
+            lifted_resources.failure_primary_span.end.column != 6U ||
+            lifted_resources.failure_context_span.begin.offset != 5U ||
+            lifted_resources.failure_context_span.begin.line != 3U ||
+            lifted_resources.failure_context_span.begin.column != 1U ||
+            lifted_resources.failure_context_span.end.offset != 40U ||
+            lifted_resources.failure_context_span.end.line != 3U ||
+            lifted_resources.failure_context_span.end.column != 36U ||
+            lifted_resources.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+            lifted_resources.work_units != 3U ||
+            lifted_resources.live_bytes != 3U * sizeof(int64_t) ||
+            lifted_resources.reservation_ordinal != 2U ||
+            lifted_result.data != NULL ||
+            bennu_probe_outstanding_allocations != allocations_before + 1U ||
+            !bennu_failure_context_valid(&lifted_resources)) {
+          bennu_release(&lifted_resources, &lifted_left);
+          return 2;
+        }
+        bennu_release(&lifted_resources, &lifted_left);
+        if (lifted_resources.live_bytes != 0U ||
+            bennu_probe_outstanding_allocations != allocations_before) {
+          return 3;
+        }
+      }
+    }
+  }
+  return 0;
+}
+)bennu_c";
+  source += R"bennu_c(
+
+static int bennu_probe_checked_resource_matrix(void) {
+  static const BennuCheckedIntCase cases[] = {
+      {"dec", BENNU_IMPL_DEC_INT, BENNU_PRIMITIVE_DEC, 1U, INT64_C(0)},
+      {"neg", BENNU_IMPL_NEG_INT, BENNU_PRIMITIVE_NEG, 1U, INT64_C(0)},
+      {"abs", BENNU_IMPL_ABS_INT, BENNU_PRIMITIVE_ABS, 1U, INT64_C(0)},
+      {"sub", BENNU_IMPL_SUB_INT, BENNU_PRIMITIVE_SUB, 2U, INT64_C(1)},
+      {"mul", BENNU_IMPL_MUL_INT, BENNU_PRIMITIVE_MUL, 2U, INT64_C(2)}};
+  const BennuSourceSpan span = bennu_source_span(
+      bennu_source_location(1U, 1U, 1U), bennu_source_location(8U, 1U, 8U));
+  size_t case_index = 0U;
+  for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+    BennuResources allocation = {0};
+    BennuValue input = {0};
+    BennuValue right = bennu_scalar_int(cases[case_index].right);
+    BennuValue result = {0};
+    const int64_t values[] = {INT64_C(1), INT64_C(2), INT64_C(3)};
+    const size_t allocations_before = bennu_probe_outstanding_allocations;
+    allocation.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+    if (!bennu_literal_int(&allocation, &input, values, 3U, "vector-literal",
+                           span, span)) {
+      return 1;
+    }
+    allocation.has_failure_ordinal = 1;
+    allocation.failure_ordinal = allocation.reservation_ordinal;
+    if (bennu_apply(&allocation, cases[case_index].implementation, &result,
+                    &input, &right, cases[case_index].arity,
+                    cases[case_index].name, cases[case_index].primitive_id,
+                    span, span) || allocation.failure != BENNU_FAILURE_ALLOCATION ||
+        allocation.failure_primitive_id != cases[case_index].primitive_id ||
+        strcmp(allocation.failure_admission_point, cases[case_index].name) != 0 ||
+        allocation.failure_requested_elements != 3U ||
+        allocation.failure_requested_bytes != 3U * sizeof(int64_t) ||
+        allocation.work_units != 0U || allocation.live_bytes != 3U * sizeof(int64_t) ||
+        result.data != NULL ||
+        bennu_probe_outstanding_allocations != allocations_before + 1U) {
+      bennu_release(&allocation, &input);
+      return 2;
+    }
+    bennu_release(&allocation, &input);
+    if (allocation.live_bytes != 0U ||
+        bennu_probe_outstanding_allocations != allocations_before) {
+      return 3;
+    }
+    {
+      BennuResources work = {0};
+      BennuValue scalar = bennu_scalar_int(INT64_C(3));
+      BennuValue scalar_result = {0};
+      work.profile = BENNU_PROFILE_BOUNDED_V1;
+      work.has_work_limit = 1;
+      work.work_limit = 0U;
+      if (bennu_apply(&work, cases[case_index].implementation, &scalar_result,
+                      &scalar, &right, cases[case_index].arity,
+                      cases[case_index].name, cases[case_index].primitive_id,
+                      span, span) || work.failure != BENNU_FAILURE_PROFILE ||
+          work.failure_limit != BENNU_LIMIT_MAX_WORK_UNITS ||
+          work.failure_configured_limit != 0U || work.failure_usage_before != 0U ||
+          work.failure_refused_charge != 1U || work.work_units != 0U ||
+          work.live_bytes != 0U || scalar_result.data != NULL) {
+        return 4;
+      }
+    }
+    {
+      BennuResources empty_resources = {0};
+      BennuValue empty = {BENNU_VECTOR, BENNU_INT, 0U, 0U, INT64_C(0), 0.0, NULL};
+      BennuValue empty_result = {0};
+      empty_resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+      if (!bennu_apply(&empty_resources, cases[case_index].implementation,
+                       &empty_result, &empty, &right, cases[case_index].arity,
+                       cases[case_index].name, cases[case_index].primitive_id,
+                       span, span) || empty_result.container != BENNU_VECTOR ||
+          empty_result.count != 0U || empty_result.data != NULL ||
+          empty_resources.work_units != 0U || empty_resources.live_bytes != 0U) {
+        return 5;
+      }
+      bennu_release(&empty_resources, &empty_result);
+    }
+  }
+  for (case_index = 3U; case_index < 5U; ++case_index) {
+    BennuResources shape = {0};
+    BennuValue argument = {BENNU_VECTOR, BENNU_INT, 3U, 0U, INT64_C(0), 0.0, NULL};
+    shape.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
+    if (bennu_require_shape(&shape, cases[case_index].name,
+                            cases[case_index].primitive_id, 2U, 2U, &argument,
+                            span, span) || shape.failure != BENNU_FAILURE_SHAPE ||
+        shape.work_units != 0U || shape.live_bytes != 0U) {
+      return 6;
+    }
+  }
+  return 0;
+}
+
 int main(void) {
   _Static_assert(BENNU_PRIMITIVE_NONE == -1, "primitive id mismatch");
   _Static_assert(BENNU_PRIMITIVE_INC == 0, "primitive id mismatch");
@@ -519,6 +1063,13 @@ int main(void) {
   _Static_assert(BENNU_PRIMITIVE_EQUALS == 2, "primitive id mismatch");
   _Static_assert(BENNU_PRIMITIVE_NOT == 3, "primitive id mismatch");
   _Static_assert(BENNU_PRIMITIVE_IOTA == 4, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_DEC == 5, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_NEG == 6, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_ABS == 7, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_SUB == 8, "primitive id mismatch");
+  _Static_assert(BENNU_PRIMITIVE_MUL == 9, "primitive id mismatch");
+  _Static_assert(BENNU_DOMAIN_INTEGER_OVERFLOW == 1,
+                 "domain reason mismatch");
   {
     size_t iteration = 0U;
     for (iteration = 0U; iteration < 2U; ++iteration) {
@@ -558,6 +1109,20 @@ int main(void) {
   const int profiles = bennu_probe_profile_contexts();
   const int live = bennu_probe_live_context();
   const int shape = bennu_probe_shape_context();
+  const int checked_bits = bennu_probe_checked_double_bits();
+  const int checked_environment =
+      bennu_probe_hostile_checked_double_environment();
+  const int checked_contexts = bennu_probe_checked_int_contexts();
+  int checked_resources = 0;
+  {
+    size_t iteration = 0U;
+    for (iteration = 0U; iteration < 2U; ++iteration) {
+      checked_resources = bennu_probe_checked_resource_matrix();
+      if (checked_resources != 0) {
+        break;
+      }
+    }
+  }
   if (domain != 0) {
     return 20 + domain;
   }
@@ -567,7 +1132,26 @@ int main(void) {
   if (live != 0) {
     return 40 + live;
   }
-  return shape == 0 ? 0 : 50 + shape;
+  if (shape != 0) {
+    return 50 + shape;
+  }
+  if (checked_bits != 0) {
+    return 60 + checked_bits;
+  }
+  if (checked_environment != 0) {
+    return 70 + checked_environment;
+  }
+  if (checked_contexts != 0) {
+    return 80 + checked_contexts;
+  }
+  if (checked_resources != 0) {
+    return 90 + checked_resources;
+  }
+  return bennu_probe_invalid_free == 0 &&
+                 bennu_probe_total_allocations == bennu_probe_total_frees &&
+                 bennu_probe_outstanding_allocations == 0U
+             ? 0
+             : 99;
 }
 )bennu_c";
   return source;
@@ -615,7 +1199,7 @@ std::string refusal_evidence(const bennu::Error &error) {
 } // namespace
 
 int main(int argument_count, char **arguments) {
-  if (argument_count != 29) {
+  if (argument_count != 30) {
     return 2;
   }
 
@@ -920,6 +1504,78 @@ int main(int argument_count, char **arguments) {
     return 35;
   }
 
+  struct CheckedResourceCase {
+    const char *name;
+    bennu::PrimitiveId id;
+    const char *vector_source;
+    const char *scalar_source;
+  };
+  const CheckedResourceCase checked_resource_cases[] = {
+      {"dec", bennu::PrimitiveId::dec, "dec[(1 2)]", "dec[3]"},
+      {"neg", bennu::PrimitiveId::neg, "neg[(1 2)]", "neg[3]"},
+      {"abs", bennu::PrimitiveId::abs, "abs[(1 2)]", "abs[3]"},
+      {"sub", bennu::PrimitiveId::sub, "sub[(3 4) 1]", "sub[3 1]"},
+      {"mul", bennu::PrimitiveId::mul, "mul[(3 4) 2]", "mul[3 2]"},
+  };
+  const bennu::EvaluationConfiguration refuse_checked_result_allocation{
+      bennu::ExecutionProfile::trusted_local_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{std::size_t{1U}}};
+  const bennu::EvaluationConfiguration refuse_checked_scalar_work{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::size_t{0U}},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  for (const CheckedResourceCase &checked_case : checked_resource_cases) {
+    bennu::ValueResult allocation = bennu::evaluate_expression(
+        checked_case.vector_source, refuse_checked_result_allocation);
+    if (allocation.ok ||
+        !is_resource_error(
+            allocation.error,
+            bennu::ResourceErrorReason::allocation_unavailable) ||
+        allocation.error.resource->requested_elements != std::size_t{2U} ||
+        allocation.error.resource->requested_bytes != std::size_t{16U} ||
+        !allocation.error.primitive.has_value() ||
+        !allocation.error.primitive->id.has_value() ||
+        *allocation.error.primitive->id != checked_case.id ||
+        allocation.error.primitive->name != checked_case.name ||
+        allocation.error.location.offset != std::size_t{1U} ||
+        allocation.error.location.line != std::size_t{1U} ||
+        allocation.error.location.column != std::size_t{1U} ||
+        allocation.value.vector.booleans.get() != nullptr ||
+        allocation.value.vector.integers.get() != nullptr ||
+        allocation.value.vector.doubles.get() != nullptr) {
+      if (allocation.ok) {
+        bennu::destroy_value(allocation.value);
+      }
+      return 36;
+    }
+
+    bennu::ValueResult work = bennu::evaluate_expression(
+        checked_case.scalar_source, refuse_checked_scalar_work);
+    if (work.ok ||
+        !is_resource_error(work.error,
+                           bennu::ResourceErrorReason::profile_limit) ||
+        work.error.resource->limit_kind !=
+            bennu::ResourceLimitKind::max_work_units ||
+        work.error.resource->configured_limit != std::size_t{0U} ||
+        work.error.resource->usage_before != std::size_t{0U} ||
+        work.error.resource->refused_charge != std::size_t{1U} ||
+        work.error.resource->requested_elements.has_value() ||
+        work.error.resource->requested_bytes.has_value() ||
+        !work.error.primitive.has_value() ||
+        !work.error.primitive->id.has_value() ||
+        *work.error.primitive->id != checked_case.id ||
+        work.error.primitive->name != checked_case.name ||
+        work.error.location.offset != std::size_t{1U} ||
+        work.error.location.line != std::size_t{1U} ||
+        work.error.location.column != std::size_t{1U}) {
+      if (work.ok) {
+        bennu::destroy_value(work.value);
+      }
+      return 37;
+    }
+  }
+
   bennu::ValueResult overflow = bennu::evaluate_expression(
       "iota[2305843009213693952]", exact_profile);
   if (overflow.ok ||
@@ -980,6 +1636,17 @@ int main(int argument_count, char **arguments) {
       bennu::NativeBuildRequest{*context_probe, arguments[22], arguments[1], ""});
   if (!context_probe_native.ok) {
     return 33;
+  }
+  const std::optional<std::string> standard_fenv_probe =
+      generated_standard_fenv_probe();
+  if (!standard_fenv_probe.has_value()) {
+    return 38;
+  }
+  const bennu::NativeBuildResult standard_fenv_probe_native =
+      bennu::build_native(bennu::NativeBuildRequest{
+          *standard_fenv_probe, arguments[29], arguments[1], ""});
+  if (!standard_fenv_probe_native.ok) {
+    return 39;
   }
   return 0;
 }
