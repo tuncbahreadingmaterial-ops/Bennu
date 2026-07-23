@@ -193,6 +193,7 @@ endif()
 
 if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  find_package(Threads REQUIRED)
   add_executable(bennu_tests
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
@@ -202,6 +203,7 @@ if(BUILD_TESTING)
   )
   target_include_directories(bennu_tests PRIVATE include)
   target_include_directories(bennu_tests SYSTEM PRIVATE third_party/doctest)
+  target_link_libraries(bennu_tests PRIVATE Threads::Threads)
   target_compile_definitions(bennu_tests PRIVATE
     DOCTEST_CONFIG_NO_EXCEPTIONS
     DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
@@ -216,6 +218,7 @@ if(BUILD_TESTING)
     NAME spec.traceability
     COMMAND "${CMAKE_COMMAND}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability.cmake"
   )
   add_test(
@@ -224,6 +227,13 @@ if(BUILD_TESTING)
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability_negative.cmake"
+  )
+  add_test(
+    NAME spec.traceability_tuple_negative
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/spec_traceability_tuple_negative.cmake"
   )
   add_test(
     NAME architecture.obsolete_surface
@@ -342,8 +352,8 @@ if(BUILD_TESTING)
   )
   add_test(
     NAME public.api_resource_matrix
-    COMMAND
-      "${CMAKE_COMMAND}"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
       "-DBENNU_PUBLIC_RESOURCE_FIXTURE=$<TARGET_FILE:bennu_public_resource_fixture>"
       "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
       "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"

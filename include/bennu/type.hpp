@@ -55,6 +55,7 @@ enum class HostResourceErrorReason {
 struct HostAllocationFailureInjection {
   std::optional<std::size_t> fail_at_allocation_ordinal;
   std::size_t allocation_ordinal{0U};
+  std::optional<std::size_t> max_container_elements{};
 };
 
 struct TypeValidationResult {

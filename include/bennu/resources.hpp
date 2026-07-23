@@ -39,6 +39,7 @@ struct EvaluationResources {
   std::size_t &live_evaluation_bytes;
   std::size_t work_units;
   std::size_t reservation_ordinal;
+  ResourceLifetimeObserver lifetime_observer{};
 
   EvaluationResources(ExecutionProfile profile, ResourceLimits limits,
                       AllocationFailureInjection allocation_failure,
@@ -89,6 +90,15 @@ struct TupleConstructionResult {
   ValueInvariant invariant;
   Error error;
 };
+
+struct TupleElementExecutionResult {
+  bool ok;
+  Value value;
+  Error error;
+};
+
+using TupleElementExecutor = TupleElementExecutionResult (*)(
+    void *, EvaluationResources &, std::size_t);
 
 enum class ValueReleaseError {
   none,
@@ -145,6 +155,10 @@ TupleConstructionResult make_tuple_value(
     EvaluationResources &resources, std::span<Value> elements,
     SourceLocation location, std::string_view producer_name,
     HostAllocationFailureInjection &allocation_failure);
+TupleConstructionResult execute_tuple_construction(
+    EvaluationResources &resources, std::span<Value> element_storage,
+    TupleElementExecutor execute_element, void *execution_context,
+    SourceLocation location, std::string_view producer_name);
 ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
                                               Value &value);
 ValueReleaseResult release_vector_reservation(
@@ -157,6 +171,8 @@ ValueReleaseResult release_value_reservations(EvaluationResources &resources,
 ValueReleaseResult release_value_reservations(
     EvaluationResources &resources, Value &value,
     HostAllocationFailureInjection &allocation_failure);
+ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
+                                             Value &value);
 
 } // namespace bennu
 

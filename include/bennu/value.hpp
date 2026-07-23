@@ -25,6 +25,32 @@ enum class ContainerKind {
   tuple,
 };
 
+enum class ResourceStorageKind {
+  vector_payload,
+  tuple_table,
+};
+
+enum class ResourceLifetimeEventKind {
+  admitted,
+  logical_release,
+  physical_release,
+};
+
+struct ResourceLifetimeEvent {
+  ResourceLifetimeEventKind kind;
+  ResourceStorageKind storage_kind;
+  std::optional<std::size_t> allocation_ordinal;
+  const void *storage;
+  std::size_t canonical_bytes;
+};
+
+using ResourceLifetimeRecord = void (*)(void *, ResourceLifetimeEvent);
+
+struct ResourceLifetimeObserver {
+  void *context{nullptr};
+  ResourceLifetimeRecord record{nullptr};
+};
+
 struct ScalarValue {
   ScalarType type;
   bool boolean;
@@ -43,6 +69,8 @@ struct VectorValue {
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
   std::shared_ptr<std::size_t> accounting_owner{};
+  std::optional<std::size_t> allocation_ordinal{};
+  ResourceLifetimeObserver lifetime_observer{};
 };
 
 using TupleTableStorage =
@@ -54,6 +82,8 @@ struct TupleTableReservation {
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
   std::shared_ptr<std::size_t> accounting_owner{};
+  std::optional<std::size_t> allocation_ordinal{};
+  ResourceLifetimeObserver lifetime_observer{};
 };
 
 struct ValueNode {

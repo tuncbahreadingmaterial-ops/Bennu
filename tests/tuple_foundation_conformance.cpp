@@ -13,6 +13,13 @@
 #include <ostream>
 #include <string>
 #include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 namespace bennu {
 
@@ -50,6 +57,128 @@ std::string valid_value_text(const Value &value) {
   return formatted.formatted;
 }
 
+struct ConstructionProbe {
+  std::vector<std::size_t> execution_order;
+  std::array<std::size_t, 3> execution_counts{};
+  std::vector<std::size_t> work_after_element;
+  std::optional<std::size_t> fail_element{};
+  std::string published_output;
+};
+
+TupleElementExecutionResult execute_construction_element(
+    void *context, EvaluationResources &resources, std::size_t element_index) {
+  auto &probe = *static_cast<ConstructionProbe *>(context);
+  probe.execution_order.push_back(element_index);
+  ++probe.execution_counts[element_index];
+  const WorkChargeResult charged = charge_work(
+      resources, element_index + 1U, tuple_location, "tuple-element");
+  probe.work_after_element.push_back(resources.work_units);
+  if (!charged.ok || probe.fail_element == element_index) {
+    Error error = charged.ok
+                      ? make_error(ErrorKind::domain_error, tuple_location,
+                                   "injected tuple element failure")
+                      : charged.error;
+    Value empty = make_int_value(0);
+    CHECK(destroy_value(empty).ok);
+    return TupleElementExecutionResult{false, std::move(empty),
+                                       std::move(error)};
+  }
+  VectorAllocationResult vector = allocate_vector(
+      resources, ScalarType::integer, 1U, 0U, tuple_location,
+      "tuple-element");
+  if (!vector.ok) {
+    Value empty = make_int_value(0);
+    CHECK(destroy_value(empty).ok);
+    return TupleElementExecutionResult{false, std::move(empty),
+                                       std::move(vector.error)};
+  }
+  vector.value.vector.integers.get()[0] =
+      static_cast<std::int64_t>(element_index + 1U);
+  return TupleElementExecutionResult{true, move_value(vector.value),
+                                     make_error(ErrorKind::none,
+                                                tuple_location)};
+}
+
+void record_lifetime_event(void *context, ResourceLifetimeEvent event) {
+  auto &events = *static_cast<std::vector<ResourceLifetimeEvent> *>(context);
+  events.push_back(event);
+}
+
+ResourceLifetimeObserver observer_for(
+    std::vector<ResourceLifetimeEvent> &events) {
+  return ResourceLifetimeObserver{&events, &record_lifetime_event};
+}
+
+struct ReducedStackProbe {
+  bool construction_ok{false};
+  bool validation_ok{false};
+  bool formatting_ok{false};
+  bool overflow_refused{false};
+  bool failed_cleanup_unchanged{false};
+  bool cleanup_ok{false};
+};
+
+void execute_reduced_stack_probe(ReducedStackProbe &probe) {
+  EvaluationResources resources = make_trusted_local_v2_resources(no_failure);
+  VectorAllocationResult leaf = allocate_vector(
+      resources, ScalarType::integer, 1U, 0U, tuple_location,
+      "reduced-stack-leaf");
+  if (!leaf.ok) {
+    return;
+  }
+  leaf.value.vector.integers.get()[0] = 1;
+  Value deep = move_value(leaf.value);
+  constexpr std::size_t depth = 2048U;
+  for (std::size_t index = 0U; index < depth; ++index) {
+    std::array<Value, 1> child{{move_value(deep)}};
+    TupleConstructionResult parent = make_tuple_value(
+        resources, child, tuple_location, "reduced-stack-tuple");
+    if (!parent.ok) {
+      return;
+    }
+    deep = move_value(parent.value);
+  }
+  probe.construction_ok = true;
+  probe.validation_ok = validate_value(deep).ok;
+  const ValueFormattingResult formatted = format_value(deep);
+  probe.formatting_ok = formatted.ok && formatted.formatted.size() ==
+                                            depth * 2U + 3U;
+
+  HostAllocationFailureInjection overflow{
+      std::nullopt, 0U, std::optional<std::size_t>{1024U}};
+  const ValueValidationResult overflow_validation =
+      validate_value(deep, overflow);
+  probe.overflow_refused =
+      !overflow_validation.ok &&
+      overflow_validation.invariant == ValueInvariant::none &&
+      overflow_validation.resource_error == HostResourceErrorReason::size_overflow;
+
+  const std::size_t live_before_failure = resources.live_evaluation_bytes;
+  HostAllocationFailureInjection fail_validation{std::size_t{0U}, 0U};
+  const ValueReleaseResult failed_cleanup =
+      release_value_reservations(resources, deep, fail_validation);
+  probe.failed_cleanup_unchanged =
+      !failed_cleanup.ok && validate_value(deep).ok &&
+      resources.live_evaluation_bytes == live_before_failure;
+  const ValueReleaseResult cleanup =
+      release_value_reservations(resources, deep);
+  probe.cleanup_ok = cleanup.ok && resources.live_evaluation_bytes == 0U &&
+                     deep.container != ContainerKind::tuple;
+  (void)destroy_value(deep);
+}
+
+#if defined(_WIN32)
+DWORD WINAPI reduced_stack_entry(void *context) {
+  execute_reduced_stack_probe(*static_cast<ReducedStackProbe *>(context));
+  return 0;
+}
+#else
+void *reduced_stack_entry(void *context) {
+  execute_reduced_stack_probe(*static_cast<ReducedStackProbe *>(context));
+  return nullptr;
+}
+#endif
+
 } // namespace
 
 TEST_CASE("TUP-002-TYPES") {
@@ -74,6 +203,92 @@ TEST_CASE("TUP-002-TYPES") {
   TypeArena copied_diagnostic_type = heterogeneous.type;
   CHECK(structural_type_equal(copied_diagnostic_type, heterogeneous.type));
   CHECK(valid_type_text(copied_diagnostic_type) ==
+        "Tuple<Int, Double, Vector<Bool>>");
+
+  const std::array<TypeArena, 11> notation_types{{
+      make_scalar_type(ScalarType::boolean),
+      make_scalar_type(ScalarType::integer),
+      make_scalar_type(ScalarType::double_precision),
+      make_vector_type(ScalarType::boolean),
+      make_vector_type(ScalarType::integer),
+      make_vector_type(ScalarType::double_precision),
+      make_tuple_type({}).type,
+      make_tuple_type(std::array<TypeArena, 1>{integer}).type,
+      make_tuple_type(std::array<TypeArena, 3>{
+                          integer,
+                          make_scalar_type(ScalarType::double_precision),
+                          make_scalar_type(ScalarType::boolean)})
+          .type,
+      make_tuple_type(std::array<TypeArena, 2>{
+                          integer,
+                          make_tuple_type(
+                              std::array<TypeArena, 2>{integer, integer})
+                              .type})
+          .type,
+      make_tuple_type(std::array<TypeArena, 2>{
+                          make_vector_type(ScalarType::integer),
+                          make_tuple_type(std::array<TypeArena, 1>{
+                                              make_scalar_type(
+                                                  ScalarType::boolean)})
+                              .type})
+          .type,
+  }};
+  const std::array<std::string, 11> notation_text{{
+      "Bool",
+      "Int",
+      "Double",
+      "Vector<Bool>",
+      "Vector<Int>",
+      "Vector<Double>",
+      "Tuple<>",
+      "Tuple<Int>",
+      "Tuple<Int, Double, Bool>",
+      "Tuple<Int, Tuple<Int, Int>>",
+      "Tuple<Vector<Int>, Tuple<Bool>>",
+  }};
+  for (std::size_t index = 0U; index < notation_types.size(); ++index) {
+    CHECK(valid_type_text(notation_types[index]) == notation_text[index]);
+  }
+
+  const TypeArena reversed =
+      make_tuple_type(std::array<TypeArena, 3>{
+                          vector_boolean,
+                          make_scalar_type(ScalarType::double_precision), integer})
+          .type;
+  const TypeArena shorter =
+      make_tuple_type(std::array<TypeArena, 2>{
+                          integer,
+                          make_scalar_type(ScalarType::double_precision)})
+          .type;
+  const TypeArena differently_nested =
+      make_tuple_type(std::array<TypeArena, 2>{
+                          make_tuple_type(std::array<TypeArena, 2>{
+                                              integer,
+                                              make_scalar_type(
+                                                  ScalarType::double_precision)})
+                              .type,
+                          vector_boolean})
+          .type;
+  CHECK_FALSE(structural_type_equal(heterogeneous.type, reversed));
+  CHECK_FALSE(structural_type_equal(heterogeneous.type, shorter));
+  CHECK_FALSE(structural_type_equal(heterogeneous.type, differently_nested));
+
+  HostAllocationFailureInjection synthetic_overflow{
+      std::nullopt, 0U, std::optional<std::size_t>{2U}};
+  const TypeConstructionResult overflow =
+      make_tuple_type(element_types, synthetic_overflow);
+  CHECK_FALSE(overflow.ok);
+  CHECK(overflow.invariant == TypeInvariant::none);
+  CHECK(overflow.resource_error == HostResourceErrorReason::size_overflow);
+
+  ErrorValueType diagnostic_type;
+  {
+    TypeArena source_type = heterogeneous.type;
+    TypeErrorContext diagnostic;
+    diagnostic.actual_arguments.push_back(source_type);
+    diagnostic_type = std::move(diagnostic.actual_arguments[0]);
+  }
+  CHECK(valid_type_text(diagnostic_type) ==
         "Tuple<Int, Double, Vector<Bool>>");
 
   TypeArena deep = make_scalar_type(ScalarType::integer);
@@ -590,6 +805,70 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
       "reused-moved-resource-context");
   REQUIRE(reused_move_source.ok);
   CHECK(release_vector_reservation(move_source, reused_move_source.value).ok);
+
+  std::vector<ResourceLifetimeEvent> lifetime_events;
+  EvaluationResources observed_resources =
+      make_trusted_local_v2_resources(no_failure);
+  observed_resources.lifetime_observer = observer_for(lifetime_events);
+  Value observed_inner_vector = make_test_vector(observed_resources, {7});
+  std::array<Value, 1> observed_inner_children{{
+      move_value(observed_inner_vector),
+  }};
+  TupleConstructionResult observed_inner = make_tuple_value(
+      observed_resources, observed_inner_children, tuple_location,
+      "observed-inner");
+  REQUIRE(observed_inner.ok);
+  Value observed_outer_vector = make_test_vector(observed_resources, {8});
+  std::array<Value, 2> observed_outer_children{{
+      move_value(observed_outer_vector), move_value(observed_inner.value)}};
+  TupleConstructionResult observed_outer = make_tuple_value(
+      observed_resources, observed_outer_children, tuple_location,
+      "observed-outer");
+  REQUIRE(observed_outer.ok);
+  const ValueTupleElementResult borrowed =
+      value_tuple_element(observed_outer.value, 1U);
+  REQUIRE(borrowed.ok);
+  CHECK(valid_type_text(value_type(borrowed.view).type) ==
+        "Tuple<Vector<Int>>");
+
+  Value detached_result = move_value(observed_outer.value);
+  CHECK(destroy_value(observed_outer.value).ok);
+  const std::size_t event_count_before_detach = lifetime_events.size();
+  CHECK(detach_value_reservations(observed_resources, detached_result).ok);
+  CHECK(observed_resources.live_evaluation_bytes == 0U);
+  CHECK(validate_value(detached_result).ok);
+  CHECK(valid_value_text(detached_result) == "[(8) [(7)]]");
+  REQUIRE(lifetime_events.size() == event_count_before_detach + 4U);
+  const std::array<std::size_t, 4> expected_release_ordinals{{0U, 1U, 2U,
+                                                              3U}};
+  for (std::size_t index = 0U; index < expected_release_ordinals.size();
+       ++index) {
+    const ResourceLifetimeEvent &event =
+        lifetime_events[event_count_before_detach + index];
+    CHECK(event.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(event.allocation_ordinal ==
+          std::optional<std::size_t>{expected_release_ordinals[index]});
+  }
+
+  const ValueTupleElementResult detached_borrow =
+      value_tuple_element(detached_result, 1U);
+  REQUIRE(detached_borrow.ok);
+  CHECK(valid_type_text(value_type(detached_borrow.view).type) ==
+        "Tuple<Vector<Int>>");
+  const std::size_t event_count_before_destroy = lifetime_events.size();
+  CHECK(destroy_value(detached_result).ok);
+  REQUIRE(lifetime_events.size() == event_count_before_destroy + 4U);
+  for (std::size_t index = 0U; index < expected_release_ordinals.size();
+       ++index) {
+    const ResourceLifetimeEvent &event =
+        lifetime_events[event_count_before_destroy + index];
+    CHECK(event.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(event.allocation_ordinal ==
+          std::optional<std::size_t>{expected_release_ordinals[index]});
+  }
+  const ValueTypeResult expired_borrow_type = value_type(detached_borrow.view);
+  CHECK_FALSE(expired_borrow_type.ok);
+  CHECK(expired_borrow_type.error == ValueAccessError::invalid_value);
 }
 
 TEST_CASE("TUP-005-FORMAT") {
@@ -922,7 +1201,143 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   }
 }
 
-TEST_CASE("TUP-009-HOST-ALLOCATION-FAILURES") {
+TEST_CASE("TUP-009-CONSTRUCTION") {
+  std::vector<ResourceLifetimeEvent> success_events;
+  EvaluationResources success_resources =
+      make_trusted_local_v2_resources(no_failure);
+  success_resources.lifetime_observer = observer_for(success_events);
+  ConstructionProbe success_probe;
+  std::array<Value, 3> success_scratch{{make_int_value(0), make_int_value(0),
+                                        make_int_value(0)}};
+  TupleConstructionResult success = execute_tuple_construction(
+      success_resources, success_scratch, &execute_construction_element,
+      &success_probe, tuple_location, "tuple-construction-sequence");
+  REQUIRE(success.ok);
+  CHECK(success_probe.execution_order ==
+        std::vector<std::size_t>{0U, 1U, 2U});
+  CHECK(success_probe.execution_counts ==
+        std::array<std::size_t, 3>{1U, 1U, 1U});
+  CHECK(success_probe.work_after_element ==
+        std::vector<std::size_t>{1U, 3U, 6U});
+  CHECK(success_resources.work_units == 6U);
+  CHECK(success_resources.reservation_ordinal == 4U);
+  REQUIRE(success_events.size() == 4U);
+  for (std::size_t index = 0U; index < success_events.size(); ++index) {
+    CHECK(success_events[index].kind == ResourceLifetimeEventKind::admitted);
+    CHECK(success_events[index].allocation_ordinal ==
+          std::optional<std::size_t>{index});
+  }
+  CHECK(success_events[0].storage_kind == ResourceStorageKind::vector_payload);
+  CHECK(success_events[1].storage_kind == ResourceStorageKind::vector_payload);
+  CHECK(success_events[2].storage_kind == ResourceStorageKind::vector_payload);
+  CHECK(success_events[3].storage_kind == ResourceStorageKind::tuple_table);
+  CHECK(success_probe.published_output.empty());
+  success_probe.published_output = valid_value_text(success.value);
+  CHECK(success_probe.published_output == "[(1) (2) (3)]");
+  CHECK(destroy_value(success.value).ok);
+  REQUIRE(success_events.size() == 12U);
+  const std::array<std::size_t, 4> success_release_ordinals{{2U, 1U, 0U,
+                                                             3U}};
+  for (std::size_t index = 0U; index < success_release_ordinals.size();
+       ++index) {
+    const ResourceLifetimeEvent &logical = success_events[4U + index * 2U];
+    const ResourceLifetimeEvent &physical = success_events[5U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{success_release_ordinals[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
+  }
+  CHECK(success_resources.live_evaluation_bytes == 0U);
+  CHECK(success_resources.work_units == 6U);
+
+  std::vector<ResourceLifetimeEvent> child_failure_events;
+  EvaluationResources child_failure_resources =
+      make_trusted_local_v2_resources(no_failure);
+  child_failure_resources.lifetime_observer =
+      observer_for(child_failure_events);
+  ConstructionProbe child_failure_probe;
+  child_failure_probe.fail_element = 1U;
+  std::array<Value, 3> child_failure_scratch{{
+      make_int_value(0), make_int_value(0), make_int_value(0)}};
+  const TupleConstructionResult child_failure = execute_tuple_construction(
+      child_failure_resources, child_failure_scratch,
+      &execute_construction_element, &child_failure_probe, tuple_location,
+      "tuple-child-failure");
+  CHECK_FALSE(child_failure.ok);
+  CHECK(child_failure_probe.execution_order ==
+        std::vector<std::size_t>{0U, 1U});
+  CHECK(child_failure_probe.execution_counts ==
+        std::array<std::size_t, 3>{1U, 1U, 0U});
+  CHECK(child_failure_probe.work_after_element ==
+        std::vector<std::size_t>{1U, 3U});
+  CHECK(child_failure_resources.work_units == 3U);
+  CHECK(child_failure_resources.reservation_ordinal == 1U);
+  REQUIRE(child_failure_events.size() == 3U);
+  CHECK(child_failure_events[0].kind == ResourceLifetimeEventKind::admitted);
+  CHECK(child_failure_events[0].storage_kind ==
+        ResourceStorageKind::vector_payload);
+  CHECK(child_failure_events[1].kind ==
+        ResourceLifetimeEventKind::logical_release);
+  CHECK(child_failure_events[2].kind ==
+        ResourceLifetimeEventKind::physical_release);
+  CHECK(child_failure_events[1].allocation_ordinal ==
+        std::optional<std::size_t>{0U});
+  CHECK(child_failure_events[2].allocation_ordinal ==
+        std::optional<std::size_t>{0U});
+  CHECK(child_failure_probe.published_output.empty());
+  CHECK(child_failure.value.container != ContainerKind::tuple);
+  CHECK(child_failure_resources.live_evaluation_bytes == 0U);
+
+  std::vector<ResourceLifetimeEvent> outer_failure_events;
+  EvaluationResources outer_failure_resources =
+      make_trusted_local_v2_resources(AllocationFailureInjection{3U});
+  outer_failure_resources.lifetime_observer =
+      observer_for(outer_failure_events);
+  ConstructionProbe outer_failure_probe;
+  std::array<Value, 3> outer_failure_scratch{{
+      make_int_value(0), make_int_value(0), make_int_value(0)}};
+  const TupleConstructionResult outer_failure = execute_tuple_construction(
+      outer_failure_resources, outer_failure_scratch,
+      &execute_construction_element, &outer_failure_probe, tuple_location,
+      "tuple-outer-failure");
+  CHECK_FALSE(outer_failure.ok);
+  REQUIRE(outer_failure.error.resource.has_value());
+  CHECK(outer_failure.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{3U});
+  CHECK(outer_failure_probe.execution_order ==
+        std::vector<std::size_t>{0U, 1U, 2U});
+  CHECK(outer_failure_probe.execution_counts ==
+        std::array<std::size_t, 3>{1U, 1U, 1U});
+  CHECK(outer_failure_probe.work_after_element ==
+        std::vector<std::size_t>{1U, 3U, 6U});
+  CHECK(outer_failure_resources.work_units == 6U);
+  CHECK(outer_failure_resources.reservation_ordinal == 4U);
+  REQUIRE(outer_failure_events.size() == 9U);
+  for (std::size_t index = 0U; index < 3U; ++index) {
+    CHECK(outer_failure_events[index].kind ==
+          ResourceLifetimeEventKind::admitted);
+    CHECK(outer_failure_events[index].allocation_ordinal ==
+          std::optional<std::size_t>{index});
+  }
+  const std::array<std::size_t, 3> failed_release_ordinals{{2U, 1U, 0U}};
+  for (std::size_t index = 0U; index < failed_release_ordinals.size(); ++index) {
+    const ResourceLifetimeEvent &logical =
+        outer_failure_events[3U + index * 2U];
+    const ResourceLifetimeEvent &physical =
+        outer_failure_events[4U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{failed_release_ordinals[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
+  }
+  CHECK(outer_failure_probe.published_output.empty());
+  CHECK(outer_failure.value.container != ContainerKind::tuple);
+  CHECK(outer_failure_resources.live_evaluation_bytes == 0U);
+}
+
+TEST_CASE("TUP-HOST-ALLOCATION-FAILURES") {
   std::array<TypeArena, 2> elements{{make_scalar_type(ScalarType::integer),
                                      make_vector_type(ScalarType::boolean)}};
   std::size_t construction_failures = 0U;
@@ -1192,9 +1607,34 @@ TEST_CASE("TUP-016-DEEP-NESTING") {
   CHECK(format_value(deep_value).ok);
   CHECK(release_value_reservations(resources, deep_value).ok);
   CHECK(resources.live_evaluation_bytes == 0U);
+
+  ReducedStackProbe probe;
+#if defined(_WIN32)
+  HANDLE thread = CreateThread(nullptr, 512U * 1024U, &reduced_stack_entry,
+                               &probe, 0U, nullptr);
+  REQUIRE(thread != nullptr);
+  CHECK(WaitForSingleObject(thread, INFINITE) == WAIT_OBJECT_0);
+  CHECK(CloseHandle(thread) != 0);
+#else
+  pthread_attr_t attributes;
+  REQUIRE(pthread_attr_init(&attributes) == 0);
+  REQUIRE(pthread_attr_setstacksize(&attributes, 512U * 1024U) == 0);
+  pthread_t thread;
+  const int create_result =
+      pthread_create(&thread, &attributes, &reduced_stack_entry, &probe);
+  CHECK(pthread_attr_destroy(&attributes) == 0);
+  REQUIRE(create_result == 0);
+  CHECK(pthread_join(thread, nullptr) == 0);
+#endif
+  CHECK(probe.construction_ok);
+  CHECK(probe.validation_ok);
+  CHECK(probe.formatting_ok);
+  CHECK(probe.overflow_refused);
+  CHECK(probe.failed_cleanup_unchanged);
+  CHECK(probe.cleanup_ok);
 }
 
-TEST_CASE("TUP-018-REGRESSION-PLATFORMS") {
+TEST_CASE("ADJACENT-LOW-LEVEL-REGRESSION") {
   EvaluationResources resources = make_bounded_resources(
       ResourceLimits{128U, 4096U, 64U}, no_failure);
   VectorAllocationResult vector = copy_int_vector(

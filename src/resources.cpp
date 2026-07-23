@@ -23,7 +23,7 @@ EvaluationResources::EvaluationResources(
           std::make_shared<std::size_t>(live_evaluation_bytes_value)),
       live_evaluation_bytes(*live_evaluation_accounting),
       work_units(work_units_value),
-      reservation_ordinal(reservation_ordinal_value) {}
+      reservation_ordinal(reservation_ordinal_value), lifetime_observer{} {}
 
 EvaluationResources::EvaluationResources(const EvaluationResources &other)
     : profile(other.profile), limits(other.limits),
@@ -31,7 +31,8 @@ EvaluationResources::EvaluationResources(const EvaluationResources &other)
       live_evaluation_accounting(other.live_evaluation_accounting),
       live_evaluation_bytes(*live_evaluation_accounting),
       work_units(other.work_units),
-      reservation_ordinal(other.reservation_ordinal) {}
+      reservation_ordinal(other.reservation_ordinal),
+      lifetime_observer(other.lifetime_observer) {}
 
 EvaluationResources::EvaluationResources(EvaluationResources &&other) noexcept
     : profile(other.profile), limits(other.limits),
@@ -39,7 +40,8 @@ EvaluationResources::EvaluationResources(EvaluationResources &&other) noexcept
       live_evaluation_accounting(other.live_evaluation_accounting),
       live_evaluation_bytes(*live_evaluation_accounting),
       work_units(other.work_units),
-      reservation_ordinal(other.reservation_ordinal) {}
+      reservation_ordinal(other.reservation_ordinal),
+      lifetime_observer(other.lifetime_observer) {}
 
 namespace {
 
@@ -82,6 +84,48 @@ std::optional<std::size_t> element_width(ScalarType element_type) {
     return double_payload_width;
   }
   return std::nullopt;
+}
+
+const void *vector_storage(const VectorValue &vector) {
+  switch (vector.element_type) {
+  case ScalarType::boolean:
+    return vector.booleans.get();
+  case ScalarType::integer:
+    return vector.integers.get();
+  case ScalarType::double_precision:
+    return vector.doubles.get();
+  }
+  return nullptr;
+}
+
+void reset_vector_storage(VectorValue &vector) {
+  switch (vector.element_type) {
+  case ScalarType::boolean:
+    vector.booleans.reset();
+    vector.boolean_count = 0U;
+    break;
+  case ScalarType::integer:
+    vector.integers.reset();
+    vector.integer_count = 0U;
+    break;
+  case ScalarType::double_precision:
+    vector.doubles.reset();
+    vector.double_count = 0U;
+    break;
+  }
+}
+
+void observe_lifetime(const ResourceLifetimeObserver &observer,
+                      ResourceLifetimeEventKind kind,
+                      ResourceStorageKind storage_kind,
+                      std::optional<std::size_t> allocation_ordinal,
+                      const void *storage, std::size_t canonical_bytes) {
+  if (observer.record != nullptr) {
+    observer.record(observer.context,
+                    ResourceLifetimeEvent{kind, storage_kind,
+                                          allocation_ordinal, storage,
+                                          canonical_bytes});
+  }
 }
 
 Error make_resource_failure(
@@ -407,7 +451,13 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
   candidate.vector.canonical_bytes = byte_count;
   candidate.vector.accounting_active = true;
   candidate.vector.accounting_owner = resources.live_evaluation_accounting;
+  candidate.vector.allocation_ordinal = ordinal;
+  candidate.vector.lifetime_observer = resources.lifetime_observer;
   commit_admission(resources, admission);
+  observe_lifetime(resources.lifetime_observer,
+                   ResourceLifetimeEventKind::admitted,
+                   ResourceStorageKind::vector_payload, ordinal,
+                   vector_storage(candidate.vector), byte_count);
   return VectorAllocationResult{true, std::move(candidate), ValueInvariant::none,
                                 no_error()};
 }
@@ -639,6 +689,12 @@ TupleReservationResult reserve_tuple_table(
   reservation.canonical_bytes = byte_count;
   reservation.accounting_active = true;
   reservation.accounting_owner = resources.live_evaluation_accounting;
+  reservation.allocation_ordinal = ordinal;
+  reservation.lifetime_observer = resources.lifetime_observer;
+  observe_lifetime(resources.lifetime_observer,
+                   ResourceLifetimeEventKind::admitted,
+                   ResourceStorageKind::tuple_table, ordinal,
+                   reservation.storage.get(), byte_count);
   return TupleReservationResult{true, std::move(reservation), no_error()};
 }
 
@@ -737,14 +793,29 @@ TupleConstructionResult make_tuple_value(
 
   const auto rollback_reservation = [&resources, &reserved]() {
     TupleTableReservation &reservation = reserved.reservation;
+    const void *storage = reservation.storage.get();
     if (reservation.accounting_active &&
         reservation.accounting_owner == resources.live_evaluation_accounting &&
         reservation.canonical_bytes <= resources.live_evaluation_bytes) {
       resources.live_evaluation_bytes -= reservation.canonical_bytes;
+      observe_lifetime(reservation.lifetime_observer,
+                       ResourceLifetimeEventKind::logical_release,
+                       ResourceStorageKind::tuple_table,
+                       reservation.allocation_ordinal, storage,
+                       reservation.canonical_bytes);
     }
     reservation.accounting_active = false;
     reservation.accounting_owner = nullptr;
+    if (storage != nullptr) {
+      observe_lifetime(reservation.lifetime_observer,
+                       ResourceLifetimeEventKind::physical_release,
+                       ResourceStorageKind::tuple_table,
+                       reservation.allocation_ordinal, storage,
+                       reservation.canonical_bytes);
+    }
     reservation.storage.reset();
+    reservation.allocation_ordinal = std::nullopt;
+    reservation.lifetime_observer = ResourceLifetimeObserver{};
   };
   const auto metadata_failure = [&]() {
     rollback_reservation();
@@ -857,6 +928,50 @@ TupleConstructionResult make_tuple_value(
                                  no_error()};
 }
 
+TupleConstructionResult execute_tuple_construction(
+    EvaluationResources &resources, std::span<Value> element_storage,
+    TupleElementExecutor execute_element, void *execution_context,
+    SourceLocation location, std::string_view producer_name) {
+  const auto release_completed = [&resources, &element_storage](
+                                     std::size_t completed_count) {
+    for (std::size_t offset = completed_count; offset > 0U; --offset) {
+      (void)release_value_reservations(resources,
+                                       element_storage[offset - 1U]);
+    }
+  };
+  if (execute_element == nullptr) {
+    Error error = make_error(ErrorKind::domain_error, location,
+                             "tuple element executor is null");
+    error.primitive = PrimitiveErrorContext{std::string(producer_name), {}};
+    return TupleConstructionResult{false, make_int_value(0),
+                                   ValueInvariant::none, std::move(error)};
+  }
+
+  std::size_t completed_count = 0U;
+  for (std::size_t element_index = 0U;
+       element_index < element_storage.size(); ++element_index) {
+    (void)destroy_value(element_storage[element_index]);
+    TupleElementExecutionResult produced =
+        execute_element(execution_context, resources, element_index);
+    if (!produced.ok) {
+      (void)destroy_value(produced.value);
+      release_completed(completed_count);
+      return TupleConstructionResult{false, make_int_value(0),
+                                     ValueInvariant::none,
+                                     std::move(produced.error)};
+    }
+    element_storage[element_index] = move_value(produced.value);
+    ++completed_count;
+  }
+
+  TupleConstructionResult tuple = make_tuple_value(
+      resources, element_storage, location, producer_name);
+  if (!tuple.ok) {
+    release_completed(completed_count);
+  }
+  return tuple;
+}
+
 ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
                                               Value &value) {
   HostAllocationFailureInjection allocation_failure{std::nullopt, 0U};
@@ -903,10 +1018,26 @@ ValueReleaseResult release_vector_reservation(
         bytes == value.vector.canonical_bytes &&
         bytes <= resources.live_evaluation_bytes) {
       resources.live_evaluation_bytes -= bytes;
+      observe_lifetime(value.vector.lifetime_observer,
+                       ResourceLifetimeEventKind::logical_release,
+                       ResourceStorageKind::vector_payload,
+                       value.vector.allocation_ordinal,
+                       vector_storage(value.vector), bytes);
     }
   }
   value.vector.accounting_active = false;
   value.vector.accounting_owner = nullptr;
+  const void *storage = vector_storage(value.vector);
+  if (storage != nullptr) {
+    observe_lifetime(value.vector.lifetime_observer,
+                     ResourceLifetimeEventKind::physical_release,
+                     ResourceStorageKind::vector_payload,
+                     value.vector.allocation_ordinal, storage,
+                     value.vector.canonical_bytes);
+    reset_vector_storage(value.vector);
+  }
+  value.vector.allocation_ordinal = std::nullopt;
+  value.vector.lifetime_observer = ResourceLifetimeObserver{};
   value = make_int_value(0);
   return ValueReleaseResult{true, ValueInvariant::none};
 }
@@ -1025,9 +1156,26 @@ ValueReleaseResult release_value_reservations(
       if (reservation.accounting_active &&
           reservation.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
+        observe_lifetime(reservation.lifetime_observer,
+                         ResourceLifetimeEventKind::logical_release,
+                         ResourceStorageKind::tuple_table,
+                         reservation.allocation_ordinal,
+                         reservation.storage.get(),
+                         reservation.canonical_bytes);
       }
       reservation.accounting_active = false;
       reservation.accounting_owner = nullptr;
+      const void *storage = reservation.storage.get();
+      if (storage != nullptr) {
+        observe_lifetime(reservation.lifetime_observer,
+                         ResourceLifetimeEventKind::physical_release,
+                         ResourceStorageKind::tuple_table,
+                         reservation.allocation_ordinal, storage,
+                         reservation.canonical_bytes);
+        reservation.storage.reset();
+      }
+      reservation.allocation_ordinal = std::nullopt;
+      reservation.lifetime_observer = ResourceLifetimeObserver{};
     } else if (container == ContainerKind::vector) {
       VectorValue &vector =
           value.tuple.vector_payloads[node->vector_payload_index];
@@ -1050,9 +1198,25 @@ ValueReleaseResult release_value_reservations(
         if (vector.accounting_active && bytes == vector.canonical_bytes &&
             bytes <= resources.live_evaluation_bytes) {
           resources.live_evaluation_bytes -= bytes;
+          observe_lifetime(vector.lifetime_observer,
+                           ResourceLifetimeEventKind::logical_release,
+                           ResourceStorageKind::vector_payload,
+                           vector.allocation_ordinal, vector_storage(vector),
+                           bytes);
         }
         vector.accounting_active = false;
         vector.accounting_owner = nullptr;
+        const void *storage = vector_storage(vector);
+        if (storage != nullptr) {
+          observe_lifetime(vector.lifetime_observer,
+                           ResourceLifetimeEventKind::physical_release,
+                           ResourceStorageKind::vector_payload,
+                           vector.allocation_ordinal, storage,
+                           vector.canonical_bytes);
+          reset_vector_storage(vector);
+        }
+        vector.allocation_ordinal = std::nullopt;
+        vector.lifetime_observer = ResourceLifetimeObserver{};
       }
     }
 
@@ -1065,6 +1229,154 @@ ValueReleaseResult release_value_reservations(
   Value empty_owner = make_int_value(0);
   (void)destroy_value(empty_owner);
   value = std::move(empty_owner);
+  return ValueReleaseResult{true, ValueInvariant::none};
+}
+
+ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
+                                             Value &value) {
+  const ValueValidationResult validation = validate_value(value);
+  if (!validation.ok) {
+    ValueReleaseResult result{false, validation.invariant};
+    result.resource_error = validation.resource_error;
+    return result;
+  }
+  const std::shared_ptr<std::size_t> &expected_owner =
+      resources.live_evaluation_accounting;
+  if (value.container == ContainerKind::vector) {
+    if (value.vector.accounting_active &&
+        value.vector.accounting_owner != expected_owner) {
+      return ValueReleaseResult{false, ValueInvariant::none,
+                                ValueReleaseError::resource_context_mismatch};
+    }
+    if (value.vector.accounting_active &&
+        value.vector.canonical_bytes <= resources.live_evaluation_bytes) {
+      resources.live_evaluation_bytes -= value.vector.canonical_bytes;
+      observe_lifetime(value.vector.lifetime_observer,
+                       ResourceLifetimeEventKind::logical_release,
+                       ResourceStorageKind::vector_payload,
+                       value.vector.allocation_ordinal,
+                       vector_storage(value.vector),
+                       value.vector.canonical_bytes);
+    }
+    value.vector.accounting_active = false;
+    value.vector.accounting_owner = nullptr;
+    return ValueReleaseResult{true, ValueInvariant::none};
+  }
+  if (value.container == ContainerKind::scalar) {
+    return ValueReleaseResult{true, ValueInvariant::none};
+  }
+
+  for (const VectorValue &payload : value.tuple.vector_payloads) {
+    if (payload.accounting_active && payload.accounting_owner != expected_owner) {
+      return ValueReleaseResult{false, ValueInvariant::none,
+                                ValueReleaseError::resource_context_mismatch};
+    }
+  }
+  for (const TupleTableReservation &reservation : value.tuple.reservations) {
+    if (reservation.accounting_active &&
+        reservation.canonical_bytes != 0U &&
+        reservation.accounting_owner != expected_owner) {
+      return ValueReleaseResult{false, ValueInvariant::none,
+                                ValueReleaseError::resource_context_mismatch};
+    }
+  }
+  if (value.tuple.root_reservation.accounting_active &&
+      value.tuple.root_reservation.canonical_bytes != 0U &&
+      value.tuple.root_reservation.accounting_owner != expected_owner) {
+    return ValueReleaseResult{false, ValueInvariant::none,
+                              ValueReleaseError::resource_context_mismatch};
+  }
+
+  const auto set_parent = [&value](std::size_t child_index,
+                                   std::size_t parent_index) {
+    ValueNode &child = value.tuple.nodes[child_index];
+    if (child.container == ContainerKind::tuple) {
+      child.vector_payload_index = parent_index;
+    } else {
+      child.first_child = parent_index;
+    }
+  };
+  for (std::size_t node_index = 0U; node_index < value.tuple.nodes.size();
+       ++node_index) {
+    const ValueNode &node = value.tuple.nodes[node_index];
+    if (node.container != ContainerKind::tuple) {
+      continue;
+    }
+    for (std::size_t offset = 0U; offset < node.child_count; ++offset) {
+      set_parent(value.tuple.child_indexes[node.first_child + offset],
+                 node_index);
+    }
+  }
+  for (std::size_t offset = 0U; offset < value.tuple.child_count; ++offset) {
+    set_parent(value.tuple.child_indexes[value.tuple.first_child + offset],
+               value.tuple.root_index);
+  }
+
+  std::size_t node_index = value.tuple.root_index;
+  while (true) {
+    const bool root = node_index == value.tuple.root_index;
+    ValueNode *node = root ? nullptr : &value.tuple.nodes[node_index];
+    const ContainerKind container =
+        root ? ContainerKind::tuple : node->container;
+    if (container == ContainerKind::tuple) {
+      const std::size_t first_child =
+          root ? value.tuple.first_child : node->first_child;
+      std::size_t &remaining_children =
+          root ? value.tuple.child_count : node->child_count;
+      if (remaining_children != 0U) {
+        --remaining_children;
+        node_index =
+            value.tuple.child_indexes[first_child + remaining_children];
+        continue;
+      }
+      TupleTableReservation &reservation =
+          root ? value.tuple.root_reservation
+               : value.tuple.reservations[node->tuple_reservation_index];
+      if (reservation.accounting_active &&
+          reservation.canonical_bytes <= resources.live_evaluation_bytes) {
+        resources.live_evaluation_bytes -= reservation.canonical_bytes;
+        observe_lifetime(reservation.lifetime_observer,
+                         ResourceLifetimeEventKind::logical_release,
+                         ResourceStorageKind::tuple_table,
+                         reservation.allocation_ordinal,
+                         reservation.storage.get(),
+                         reservation.canonical_bytes);
+      }
+      reservation.accounting_active = false;
+      reservation.accounting_owner = nullptr;
+    } else if (container == ContainerKind::vector) {
+      VectorValue &vector =
+          value.tuple.vector_payloads[node->vector_payload_index];
+      if (vector.accounting_active &&
+          vector.canonical_bytes <= resources.live_evaluation_bytes) {
+        resources.live_evaluation_bytes -= vector.canonical_bytes;
+        observe_lifetime(vector.lifetime_observer,
+                         ResourceLifetimeEventKind::logical_release,
+                         ResourceStorageKind::vector_payload,
+                         vector.allocation_ordinal, vector_storage(vector),
+                         vector.canonical_bytes);
+      }
+      vector.accounting_active = false;
+      vector.accounting_owner = nullptr;
+    }
+
+    if (root) {
+      break;
+    }
+    node_index = container == ContainerKind::tuple ? node->vector_payload_index
+                                                   : node->first_child;
+  }
+
+  value.tuple.child_count = value.tuple.root_reservation.element_count;
+  for (ValueNode &node : value.tuple.nodes) {
+    if (node.container == ContainerKind::tuple) {
+      node.child_count =
+          value.tuple.reservations[node.tuple_reservation_index].element_count;
+      node.vector_payload_index = 0U;
+    } else {
+      node.first_child = 0U;
+    }
+  }
   return ValueReleaseResult{true, ValueInvariant::none};
 }
 
