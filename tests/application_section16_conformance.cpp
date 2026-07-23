@@ -849,7 +849,7 @@ TEST_CASE("S16-11 Int-to-Double promotion works in scalar and every vector posit
       CHECK(vector_result.value.vector.element_type ==
             (id == PrimitiveId::equals ? ScalarType::boolean
                                        : ScalarType::double_precision));
-      std::string_view expected = "(2.0 3.0)";
+      std::string expected = "(2.0 3.0)";
       if (id == PrimitiveId::equals) {
         expected = "(true false)";
       } else if (id == PrimitiveId::sub) {
