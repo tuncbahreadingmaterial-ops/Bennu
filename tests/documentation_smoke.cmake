@@ -11,6 +11,7 @@ string(REGEX REPLACE "\n$" "" product_version "${product_version}")
 foreach(required_text IN ITEMS
     "inc" "add" "equals" "not" "iota"
     "examples/rewrite.bennu" "trusted-local-v1"
+    "run example.bennu --" "bennu_argument_error"
     "Deliberate differences from Anka"
     "`${product_version}`;" "VERSION does not authorize a release"
     "CLOSED NOT_PLANNED by the owner"

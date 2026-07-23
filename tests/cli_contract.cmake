@@ -61,7 +61,8 @@ if(CASE STREQUAL "help")
 
 Commands:
   repl    Start an interactive Bennu session
-  run     Run a Bennu source file
+  run <source> [-- <arguments...>]
+          Run a Bennu source file
   emit-c  Emit C source for a Bennu source file
   build   Build a Bennu source file
 ]=])
@@ -172,7 +173,8 @@ elseif(CASE STREQUAL "run_extra_argument")
   set(arguments run first.bennu second.bennu)
   set(expected_exit 1)
   set(expected_stdout "")
-  set(expected_stderr "error: 'run' expects exactly one source path\n")
+  set(expected_stderr
+    "error: expected 'run <source> [-- <arguments...>]'\n")
 elseif(CASE STREQUAL "run_nonexistent_file")
   set(source_file "${CMAKE_CURRENT_BINARY_DIR}/does-not-exist.bennu")
   file(REMOVE "${source_file}")

@@ -3,14 +3,18 @@
 #include "bennu/native_builder.hpp"
 #include "bennu/path_encoding.hpp"
 #include "cli_output.hpp"
+#include "runner_arguments.hpp"
 #include "bennu_version.hpp"
 
 #include <array>
+#include <charconv>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -73,6 +77,171 @@ void write_diagnostic(std::string_view source_name, const bennu::Error &error) {
   std::cerr << source_name << ':' << error.location.line << ':'
             << error.location.column << ": " << error_kind_name(error.kind)
             << ": " << error.message << '\n';
+}
+
+std::string_view argument_reason_name(bennu::ArgumentErrorReason reason) {
+  switch (reason) {
+  case bennu::ArgumentErrorReason::missing:
+    return "missing";
+  case bennu::ArgumentErrorReason::extra:
+    return "extra";
+  case bennu::ArgumentErrorReason::invalid_literal:
+    return "invalid_literal";
+  case bennu::ArgumentErrorReason::out_of_range:
+    return "out_of_range";
+  case bennu::ArgumentErrorReason::invalid_typed_value:
+    return "invalid_typed_value";
+  case bennu::ArgumentErrorReason::container_mismatch:
+    return "container_mismatch";
+  case bennu::ArgumentErrorReason::type_mismatch:
+    return "type_mismatch";
+  }
+  return "invalid_literal";
+}
+
+std::string_view scalar_type_name(bennu::ScalarType type) {
+  switch (type) {
+  case bennu::ScalarType::boolean:
+    return "Bool";
+  case bennu::ScalarType::integer:
+    return "Int";
+  case bennu::ScalarType::double_precision:
+    return "Double";
+  }
+  return "-";
+}
+
+std::string_view argument_container_name(bennu::ArgumentContainer container) {
+  switch (container) {
+  case bennu::ArgumentContainer::unknown:
+    return "unknown";
+  case bennu::ArgumentContainer::scalar:
+    return "scalar";
+  case bennu::ArgumentContainer::vector:
+    return "vector";
+  }
+  return "unknown";
+}
+
+std::string_view argument_scalar_type_name(bennu::ArgumentScalarType type) {
+  switch (type) {
+  case bennu::ArgumentScalarType::unknown:
+    return "unknown";
+  case bennu::ArgumentScalarType::boolean:
+    return "Bool";
+  case bennu::ArgumentScalarType::integer:
+    return "Int";
+  case bennu::ArgumentScalarType::double_precision:
+    return "Double";
+  }
+  return "unknown";
+}
+
+std::string_view value_invariant_name(bennu::ValueInvariant invariant) {
+  switch (invariant) {
+  case bennu::ValueInvariant::unknown_container:
+    return "unknown_container";
+  case bennu::ValueInvariant::unknown_scalar_type:
+    return "unknown_scalar_type";
+  case bennu::ValueInvariant::inactive_scalar_field:
+    return "inactive_scalar_field";
+  case bennu::ValueInvariant::noncanonical_nan:
+    return "noncanonical_nan";
+  case bennu::ValueInvariant::none:
+  case bennu::ValueInvariant::inactive_vector_payload:
+  case bennu::ValueInvariant::invalid_boolean_element:
+    break;
+  }
+  return "-";
+}
+
+void append_unsigned(std::string &output, std::size_t value) {
+  std::array<char, 32> digits{};
+  const std::to_chars_result converted =
+      std::to_chars(digits.data(), digits.data() + digits.size(), value);
+  output.append(digits.data(), converted.ptr);
+}
+
+void append_position(std::string &output, bennu::SourceLocation position) {
+  append_unsigned(output, position.offset);
+  output.push_back(':');
+  append_unsigned(output, position.line);
+  output.push_back(':');
+  append_unsigned(output, position.column);
+}
+
+void append_optional(std::string &output,
+                     const std::optional<std::string> &value) {
+  output += value.has_value() ? *value : "-";
+}
+
+void write_argument_diagnostic(const bennu::ArgumentErrorContext &argument) {
+  std::string record = "bennu_argument_error reason=";
+  record += argument_reason_name(argument.reason);
+  record += " required_count=";
+  append_unsigned(record, argument.required_count);
+  record += " supplied_count=";
+  append_unsigned(record, argument.supplied_count);
+  record += " position=";
+  append_unsigned(record, argument.position);
+  record += " parameter_name=";
+  append_optional(record, argument.parameter_name);
+  record += " expected_type=";
+  record += argument.expected_type.has_value()
+                ? scalar_type_name(*argument.expected_type)
+                : "-";
+  record += " declaration_span=";
+  if (argument.declaration_span.has_value()) {
+    append_position(record, argument.declaration_span->begin);
+    record.push_back('-');
+    append_position(record, argument.declaration_span->end);
+  } else {
+    record.push_back('-');
+  }
+  record += " actual_container=";
+  record += argument.actual_container.has_value()
+                ? argument_container_name(*argument.actual_container)
+                : "-";
+  record += " actual_type=";
+  record += argument.actual_type.has_value()
+                ? argument_scalar_type_name(*argument.actual_type)
+                : "-";
+  record += " invalid_value_invariant=";
+  record += argument.invalid_value_invariant.has_value()
+                ? value_invariant_name(*argument.invalid_value_invariant)
+                : "-";
+  record.push_back('\n');
+  std::cerr << record;
+}
+
+std::string_view formatting_reason_name(bennu::ValueFormatError reason) {
+  switch (reason) {
+  case bennu::ValueFormatError::invalid_value:
+    return "invalid_value";
+  case bennu::ValueFormatError::conversion_failure:
+    return "conversion_failure";
+  case bennu::ValueFormatError::none:
+    break;
+  }
+  return "conversion_failure";
+}
+
+void write_formatting_diagnostic(
+    const bennu::FormattingErrorContext &formatting) {
+  std::string record = "bennu_formatting_error reason=";
+  record += formatting_reason_name(formatting.reason);
+  record += " root_position=";
+  append_unsigned(record, formatting.root_position);
+  record += " root_span=";
+  append_position(record, formatting.root_span.begin);
+  record.push_back('-');
+  append_position(record, formatting.root_span.end);
+  record += " invalid_value_invariant=";
+  record += formatting.invalid_value_invariant.has_value()
+                ? value_invariant_name(*formatting.invalid_value_invariant)
+                : "-";
+  record.push_back('\n');
+  std::cerr << record;
 }
 
 int report_stdout_failure() {
@@ -199,30 +368,39 @@ bool reject_source_output_alias(std::string_view source_path,
   return false;
 }
 
-int run_file(std::string_view path) {
+int run_file(std::string_view path,
+             std::span<const std::string_view> arguments) {
   FileReadResult loaded = read_source_file(path);
   if (!loaded.ok) {
     std::cerr << path << ":1:1: file error: unable to read source\n";
     return 1;
   }
 
-  const bennu::ProgramResult result = bennu::evaluate_source(loaded.source);
+  const bennu::RunnerEvaluationResult result =
+      bennu::evaluate_runner_source(loaded.source, arguments);
   if (!result.ok) {
-    write_diagnostic(path, result.error);
+    if (result.error.kind == bennu::ErrorKind::argument_error &&
+        result.error.argument.has_value()) {
+      write_argument_diagnostic(*result.error.argument);
+    } else if (result.error.kind == bennu::ErrorKind::formatting_error &&
+               result.error.formatting.has_value()) {
+      write_formatting_diagnostic(*result.error.formatting);
+    } else {
+      write_diagnostic(path, result.error);
+    }
     return 1;
   }
 
-  for (const bennu::Value &value : result.values) {
-    std::string output;
-    if (!format_output_value(value, output)) {
-      return 1;
-    }
-    if (!bennu_cli::write_stdout(std::cout, output)) {
-      return report_stdout_failure();
-    }
+  std::string pending_output;
+  for (const std::string &formatted : result.formatted) {
+    pending_output += formatted;
+    pending_output.push_back('\n');
   }
-  if (!bennu_cli::flush_stdout(std::cout)) {
-    return report_stdout_failure();
+  const bennu_cli::OutputPublicationResult published =
+      bennu_cli::publish_stdout(std::cout, pending_output);
+  if (!published.ok) {
+    std::cerr << bennu_cli::output_error_record(published);
+    return 1;
   }
   return 0;
 }
@@ -435,7 +613,8 @@ int run_cli(const std::vector<std::string> &argv) {
         "\n"
         "Commands:\n"
         "  repl    Start an interactive Bennu session\n"
-        "  run     Run a Bennu source file\n"
+        "  run <source> [-- <arguments...>]\n"
+        "          Run a Bennu source file\n"
         "  emit-c  Emit C source for a Bennu source file\n"
         "  build   Build a Bennu source file\n";
     if (!bennu_cli::write_stdout(std::cout, help) ||
@@ -466,11 +645,18 @@ int run_cli(const std::vector<std::string> &argv) {
       std::cerr << "error: expected one source path after 'run'\n";
       return 1;
     }
-    if (argc != 3) {
-      std::cerr << "error: 'run' expects exactly one source path\n";
+    if (argc > 3 && std::string_view(argv[3]) != "--") {
+      std::cerr << "error: expected 'run <source> [-- <arguments...>]'\n";
       return 1;
     }
-    return run_file(argv[2]);
+    std::vector<std::string_view> script_arguments;
+    if (argc > 3) {
+      script_arguments.reserve(argc - 4U);
+      for (std::size_t index = 4U; index < argc; ++index) {
+        script_arguments.push_back(argv[index]);
+      }
+    }
+    return run_file(argv[2], script_arguments);
   }
 
   if (argument == "repl") {

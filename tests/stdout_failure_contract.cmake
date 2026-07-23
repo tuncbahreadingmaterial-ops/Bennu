@@ -10,10 +10,9 @@ if(NOT EXISTS "/dev/full")
   message(FATAL_ERROR "/dev/full is required")
 endif()
 
-set(expected_stderr "error: unable to write stdout\n")
-
 function(check_failure case_name)
   if(case_name STREQUAL "help")
+    set(expected_stderr "error: unable to write stdout\n")
     execute_process(
       COMMAND "${BENNU_EXECUTABLE}" --help
       RESULT_VARIABLE actual_exit
@@ -21,6 +20,8 @@ function(check_failure case_name)
       ERROR_VARIABLE actual_stderr
     )
   elseif(case_name STREQUAL "run")
+    set(expected_stderr
+      "bennu_output_error reason=flush_failed pending_byte_count=67 accepted_byte_count=67 output_position=67\n")
     execute_process(
       COMMAND "${BENNU_EXECUTABLE}" run
               "${BENNU_SOURCE_DIR}/examples/rewrite.bennu"
@@ -29,6 +30,7 @@ function(check_failure case_name)
       ERROR_VARIABLE actual_stderr
     )
   elseif(case_name STREQUAL "repl")
+    set(expected_stderr "error: unable to write stdout\n")
     set(input_file "${CMAKE_CURRENT_BINARY_DIR}/bennu-stdout-failure.stdin")
     file(WRITE "${input_file}" "inc 5\n")
     execute_process(

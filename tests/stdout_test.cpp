@@ -50,6 +50,42 @@ int main() {
                  "write failure must be observable");
   }
   {
+    TestOutput output{0, true};
+    const bennu_cli::OutputWriteResult result =
+        bennu_cli::write_stdout_result(make_test_output(output), "result\n");
+    ok &= expect(!result.ok, "detailed write failure must be observable");
+    ok &= expect(result.byte_count == 6,
+                 "detailed write failure must retain the accepted byte count");
+  }
+  {
+    TestOutput output{0, true};
+    const bennu_cli::OutputPublicationResult result =
+        bennu_cli::publish_stdout(make_test_output(output), "result\n");
+    ok &= expect(!result.ok &&
+                     result.reason == bennu_cli::OutputErrorReason::write_failed,
+                 "publication must classify a short write");
+    ok &= expect(result.pending_byte_count == 7 &&
+                     result.accepted_byte_count == 6 &&
+                     result.output_position == 6,
+                 "short-write context must retain exact byte positions");
+    ok &= expect(
+        bennu_cli::output_error_record(result) ==
+            "bennu_output_error reason=write_failed pending_byte_count=7 accepted_byte_count=6 output_position=6\n",
+        "short-write serialization must be stable");
+  }
+  {
+    TestOutput output{1, false};
+    const bennu_cli::OutputPublicationResult result =
+        bennu_cli::publish_stdout(make_test_output(output), "result\n");
+    ok &= expect(!result.ok &&
+                     result.reason == bennu_cli::OutputErrorReason::flush_failed,
+                 "publication must classify a final flush failure");
+    ok &= expect(
+        bennu_cli::output_error_record(result) ==
+            "bennu_output_error reason=flush_failed pending_byte_count=7 accepted_byte_count=7 output_position=7\n",
+        "flush-failure serialization must be stable");
+  }
+  {
     TestOutput output{1, false};
     const bennu_cli::OutputSink sink = make_test_output(output);
     ok &= expect(bennu_cli::write_stdout(sink, "result\n"),
