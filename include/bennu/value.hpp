@@ -13,7 +13,9 @@
 
 namespace bennu {
 
-struct EvaluationResourceState;
+struct EvaluationResourceOwner {
+  std::uint64_t token{0U};
+};
 
 enum class ScalarType {
   boolean,
@@ -70,7 +72,7 @@ struct VectorValue {
   std::size_t double_count;
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
-  EvaluationResourceState *accounting_owner{};
+  EvaluationResourceOwner accounting_owner{};
   std::optional<std::size_t> allocation_ordinal{};
   ResourceLifetimeObserver lifetime_observer{};
 };
@@ -82,7 +84,7 @@ struct TupleTableReservation {
   std::size_t element_count{0U};
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
-  EvaluationResourceState *accounting_owner{};
+  EvaluationResourceOwner accounting_owner{};
   std::optional<std::size_t> allocation_ordinal{};
   ResourceLifetimeObserver lifetime_observer{};
 };

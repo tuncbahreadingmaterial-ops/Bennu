@@ -312,6 +312,7 @@ int resource_creation_refusal() {
       std::free(context_storage);
       return 45;
     }
+    bennu::release_evaluation_resources(resources);
   }
   auto *contexts =
       static_cast<bennu::EvaluationResources *>(context_storage);
@@ -330,15 +331,18 @@ int resource_creation_refusal() {
           refused.error.resource->reason ==
               bennu::ResourceErrorReason::allocation_unavailable;
       for (std::size_t index = constructed; index > 0U; --index) {
+        bennu::release_evaluation_resources(contexts[index - 1U]);
         std::destroy_at(contexts + index - 1U);
       }
+      bennu::release_evaluation_resources(resources);
       std::free(context_storage);
       return explicit_refusal ? 0 : 46;
     }
     std::construct_at(contexts + constructed,
-                      std::move(resources));
+                      bennu::move_evaluation_resources(resources));
   }
   for (std::size_t index = constructed; index > 0U; --index) {
+    bennu::release_evaluation_resources(contexts[index - 1U]);
     std::destroy_at(contexts + index - 1U);
   }
   std::free(context_storage);
@@ -418,7 +422,49 @@ int malformed_pointer_refusal() {
           static_cast<std::uintptr_t>(0x2000U)));
   forged_array.tuple.nodes.size = 1U;
   forged_array.tuple.nodes.capacity = 1U;
-  return !bennu::validate_value(forged_array).ok ? 0 : 48;
+  if (bennu::validate_value(forged_array).ok) {
+    return 48;
+  }
+
+  bennu::EvaluationResources resources =
+      bennu::make_trusted_local_v2_resources(
+          bennu::AllocationFailureInjection{std::nullopt});
+  bennu::VectorAllocationResult owned = bennu::allocate_vector(
+      resources, bennu::ScalarType::integer, 1U, 0U,
+      bennu::SourceLocation{}, "forged-owner-sanitizer");
+  if (!owned.ok) {
+    return 56;
+  }
+  const bennu::EvaluationResourceOwner valid_owner =
+      owned.value.vector.accounting_owner;
+  std::int64_t *const valid_storage =
+      owned.value.vector.integers.get();
+  const std::size_t live_before = resources.live_evaluation_bytes;
+  owned.value.vector.accounting_owner =
+      bennu::EvaluationResourceOwner{UINT64_C(0x1000)};
+  if (bennu::validate_value(owned.value).ok ||
+      bennu::release_vector_reservation(resources, owned.value).ok ||
+      owned.value.vector.integers.get() != valid_storage ||
+      resources.live_evaluation_bytes != live_before) {
+    return 57;
+  }
+  owned.value.vector.accounting_owner = valid_owner;
+  if (!bennu::release_vector_reservation(resources, owned.value).ok) {
+    return 58;
+  }
+
+  bennu::VectorAllocationResult escaped = bennu::allocate_vector(
+      resources, bennu::ScalarType::integer, 1U, 0U,
+      bennu::SourceLocation{}, "stale-owner-sanitizer");
+  if (!escaped.ok) {
+    return 59;
+  }
+  bennu::release_evaluation_resources(resources);
+  if (!bennu::validate_value(escaped.value).ok ||
+      !bennu::destroy_value(escaped.value).ok) {
+    return 60;
+  }
+  return 0;
 }
 
 struct NestedCleanupContext {};

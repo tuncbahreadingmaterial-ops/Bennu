@@ -2474,6 +2474,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
 void release_rewrite_evaluation_result(RewriteEvaluationResult &result) {
   release_rewrite_values(result.resources, result.values);
   result.formatted.clear();
+  release_evaluation_resources(result.resources);
 }
 
 std::string_view resource_reason_name(ResourceErrorReason reason) {
@@ -3401,6 +3402,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   WorkChargeResult resource_validation = charge_work(
       validation_resources, 0U, SourceLocation{1U, 1U, 1U}, "rewrite-emitter");
   if (!resource_validation.ok) {
+    release_evaluation_resources(validation_resources);
     return CEmissionResult{false, {}, std::move(resource_validation.error)};
   }
   const RewriteLoweringProgram &lowering = lowered.program;
@@ -3491,6 +3493,7 @@ CEmissionResult emit_rewrite_c_source_impl(
                "int main(void) {\n"
                "  return bennu_execute(NULL);\n"
                "}\n";
+  release_evaluation_resources(validation_resources);
   return CEmissionResult{
       true, std::move(generated),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
@@ -4826,7 +4829,7 @@ TEST_CASE("rewrite evaluator constructs accounted typed vector literals") {
   CHECK(evaluated.resources.live_evaluation_bytes == 34U);
   CHECK(evaluated.resources.reservation_ordinal == 3U);
   release_rewrite_evaluation_result(evaluated);
-  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator applies nested primitives through shared semantics") {
@@ -4859,7 +4862,7 @@ TEST_CASE("rewrite evaluator applies nested primitives through shared semantics"
   CHECK(evaluated.resources.work_units == 16U);
   CHECK(evaluated.resources.live_evaluation_bytes == 54U);
   release_rewrite_evaluation_result(evaluated);
-  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator locates structured runtime diagnostics from spans") {
@@ -5050,7 +5053,7 @@ TEST_CASE("rewrite evaluator enforces cumulative work and live-byte lifetimes") 
   CHECK(released.resources.live_evaluation_bytes == 8U);
   CHECK(released.resources.reservation_ordinal == 3U);
   release_rewrite_evaluation_result(released);
-  CHECK(released.resources.live_evaluation_bytes == 0U);
+  CHECK(released.resources.owner.token == 0U);
 
   const RewriteEvaluationCreationData live_one_past_creation{
       ExecutionProfile::bounded_v1,
@@ -5159,7 +5162,7 @@ TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
   REQUIRE(vector_exact.ok);
   CHECK(vector_exact.resources.live_evaluation_bytes == 16U);
   release_rewrite_evaluation_result(vector_exact);
-  CHECK(vector_exact.resources.live_evaluation_bytes == 0U);
+  CHECK(vector_exact.resources.owner.token == 0U);
 
   RewriteEvaluationResult vector_one_past =
       evaluate_rewrite_source("(1 2 3)", vector_exact_creation);
@@ -5252,7 +5255,7 @@ TEST_CASE("rewrite evaluator matches the tracked Section 15 and 16 corpus") {
       CHECK(evaluated.scalar_kernel_invocations == 0U);
     }
     release_rewrite_evaluation_result(evaluated);
-    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluated.resources.owner.token == 0U);
   }
 
   for (const RewriteEvaluatorErrorFixture &fixture :
@@ -5334,7 +5337,7 @@ TEST_CASE("rewrite evaluation matches direct primitive values and errors") {
   destroy_value(direct_nested.value);
   CHECK(nested_resources.live_evaluation_bytes == 0U);
   release_rewrite_evaluation_result(parsed_nested);
-  CHECK(parsed_nested.resources.live_evaluation_bytes == 0U);
+  CHECK(parsed_nested.resources.owner.token == 0U);
 
   RewriteEvaluationResult parsed_arity =
       evaluate_rewrite_source("add[1]", creation);
@@ -5479,7 +5482,7 @@ TEST_CASE("rewrite evaluation matches direct primitive values and errors") {
   destroy_value(direct_allocation.value);
   CHECK(allocation_resources.live_evaluation_bytes == 0U);
   release_rewrite_evaluation_result(parsed_allocation);
-  CHECK(parsed_allocation.resources.live_evaluation_bytes == 0U);
+  CHECK(parsed_allocation.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator executes deep programs without recursive evaluation") {
@@ -5563,6 +5566,7 @@ ValueResult evaluate_expression(
   Value value = std::move(evaluated.values.front());
   evaluated.values.clear();
   evaluated.formatted.clear();
+  release_evaluation_resources(evaluated.resources);
   return ValueResult{
       true, std::move(value),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
@@ -5601,6 +5605,7 @@ ProgramResult evaluate_source(
   std::vector<Value> values = std::move(evaluated.values);
   evaluated.values.clear();
   evaluated.formatted.clear();
+  release_evaluation_resources(evaluated.resources);
   return ProgramResult{
       true, std::move(values),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};

@@ -5,9 +5,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <atomic>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -32,39 +29,12 @@ struct AllocationFailureInjection {
   std::optional<std::size_t> fail_at_reservation_ordinal;
 };
 
-struct EvaluationResourceState {
-  std::atomic<std::size_t> reference_count;
-  std::mutex transaction_mutex;
-  ExecutionProfile profile;
-  ResourceLimits limits;
-  HostResourceErrorReason creation_error;
-  AllocationFailureInjection allocation_failure;
-  std::size_t live_evaluation_bytes;
-  std::size_t work_units;
-  std::size_t reservation_ordinal;
-  ResourceLifetimeObserver lifetime_observer;
-};
-
-void retain_resource_state(EvaluationResourceState *state);
-void release_resource_state(EvaluationResourceState *state);
-bool refund_resource_state_bytes(EvaluationResourceState *state,
-                                 std::size_t byte_count);
-
 struct EvaluationResourceStateHandle {
-  EvaluationResourceState *const state;
-
-  EvaluationResourceStateHandle() noexcept;
-  explicit EvaluationResourceStateHandle(
-      EvaluationResourceState *owned_state) noexcept;
-  EvaluationResourceStateHandle(
-      const EvaluationResourceStateHandle &source) noexcept;
-  EvaluationResourceStateHandle(
-      EvaluationResourceStateHandle &&source) noexcept;
-  ~EvaluationResourceStateHandle();
+  std::uint64_t token{0U};
 };
 
 struct EvaluationResources {
-  EvaluationResourceState *state;
+  EvaluationResourceOwner owner;
   EvaluationResourceStateHandle state_handle;
   ExecutionProfile &profile;
   ResourceLimits &limits;
@@ -75,6 +45,10 @@ struct EvaluationResources {
   std::size_t &reservation_ordinal;
   ResourceLifetimeObserver &lifetime_observer;
 };
+
+void release_evaluation_resources(EvaluationResources &resources);
+EvaluationResources
+move_evaluation_resources(EvaluationResources &resources);
 
 using WorkspaceStorage = HostBufferStorage<std::byte>;
 

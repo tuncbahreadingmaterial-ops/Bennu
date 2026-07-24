@@ -20,6 +20,13 @@
 
 namespace bennu {
 
+namespace detail {
+bool resource_state_owner_is_live(EvaluationResourceOwner owner);
+bool refund_resource_state_bytes(EvaluationResourceOwner owner,
+                                 std::size_t byte_count);
+void release_resource_state_owner(EvaluationResourceOwner owner);
+} // namespace detail
+
 namespace {
 
 constexpr std::uint64_t binary64_exponent_mask = UINT64_C(0x7ff0000000000000);
@@ -315,6 +322,19 @@ ValueValidationResult validate_value(const Value &value) {
 ValueValidationResult validate_value(
     const Value &value,
     HostAllocationFailureInjection &allocation_failure) {
+  std::uint64_t validated_resource_owner_token = 0U;
+  const auto resource_owner_is_live =
+      [&validated_resource_owner_token](EvaluationResourceOwner owner) {
+        if (owner.token == validated_resource_owner_token &&
+            owner.token != 0U) {
+          return true;
+        }
+        if (!detail::resource_state_owner_is_live(owner)) {
+          return false;
+        }
+        validated_resource_owner_token = owner.token;
+        return true;
+      };
   const auto invalid = [](ValueInvariant invariant, std::size_t node_index,
                           std::optional<std::size_t> edge_index = std::nullopt) {
     ValueValidationResult result{false, invariant,
@@ -331,16 +351,17 @@ ValueValidationResult validate_value(
            tuple.root_reservation.element_count == 0U &&
            tuple.root_reservation.canonical_bytes == 0U &&
            !tuple.root_reservation.accounting_active &&
-           tuple.root_reservation.accounting_owner == nullptr &&
+           tuple.root_reservation.accounting_owner.token == 0U &&
            !tuple.root_reservation.allocation_ordinal.has_value() &&
            tuple.root_reservation.lifetime_observer.context == nullptr &&
            tuple.root_reservation.lifetime_observer.record == nullptr &&
            tuple.first_child == 0U && tuple.child_count == 0U;
   };
-  const auto vector_validation = [&invalid](
+  const auto vector_validation = [&invalid, &resource_owner_is_live](
                                      const VectorValue &vector,
                                      std::size_t node_index) {
-    const auto accounting_valid = [&invalid, node_index](
+    const auto accounting_valid =
+        [&invalid, &resource_owner_is_live, node_index](
                                       const VectorValue &payload,
                                       std::size_t count,
                                       std::size_t width) {
@@ -351,11 +372,14 @@ ValueValidationResult validate_value(
       const std::size_t bytes = count * width;
       if (payload.canonical_bytes != bytes ||
           (bytes == 0U && payload.accounting_active) ||
-          (payload.accounting_active && payload.accounting_owner == nullptr) ||
+          (payload.accounting_active &&
+           (payload.accounting_owner.token == 0U ||
+            !resource_owner_is_live(payload.accounting_owner))) ||
           (bytes != 0U && payload.accounting_active &&
            !payload.allocation_ordinal.has_value()) ||
           (bytes == 0U && payload.allocation_ordinal.has_value()) ||
-          (!payload.accounting_active && payload.accounting_owner != nullptr)) {
+          (!payload.accounting_active &&
+           payload.accounting_owner.token != 0U)) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
                        node_index);
       }
@@ -445,7 +469,7 @@ ValueValidationResult validate_value(
         value.vector.double_count != 0U ||
         value.vector.canonical_bytes != 0U ||
         value.vector.accounting_active ||
-        value.vector.accounting_owner != nullptr ||
+        value.vector.accounting_owner.token != 0U ||
         value.vector.allocation_ordinal.has_value() ||
         value.vector.lifetime_observer.context != nullptr ||
         value.vector.lifetime_observer.record != nullptr) {
@@ -499,7 +523,7 @@ ValueValidationResult validate_value(
       value.vector.doubles.get() != nullptr ||
       value.vector.double_count != 0U || value.vector.canonical_bytes != 0U ||
       value.vector.accounting_active ||
-      value.vector.accounting_owner != nullptr ||
+      value.vector.accounting_owner.token != 0U ||
       value.vector.allocation_ordinal.has_value() ||
       value.vector.lifetime_observer.context != nullptr ||
       value.vector.lifetime_observer.record != nullptr) {
@@ -897,14 +921,15 @@ ValueValidationResult validate_value(
         (expected_bytes == 0U && reservation.storage.get() != nullptr) ||
         (expected_bytes != 0U && reservation.storage.get() == nullptr) ||
         (expected_bytes != 0U && reservation.accounting_active &&
-         reservation.accounting_owner == nullptr) ||
+         (reservation.accounting_owner.token == 0U ||
+          !resource_owner_is_live(reservation.accounting_owner))) ||
         (expected_bytes != 0U && reservation.accounting_active &&
          !reservation.allocation_ordinal.has_value()) ||
         (expected_bytes == 0U && reservation.allocation_ordinal.has_value()) ||
         (expected_bytes == 0U &&
-         reservation.accounting_owner != nullptr) ||
+         reservation.accounting_owner.token != 0U) ||
         (!reservation.accounting_active &&
-         reservation.accounting_owner != nullptr)) {
+         reservation.accounting_owner.token != 0U)) {
       return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
                         node_index);
     }
@@ -1408,20 +1433,21 @@ ValueDestructionResult destroy_value(
 
   const auto release_vector_accounting = [](VectorValue &vector) {
     const void *storage = vector_storage_address(vector);
-    if (vector.accounting_active && vector.accounting_owner != nullptr &&
-        refund_resource_state_bytes(vector.accounting_owner,
-                                    vector.canonical_bytes)) {
+    if (vector.accounting_active &&
+        vector.accounting_owner.token != 0U &&
+        detail::refund_resource_state_bytes(
+            vector.accounting_owner, vector.canonical_bytes)) {
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::vector_payload,
                        vector.allocation_ordinal, storage,
                        vector.canonical_bytes);
     }
-    EvaluationResourceState *accounting_owner =
+    const EvaluationResourceOwner accounting_owner =
         vector.accounting_owner;
     vector.accounting_active = false;
-    vector.accounting_owner = nullptr;
-    release_resource_state(accounting_owner);
+    vector.accounting_owner = EvaluationResourceOwner{};
+    detail::release_resource_state_owner(accounting_owner);
     if (storage != nullptr) {
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::physical_release,
@@ -1436,20 +1462,21 @@ ValueDestructionResult destroy_value(
   const auto release_tuple_accounting = [](TupleTableReservation &reservation) {
     const void *storage = reservation.storage.get();
     if (reservation.accounting_active &&
-        reservation.accounting_owner != nullptr &&
-        refund_resource_state_bytes(reservation.accounting_owner,
-                                    reservation.canonical_bytes)) {
+        reservation.accounting_owner.token != 0U &&
+        detail::refund_resource_state_bytes(
+            reservation.accounting_owner,
+            reservation.canonical_bytes)) {
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::tuple_table,
                        reservation.allocation_ordinal, storage,
                        reservation.canonical_bytes);
     }
-    EvaluationResourceState *accounting_owner =
+    const EvaluationResourceOwner accounting_owner =
         reservation.accounting_owner;
     reservation.accounting_active = false;
-    reservation.accounting_owner = nullptr;
-    release_resource_state(accounting_owner);
+    reservation.accounting_owner = EvaluationResourceOwner{};
+    detail::release_resource_state_owner(accounting_owner);
     if (storage != nullptr) {
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::physical_release,

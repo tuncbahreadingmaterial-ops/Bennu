@@ -164,6 +164,47 @@ ResourceLifetimeObserver observer_for(
   return ResourceLifetimeObserver{&events, &record_lifetime_event};
 }
 
+struct ReentrantObserverProbe {
+  EvaluationResources *resources;
+  bool inside_callback{false};
+  std::size_t callback_count{0U};
+  std::size_t successful_charges{0U};
+  std::size_t successful_reservations{0U};
+  std::size_t successful_releases{0U};
+  std::size_t successful_destroys{0U};
+};
+
+void record_reentrant_lifetime_event(
+    void *context, ResourceLifetimeEvent) {
+  auto &probe = *static_cast<ReentrantObserverProbe *>(context);
+  ++probe.callback_count;
+  if (probe.inside_callback) {
+    return;
+  }
+  probe.inside_callback = true;
+  if (charge_work(*probe.resources, 1U, tuple_location,
+                  "reentrant-observer-charge")
+          .ok) {
+    ++probe.successful_charges;
+  }
+  TupleReservationResult reserved = reserve_tuple_table(
+      *probe.resources, 1U, tuple_location,
+      "reentrant-observer-reserve");
+  if (reserved.ok) {
+    ++probe.successful_reservations;
+    if (release_tuple_table(*probe.resources, reserved.reservation).ok) {
+      ++probe.successful_releases;
+    }
+  }
+  VectorAllocationResult vector = allocate_vector(
+      *probe.resources, ScalarType::boolean, 1U, 0U,
+      tuple_location, "reentrant-observer-destroy");
+  if (vector.ok && destroy_value(vector.value).ok) {
+    ++probe.successful_destroys;
+  }
+  probe.inside_callback = false;
+}
+
 struct ReducedStackProbe {
   bool construction_ok{false};
   bool validation_ok{false};
@@ -475,7 +516,8 @@ TEST_CASE("TUP-003-VALUES") {
       "detached-vector");
   REQUIRE(detached_vector.ok);
   detached_vector.value.vector.accounting_active = false;
-  detached_vector.value.vector.accounting_owner = nullptr;
+  detached_vector.value.vector.accounting_owner =
+      EvaluationResourceOwner{};
   CHECK(validate_value(detached_vector.value).ok);
   CHECK(destroy_value(detached_vector.value).ok);
 
@@ -958,10 +1000,10 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
         scoped_resources, ScalarType::integer, 1U, 0U,
         tuple_location, "scoped-resource-owner");
     REQUIRE(scoped_vector.ok);
-    REQUIRE(scoped_resources.state != nullptr);
-    CHECK(scoped_resources.state->reference_count.load(
-              std::memory_order_relaxed) == 2U);
+    REQUIRE(scoped_resources.owner.token != 0U);
     escaped_value = move_value(scoped_vector.value);
+    release_evaluation_resources(scoped_resources);
+    CHECK(scoped_resources.owner.token == 0U);
   }
   CHECK(destroy_value(escaped_value).ok);
 
@@ -1083,20 +1125,27 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
   EvaluationResources move_source =
       make_trusted_local_v2_resources(no_failure);
   {
-    EvaluationResources move_destination = std::move(move_source);
+    EvaluationResources move_destination =
+        move_evaluation_resources(move_source);
+    CHECK(move_source.owner.token == 0U);
     VectorAllocationResult moved_context_vector = allocate_vector(
         move_destination, ScalarType::integer, 1U, 0U, tuple_location,
         "moved-resource-context");
     REQUIRE(moved_context_vector.ok);
-    CHECK(move_source.live_evaluation_bytes == sizeof(std::int64_t));
-    CHECK(release_vector_reservation(move_source, moved_context_vector.value).ok);
+    CHECK(move_destination.live_evaluation_bytes ==
+          sizeof(std::int64_t));
+    const WorkChargeResult stale_move_source = charge_work(
+        move_source, 1U, tuple_location, "stale-move-source");
+    CHECK_FALSE(stale_move_source.ok);
+    CHECK(release_vector_reservation(
+              move_destination, moved_context_vector.value)
+              .ok);
+    release_evaluation_resources(move_destination);
   }
-  CHECK(move_source.live_evaluation_bytes == 0U);
   VectorAllocationResult reused_move_source = allocate_vector(
       move_source, ScalarType::integer, 1U, 0U, tuple_location,
       "reused-moved-resource-context");
-  REQUIRE(reused_move_source.ok);
-  CHECK(release_vector_reservation(move_source, reused_move_source.value).ok);
+  CHECK_FALSE(reused_move_source.ok);
 
   std::vector<ResourceLifetimeEvent> lifetime_events;
   EvaluationResources observed_resources =
@@ -1381,18 +1430,18 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
       v2_limits(std::nullopt, std::nullopt, 3U, std::nullopt),
       AllocationFailureInjection{2U});
   EvaluationResources copied = shared;
-  EvaluationResources moved = std::move(copied);
+  EvaluationResources moved = move_evaluation_resources(copied);
+  CHECK(copied.owner.token == 0U);
   CHECK(charge_work(shared, 2U, tuple_location, "shared-work").ok);
   const WorkChargeResult shared_work_refusal =
       charge_work(moved, 2U, tuple_location, "shared-work");
   CHECK_FALSE(shared_work_refusal.ok);
   CHECK(shared.work_units == 2U);
-  CHECK(copied.work_units == 2U);
   CHECK(moved.work_units == 2U);
   VectorAllocationResult shared_first = allocate_vector(
       shared, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
   VectorAllocationResult shared_second = allocate_vector(
-      copied, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
+      moved, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
   VectorAllocationResult shared_third = allocate_vector(
       moved, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
   REQUIRE(shared_first.ok);
@@ -1402,7 +1451,6 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   CHECK(shared_third.error.resource->allocation_ordinal ==
         std::optional<std::size_t>{2U});
   CHECK(shared.reservation_ordinal == 3U);
-  CHECK(copied.reservation_ordinal == 3U);
   CHECK(moved.reservation_ordinal == 3U);
   CHECK(release_vector_reservation(moved, shared_first.value).ok);
   CHECK(release_vector_reservation(shared, shared_second.value).ok);
@@ -1605,6 +1653,164 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
     CHECK(empty_nested_resources.reservation_ordinal == 2U);
     CHECK(empty_nested_resources.live_evaluation_bytes == 0U);
   }
+}
+
+TEST_CASE("TUP-008-REGISTRY-REENTRANCY") {
+  EvaluationResources forged_resources =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources forged_record = forged_resources;
+  forged_record.owner.token = UINT64_C(0x1000);
+  forged_record.state_handle.token = UINT64_C(0x1000);
+  const WorkChargeResult forged_charge = charge_work(
+      forged_record, 1U, tuple_location, "forged-resource-record");
+  CHECK_FALSE(forged_charge.ok);
+  REQUIRE(forged_charge.error.resource.has_value());
+  CHECK(forged_charge.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+
+  VectorAllocationResult forged_owner = allocate_vector(
+      forged_resources, ScalarType::integer, 1U, 0U,
+      tuple_location, "forged-accounting-owner");
+  REQUIRE(forged_owner.ok);
+  const EvaluationResourceOwner valid_owner =
+      forged_owner.value.vector.accounting_owner;
+  std::int64_t *const preserved_storage =
+      forged_owner.value.vector.integers.get();
+  const std::size_t preserved_live =
+      forged_resources.live_evaluation_bytes;
+  forged_owner.value.vector.accounting_owner =
+      EvaluationResourceOwner{UINT64_C(0x1000)};
+  const ValueValidationResult forged_validation =
+      validate_value(forged_owner.value);
+  CHECK_FALSE(forged_validation.ok);
+  CHECK(forged_validation.invariant ==
+        ValueInvariant::invalid_vector_payload_handle);
+  const ValueReleaseResult forged_release =
+      release_vector_reservation(forged_resources,
+                                 forged_owner.value);
+  CHECK_FALSE(forged_release.ok);
+  CHECK(forged_owner.value.vector.integers.get() ==
+        preserved_storage);
+  CHECK(forged_resources.live_evaluation_bytes == preserved_live);
+  forged_owner.value.vector.accounting_owner = valid_owner;
+  CHECK(release_vector_reservation(forged_resources,
+                                   forged_owner.value)
+            .ok);
+
+  EvaluationResources stale_resources =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources stale_alias = stale_resources;
+  VectorAllocationResult escaped = allocate_vector(
+      stale_resources, ScalarType::integer, 1U, 0U,
+      tuple_location, "stale-accounting-owner");
+  REQUIRE(escaped.ok);
+  release_evaluation_resources(stale_resources);
+  const WorkChargeResult stale_charge = charge_work(
+      stale_alias, 1U, tuple_location, "stale-resource-record");
+  CHECK_FALSE(stale_charge.ok);
+  REQUIRE(stale_charge.error.resource.has_value());
+  CHECK(stale_charge.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(validate_value(escaped.value).ok);
+  CHECK(destroy_value(escaped.value).ok);
+  release_evaluation_resources(stale_alias);
+
+  EvaluationResources reentrant =
+      make_trusted_local_v2_resources(no_failure);
+  ReentrantObserverProbe probe{&reentrant};
+  reentrant.lifetime_observer =
+      ResourceLifetimeObserver{&probe,
+                               &record_reentrant_lifetime_event};
+  VectorAllocationResult outer = allocate_vector(
+      reentrant, ScalarType::integer, 1U, 0U, tuple_location,
+      "reentrant-outer");
+  REQUIRE(outer.ok);
+  CHECK(release_vector_reservation(reentrant, outer.value).ok);
+  std::array<Value, 1> reentrant_child{{make_int_value(1)}};
+  TupleConstructionResult reentrant_tuple = make_tuple_value(
+      reentrant, reentrant_child, tuple_location,
+      "reentrant-aggregate-release");
+  REQUIRE(reentrant_tuple.ok);
+  CHECK(release_value_reservations(
+            reentrant, reentrant_tuple.value)
+            .ok);
+  CHECK(probe.callback_count > 0U);
+  CHECK(probe.successful_charges > 0U);
+  CHECK(probe.successful_reservations > 0U);
+  CHECK(probe.successful_releases > 0U);
+  CHECK(probe.successful_destroys > 0U);
+  CHECK(reentrant.live_evaluation_bytes == 0U);
+
+  constexpr std::size_t worker_count = 4U;
+  constexpr std::size_t operations_per_worker = 50U;
+  constexpr std::size_t operation_count =
+      worker_count * operations_per_worker;
+  EvaluationResources mixed =
+      make_trusted_local_v2_resources(no_failure);
+  std::array<std::size_t, operation_count> ordinals{};
+  std::atomic<std::size_t> mixed_failures{0U};
+  std::array<std::thread, worker_count> workers;
+  for (std::size_t worker_index = 0U;
+       worker_index < worker_count; ++worker_index) {
+    workers[worker_index] = std::thread(
+        [&mixed, &ordinals, &mixed_failures, worker_index]() {
+          for (std::size_t operation = 0U;
+               operation < operations_per_worker; ++operation) {
+            const std::size_t result_index =
+                worker_index * operations_per_worker + operation;
+            if ((operation & 1U) == 0U) {
+              VectorAllocationResult vector = allocate_vector(
+                  mixed, ScalarType::boolean, 1U, 0U,
+                  tuple_location, "mixed-ordinal-vector");
+              if (!vector.ok ||
+                  !vector.value.vector.allocation_ordinal.has_value()) {
+                (void)mixed_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+                continue;
+              }
+              ordinals[result_index] =
+                  *vector.value.vector.allocation_ordinal;
+              if (!release_vector_reservation(mixed, vector.value).ok) {
+                (void)mixed_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+              }
+            } else {
+              std::array<Value, 1> child{{make_int_value(1)}};
+              TupleConstructionResult tuple = make_tuple_value(
+                  mixed, child, tuple_location,
+                  "mixed-ordinal-tuple");
+              if (!tuple.ok ||
+                  !tuple.value.tuple.root_reservation
+                       .allocation_ordinal.has_value()) {
+                (void)mixed_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+                continue;
+              }
+              ordinals[result_index] =
+                  *tuple.value.tuple.root_reservation
+                       .allocation_ordinal;
+              if (!release_value_reservations(mixed, tuple.value).ok) {
+                (void)mixed_failures.fetch_add(
+                    1U, std::memory_order_relaxed);
+              }
+            }
+          }
+        });
+  }
+  for (std::thread &worker : workers) {
+    worker.join();
+  }
+  CHECK(mixed_failures.load(std::memory_order_relaxed) == 0U);
+  std::sort(ordinals.begin(), ordinals.end());
+  for (std::size_t index = 0U; index < ordinals.size(); ++index) {
+    CHECK(ordinals[index] == index);
+  }
+  CHECK(mixed.reservation_ordinal == operation_count);
+  CHECK(mixed.live_evaluation_bytes == 0U);
+
+  release_evaluation_resources(mixed);
+  release_evaluation_resources(reentrant);
+  release_evaluation_resources(forged_resources);
 }
 
 TEST_CASE("TUP-009-CONSTRUCTION") {
