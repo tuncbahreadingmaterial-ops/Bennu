@@ -36,25 +36,31 @@ struct EvaluationResourceStateHandle {
 struct EvaluationResources {
   EvaluationResourceOwner owner;
   EvaluationResourceStateHandle state_handle;
-  ExecutionProfile &profile;
-  ResourceLimits &limits;
-  HostResourceErrorReason &creation_error;
-  AllocationFailureInjection &allocation_failure;
-  std::size_t &live_evaluation_bytes;
-  std::size_t &work_units;
-  std::size_t &reservation_ordinal;
-  ResourceLifetimeObserver &lifetime_observer;
+  ExecutionProfile profile;
+  ResourceLimits limits;
+  HostResourceErrorReason creation_error;
+  AllocationFailureInjection allocation_failure;
+  std::size_t live_evaluation_bytes;
+  std::size_t work_units;
+  std::size_t reservation_ordinal;
+  ResourceLifetimeObserver lifetime_observer;
 };
 
 void release_evaluation_resources(EvaluationResources &resources);
 EvaluationResources
 move_evaluation_resources(EvaluationResources &resources);
+bool refresh_evaluation_resources(EvaluationResources &resources);
+bool set_evaluation_resource_lifetime_observer(
+    EvaluationResources &resources,
+    ResourceLifetimeObserver lifetime_observer);
 
 using WorkspaceStorage = HostBufferStorage<std::byte>;
 
 struct WorkspaceReservation {
   WorkspaceStorage storage;
   std::size_t bytes;
+  EvaluationResourceOwner accounting_owner{};
+  std::optional<std::size_t> allocation_ordinal{};
 };
 
 struct VectorAllocationResult {

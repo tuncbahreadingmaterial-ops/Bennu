@@ -22,8 +22,16 @@ namespace bennu {
 
 namespace detail {
 bool resource_state_owner_is_live(EvaluationResourceOwner owner);
-bool refund_resource_state_bytes(EvaluationResourceOwner owner,
-                                 std::size_t byte_count);
+bool semantic_allocation_matches(
+    const void *storage, EvaluationResourceOwner owner,
+    std::size_t byte_count,
+    std::optional<std::size_t> allocation_ordinal,
+    ResourceStorageKind storage_kind);
+bool refund_resource_state_bytes(
+    EvaluationResourceOwner owner, const void *storage,
+    std::size_t byte_count,
+    std::optional<std::size_t> allocation_ordinal,
+    ResourceStorageKind storage_kind);
 void release_resource_state_owner(EvaluationResourceOwner owner);
 } // namespace detail
 
@@ -379,7 +387,13 @@ ValueValidationResult validate_value(
            !payload.allocation_ordinal.has_value()) ||
           (bytes == 0U && payload.allocation_ordinal.has_value()) ||
           (!payload.accounting_active &&
-           payload.accounting_owner.token != 0U)) {
+           payload.accounting_owner.token != 0U) ||
+          (bytes != 0U && payload.accounting_active &&
+           !detail::semantic_allocation_matches(
+               vector_storage_address(payload),
+               payload.accounting_owner, bytes,
+               payload.allocation_ordinal,
+               ResourceStorageKind::vector_payload))) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
                        node_index);
       }
@@ -929,7 +943,13 @@ ValueValidationResult validate_value(
         (expected_bytes == 0U &&
          reservation.accounting_owner.token != 0U) ||
         (!reservation.accounting_active &&
-         reservation.accounting_owner.token != 0U)) {
+         reservation.accounting_owner.token != 0U) ||
+        (expected_bytes != 0U && reservation.accounting_active &&
+         !detail::semantic_allocation_matches(
+             reservation.storage.get(),
+             reservation.accounting_owner, expected_bytes,
+             reservation.allocation_ordinal,
+             ResourceStorageKind::tuple_table))) {
       return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
                         node_index);
     }
@@ -1436,7 +1456,9 @@ ValueDestructionResult destroy_value(
     if (vector.accounting_active &&
         vector.accounting_owner.token != 0U &&
         detail::refund_resource_state_bytes(
-            vector.accounting_owner, vector.canonical_bytes)) {
+            vector.accounting_owner, storage,
+            vector.canonical_bytes, vector.allocation_ordinal,
+            ResourceStorageKind::vector_payload)) {
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::vector_payload,
@@ -1464,8 +1486,10 @@ ValueDestructionResult destroy_value(
     if (reservation.accounting_active &&
         reservation.accounting_owner.token != 0U &&
         detail::refund_resource_state_bytes(
-            reservation.accounting_owner,
-            reservation.canonical_bytes)) {
+            reservation.accounting_owner, storage,
+            reservation.canonical_bytes,
+            reservation.allocation_ordinal,
+            ResourceStorageKind::tuple_table)) {
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::tuple_table,

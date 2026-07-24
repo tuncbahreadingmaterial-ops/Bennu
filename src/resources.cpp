@@ -3,7 +3,6 @@
 #include "doctest/doctest.h"
 
 #include <array>
-#include <atomic>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -37,7 +36,46 @@ constexpr std::size_t resource_registry_bucket_count = 257U;
 std::array<EvaluationResourceState *, resource_registry_bucket_count>
     resource_registry{};
 std::mutex resource_registry_mutex;
-std::atomic<std::uint64_t> next_resource_token{1U};
+std::uint64_t next_resource_token{1U};
+
+enum class AllocationPurpose : std::uint8_t {
+  vector_payload,
+  tuple_table,
+  workspace,
+};
+
+SemanticHostAllocationPurpose semantic_allocation_purpose(
+    AllocationPurpose purpose) {
+  switch (purpose) {
+  case AllocationPurpose::vector_payload:
+    return SemanticHostAllocationPurpose::vector_payload;
+  case AllocationPurpose::tuple_table:
+    return SemanticHostAllocationPurpose::tuple_table;
+  case AllocationPurpose::workspace:
+    return SemanticHostAllocationPurpose::workspace;
+  }
+  return SemanticHostAllocationPurpose::none;
+}
+
+bool allocation_binding_matches(
+    const void *payload, EvaluationResourceOwner owner,
+    std::size_t canonical_bytes,
+    std::optional<std::size_t> allocation_ordinal,
+    AllocationPurpose purpose) {
+  return semantic_host_buffer_matches(
+      payload, owner.token, canonical_bytes, allocation_ordinal,
+      semantic_allocation_purpose(purpose));
+}
+
+bool consume_allocation_binding(
+    const void *payload, EvaluationResourceOwner owner,
+    std::size_t canonical_bytes,
+    std::optional<std::size_t> allocation_ordinal,
+    AllocationPurpose purpose) {
+  return consume_semantic_host_buffer(
+      payload, owner.token, canonical_bytes, allocation_ordinal,
+      semantic_allocation_purpose(purpose));
+}
 
 std::size_t resource_registry_bucket(std::uint64_t token) {
   return static_cast<std::size_t>(
@@ -74,19 +112,10 @@ void erase_and_destroy_resource_state_locked(
 bool record_matches_state(const EvaluationResources &resources,
                           const EvaluationResourceState &state) {
   return resources.owner.token == state.token &&
-         resources.state_handle.token == state.token &&
-         &resources.profile == &state.profile &&
-         &resources.limits == &state.limits &&
-         &resources.creation_error == &state.creation_error &&
-         &resources.allocation_failure == &state.allocation_failure &&
-         &resources.live_evaluation_bytes ==
-             &state.live_evaluation_bytes &&
-         &resources.work_units == &state.work_units &&
-         &resources.reservation_ordinal == &state.reservation_ordinal &&
-         &resources.lifetime_observer == &state.lifetime_observer;
+         resources.state_handle.token == state.token;
 }
 
-EvaluationResourceState *validated_resource_state(
+EvaluationResourceState *acquire_validated_resource_state(
     const EvaluationResources &resources) {
   const std::lock_guard<std::mutex> registry_lock(
       resource_registry_mutex);
@@ -96,6 +125,7 @@ EvaluationResourceState *validated_resource_state(
       !record_matches_state(resources, *state)) {
     return nullptr;
   }
+  ++state->reference_count;
   return state;
 }
 
@@ -123,6 +153,72 @@ void release_acquired_resource_state(EvaluationResourceState *state) {
   }
 }
 
+using ResourceStatePin =
+    std::unique_ptr<EvaluationResourceState,
+                    void (*)(EvaluationResourceState *)>;
+
+ResourceStatePin pin_resource_state(EvaluationResourceState *state) {
+  return ResourceStatePin{state, &release_acquired_resource_state};
+}
+
+struct ResourceRecordSync {
+  EvaluationResources *resources;
+  EvaluationResourceState *state;
+};
+
+void finish_resource_record_sync(ResourceRecordSync *sync) {
+  if (sync == nullptr || sync->resources == nullptr ||
+      sync->state == nullptr) {
+    return;
+  }
+  EvaluationResources &resources = *sync->resources;
+  EvaluationResourceState &state = *sync->state;
+  state.profile = resources.profile;
+  state.limits = resources.limits;
+  state.creation_error = resources.creation_error;
+  state.allocation_failure = resources.allocation_failure;
+  state.live_evaluation_bytes = resources.live_evaluation_bytes;
+  state.work_units = resources.work_units;
+  state.reservation_ordinal = resources.reservation_ordinal;
+  state.lifetime_observer = resources.lifetime_observer;
+  sync->state = nullptr;
+}
+
+using ResourceRecordSyncGuard =
+    std::unique_ptr<ResourceRecordSync,
+                    void (*)(ResourceRecordSync *)>;
+
+ResourceRecordSyncGuard begin_resource_record_sync(
+    ResourceRecordSync &sync, EvaluationResources &resources,
+    EvaluationResourceState *state) {
+  sync = ResourceRecordSync{&resources, state};
+  if (state != nullptr) {
+    state->profile = resources.profile;
+    state->limits = resources.limits;
+    state->creation_error = resources.creation_error;
+    state->allocation_failure = resources.allocation_failure;
+    resources.live_evaluation_bytes =
+        state->live_evaluation_bytes;
+    resources.work_units = state->work_units;
+    resources.reservation_ordinal = state->reservation_ordinal;
+    state->lifetime_observer = resources.lifetime_observer;
+  }
+  return ResourceRecordSyncGuard{
+      &sync, &finish_resource_record_sync};
+}
+
+std::uint64_t issue_resource_token_locked(std::uint64_t &next_token) {
+  const std::uint64_t token = next_token;
+  if (token == 0U) {
+    return 0U;
+  }
+  next_token =
+      token == std::numeric_limits<std::uint64_t>::max()
+          ? 0U
+          : token + 1U;
+  return token;
+}
+
 bool retain_accounting_owner(EvaluationResourceOwner owner) {
   const std::lock_guard<std::mutex> registry_lock(
       resource_registry_mutex);
@@ -147,6 +243,47 @@ void release_accounting_owner(EvaluationResourceOwner owner) {
   }
 }
 
+void release_abandoned_semantic_allocation(
+    std::uint64_t owner_token, std::size_t canonical_bytes) {
+  const EvaluationResourceOwner owner{owner_token};
+  EvaluationResourceState *state = acquire_accounting_owner(owner);
+  ResourceStatePin state_pin = pin_resource_state(state);
+  if (state != nullptr) {
+    const std::lock_guard<std::mutex> transaction_lock(
+        state->transaction_mutex);
+    if (canonical_bytes <= state->live_evaluation_bytes) {
+      state->live_evaluation_bytes -= canonical_bytes;
+    }
+  }
+  release_accounting_owner(owner);
+}
+
+template <typename Element>
+HostResourceErrorReason allocate_tracked_host_buffer(
+    HostBufferStorage<Element> &storage, std::size_t element_count,
+    EvaluationResourceOwner owner, std::size_t canonical_bytes,
+    std::size_t allocation_ordinal, AllocationPurpose purpose) {
+  const HostResourceErrorReason allocated =
+      allocate_host_buffer(storage, element_count);
+  if (allocated != HostResourceErrorReason::none) {
+    return allocated;
+  }
+  if (!retain_accounting_owner(owner)) {
+    storage.reset();
+    return HostResourceErrorReason::allocation_unavailable;
+  }
+  if (!bind_semantic_host_buffer(
+          storage, owner.token, canonical_bytes,
+          allocation_ordinal,
+          semantic_allocation_purpose(purpose),
+          &release_abandoned_semantic_allocation)) {
+    release_accounting_owner(owner);
+    storage.reset();
+    return HostResourceErrorReason::allocation_unavailable;
+  }
+  return HostResourceErrorReason::none;
+}
+
 bool same_owner(EvaluationResourceOwner left,
                 EvaluationResourceOwner right) {
   return left.token == right.token;
@@ -162,24 +299,72 @@ bool resource_state_owner_is_live(EvaluationResourceOwner owner) {
   return find_resource_state_locked(owner) != nullptr;
 }
 
-bool refund_resource_state_bytes(EvaluationResourceOwner owner,
-                                 std::size_t byte_count) {
+AllocationPurpose allocation_purpose(ResourceStorageKind storage_kind) {
+  return storage_kind == ResourceStorageKind::vector_payload
+             ? AllocationPurpose::vector_payload
+             : AllocationPurpose::tuple_table;
+}
+
+bool semantic_allocation_matches(
+    const void *storage, EvaluationResourceOwner owner,
+    std::size_t byte_count,
+    std::optional<std::size_t> allocation_ordinal,
+    ResourceStorageKind storage_kind) {
+  return allocation_binding_matches(
+      storage, owner, byte_count, allocation_ordinal,
+      allocation_purpose(storage_kind));
+}
+
+bool refund_resource_state_bytes(
+    EvaluationResourceOwner owner, const void *storage,
+    std::size_t byte_count,
+    std::optional<std::size_t> allocation_ordinal,
+    ResourceStorageKind storage_kind) {
+  if (!consume_allocation_binding(
+          storage, owner, byte_count, allocation_ordinal,
+          allocation_purpose(storage_kind))) {
+    return false;
+  }
   EvaluationResourceState *state = acquire_accounting_owner(owner);
+  ResourceStatePin state_pin = pin_resource_state(state);
   if (state == nullptr) {
     return false;
   }
   const std::lock_guard<std::mutex> lock(state->transaction_mutex);
   if (byte_count > state->live_evaluation_bytes) {
-    release_acquired_resource_state(state);
     return false;
   }
   state->live_evaluation_bytes -= byte_count;
-  release_acquired_resource_state(state);
   return true;
 }
 
 void release_resource_state_owner(EvaluationResourceOwner owner) {
   release_accounting_owner(owner);
+}
+
+bool release_all_evaluation_resources_for_testing() {
+  const std::lock_guard<std::mutex> registry_lock(
+      resource_registry_mutex);
+  bool empty = true;
+  for (EvaluationResourceState *&bucket : resource_registry) {
+    EvaluationResourceState **link = &bucket;
+    while (*link != nullptr) {
+      EvaluationResourceState *state = *link;
+      if (state->context_active) {
+        state->context_active = false;
+        --state->reference_count;
+      }
+      if (state->reference_count == 0U) {
+        *link = state->registry_next;
+        std::destroy_at(state);
+        std::free(state);
+        continue;
+      }
+      empty = false;
+      link = &state->registry_next;
+    }
+  }
+  return empty;
 }
 
 } // namespace detail
@@ -211,21 +396,9 @@ EvaluationResources make_resource_record(
         failed_lifetime_observer};
   }
   auto *state = new (allocation) EvaluationResourceState{};
-  const std::uint64_t token =
-      next_resource_token.fetch_add(1U, std::memory_order_relaxed);
-  if (token == 0U) {
-    std::destroy_at(state);
-    std::free(state);
-    return EvaluationResources{
-        EvaluationResourceOwner{}, EvaluationResourceStateHandle{},
-        failed_profile, failed_limits, failed_creation_error,
-        failed_allocation_failure, failed_live_evaluation_bytes,
-        failed_work_units, failed_reservation_ordinal,
-        failed_lifetime_observer};
-  }
   state->reference_count = 1U;
   state->context_active = true;
-  state->token = token;
+  state->token = 0U;
   state->registry_next = nullptr;
   state->profile = profile;
   state->limits = std::move(limits);
@@ -238,11 +411,25 @@ EvaluationResources make_resource_record(
   {
     const std::lock_guard<std::mutex> registry_lock(
         resource_registry_mutex);
+    const std::uint64_t token =
+        issue_resource_token_locked(next_resource_token);
+    if (token == 0U) {
+      std::destroy_at(state);
+      std::free(state);
+      return EvaluationResources{
+          EvaluationResourceOwner{}, EvaluationResourceStateHandle{},
+          failed_profile, failed_limits, failed_creation_error,
+          failed_allocation_failure, failed_live_evaluation_bytes,
+          failed_work_units, failed_reservation_ordinal,
+          failed_lifetime_observer};
+    }
+    state->token = token;
     EvaluationResourceState *&head =
         resource_registry[resource_registry_bucket(token)];
     state->registry_next = head;
     head = state;
   }
+  const std::uint64_t token = state->token;
   return EvaluationResources{
       EvaluationResourceOwner{token}, EvaluationResourceStateHandle{token},
       state->profile, state->limits, state->creation_error,
@@ -412,7 +599,9 @@ void release_proven_vector(VectorValue &vector) {
   if (vector.accounting_active &&
       vector.accounting_owner.token != 0U &&
       detail::refund_resource_state_bytes(
-          vector.accounting_owner, vector.canonical_bytes)) {
+          vector.accounting_owner, storage,
+          vector.canonical_bytes, vector.allocation_ordinal,
+          ResourceStorageKind::vector_payload)) {
     observe_lifetime(vector.lifetime_observer,
                      ResourceLifetimeEventKind::logical_release,
                      ResourceStorageKind::vector_payload,
@@ -442,8 +631,10 @@ void release_proven_tuple_reservation(
   if (reservation.accounting_active &&
       reservation.accounting_owner.token != 0U &&
       detail::refund_resource_state_bytes(
-          reservation.accounting_owner,
-          reservation.canonical_bytes)) {
+          reservation.accounting_owner, storage,
+          reservation.canonical_bytes,
+          reservation.allocation_ordinal,
+          ResourceStorageKind::tuple_table)) {
     observe_lifetime(reservation.lifetime_observer,
                      ResourceLifetimeEventKind::logical_release,
                      ResourceStorageKind::tuple_table,
@@ -558,6 +749,7 @@ void observe_lifetime(const ResourceLifetimeObserver &observer,
 
 void observe_lifetime_unlocked(
     std::unique_lock<std::mutex> &transaction,
+    ResourceRecordSync *record_sync,
     const ResourceLifetimeObserver &observer,
     ResourceLifetimeEventKind kind,
     ResourceStorageKind storage_kind,
@@ -565,13 +757,27 @@ void observe_lifetime_unlocked(
     const void *storage, std::size_t canonical_bytes) {
   const bool relock = transaction.owns_lock();
   if (relock) {
+    EvaluationResourceState *state =
+        record_sync == nullptr ? nullptr : record_sync->state;
+    EvaluationResources *resources =
+        record_sync == nullptr ? nullptr : record_sync->resources;
+    finish_resource_record_sync(record_sync);
     transaction.unlock();
+    observe_lifetime(observer, kind, storage_kind,
+                     allocation_ordinal, storage,
+                     canonical_bytes);
+    transaction.lock();
+    if (record_sync != nullptr && state != nullptr &&
+        resources != nullptr) {
+      ResourceRecordSyncGuard refresh =
+          begin_resource_record_sync(
+              *record_sync, *resources, state);
+      (void)refresh.release();
+    }
+    return;
   }
   observe_lifetime(observer, kind, storage_kind, allocation_ordinal,
                    storage, canonical_bytes);
-  if (relock) {
-    transaction.lock();
-  }
 }
 
 Error make_resource_failure(
@@ -589,8 +795,9 @@ Error make_resource_failure(
     error.primitive =
         make_primitive_error_context(producer_name, std::nullopt);
   }
-  const EvaluationResourceState *state =
-      validated_resource_state(resources);
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin state_pin = pin_resource_state(state);
   error.resource = ResourceErrorContext{
       reason,
       requested_elements,
@@ -614,8 +821,9 @@ Error make_unsupported_tuple_profile(
     error.primitive =
         make_primitive_error_context(producer_name, std::nullopt);
   }
-  const EvaluationResourceState *state =
-      validated_resource_state(resources);
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin state_pin = pin_resource_state(state);
   error.profile = ProfileErrorContext{
       ProfileErrorReason::unsupported_value_kind,
       state == nullptr ? std::string_view{}
@@ -629,7 +837,8 @@ validate_profile_configuration(const EvaluationResources &resources,
                                SourceLocation location,
                                std::string_view producer_name) {
   EvaluationResourceState *state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin state_pin = pin_resource_state(state);
   if (state == nullptr ||
       state->creation_error != HostResourceErrorReason::none) {
     return make_resource_failure(
@@ -776,28 +985,111 @@ VectorAllocationResult allocation_failure(Value, Error error) {
 } // namespace
 
 void release_evaluation_resources(EvaluationResources &resources) {
-  const std::lock_guard<std::mutex> registry_lock(
-      resource_registry_mutex);
-  EvaluationResourceState *state =
-      find_resource_state_locked(resources.owner);
-  if (state != nullptr && state->context_active &&
-      record_matches_state(resources, *state)) {
-    state->context_active = false;
-    --state->reference_count;
-    if (state->reference_count == 0U) {
-      erase_and_destroy_resource_state_locked(state);
+  EvaluationResourceState *state = nullptr;
+  {
+    const std::lock_guard<std::mutex> registry_lock(
+        resource_registry_mutex);
+    state = find_resource_state_locked(resources.owner);
+    if (state != nullptr && state->context_active &&
+        record_matches_state(resources, *state)) {
+      ++state->reference_count;
+      state->context_active = false;
+      --state->reference_count;
+    } else {
+      state = nullptr;
     }
   }
-  resources.owner = EvaluationResourceOwner{};
-  resources.state_handle = EvaluationResourceStateHandle{};
+  if (state != nullptr) {
+    {
+      const std::lock_guard<std::mutex> transaction_lock(
+          state->transaction_mutex);
+      resources.profile = state->profile;
+      resources.limits = state->limits;
+      resources.creation_error = state->creation_error;
+      resources.allocation_failure = state->allocation_failure;
+      resources.live_evaluation_bytes =
+          state->live_evaluation_bytes;
+      resources.work_units = state->work_units;
+      resources.reservation_ordinal = state->reservation_ordinal;
+      resources.lifetime_observer = state->lifetime_observer;
+      {
+        const std::lock_guard<std::mutex> registry_lock(
+            resource_registry_mutex);
+        resources.owner = EvaluationResourceOwner{};
+        resources.state_handle = EvaluationResourceStateHandle{};
+      }
+    }
+    release_acquired_resource_state(state);
+  } else {
+    const std::lock_guard<std::mutex> registry_lock(
+        resource_registry_mutex);
+    resources.owner = EvaluationResourceOwner{};
+    resources.state_handle = EvaluationResourceStateHandle{};
+  }
 }
 
 EvaluationResources
 move_evaluation_resources(EvaluationResources &resources) {
-  EvaluationResources moved = resources;
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(state);
+  if (state == nullptr) {
+    EvaluationResources moved = resources;
+    moved.owner = EvaluationResourceOwner{};
+    moved.state_handle = EvaluationResourceStateHandle{};
+    return moved;
+  }
+  const std::lock_guard<std::mutex> transaction_lock(
+      state->transaction_mutex);
+  state->profile = resources.profile;
+  state->limits = resources.limits;
+  state->creation_error = resources.creation_error;
+  state->allocation_failure = resources.allocation_failure;
+  state->lifetime_observer = resources.lifetime_observer;
+  EvaluationResources moved{
+      resources.owner, resources.state_handle, state->profile,
+      state->limits, state->creation_error, state->allocation_failure,
+      state->live_evaluation_bytes, state->work_units,
+      state->reservation_ordinal, state->lifetime_observer};
   resources.owner = EvaluationResourceOwner{};
   resources.state_handle = EvaluationResourceStateHandle{};
   return moved;
+}
+
+bool refresh_evaluation_resources(EvaluationResources &resources) {
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(state);
+  if (state == nullptr) {
+    return false;
+  }
+  const std::lock_guard<std::mutex> transaction_lock(
+      state->transaction_mutex);
+  resources.profile = state->profile;
+  resources.limits = state->limits;
+  resources.creation_error = state->creation_error;
+  resources.allocation_failure = state->allocation_failure;
+  resources.live_evaluation_bytes = state->live_evaluation_bytes;
+  resources.work_units = state->work_units;
+  resources.reservation_ordinal = state->reservation_ordinal;
+  resources.lifetime_observer = state->lifetime_observer;
+  return true;
+}
+
+bool set_evaluation_resource_lifetime_observer(
+    EvaluationResources &resources,
+    ResourceLifetimeObserver lifetime_observer) {
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(state);
+  if (state == nullptr) {
+    return false;
+  }
+  const std::lock_guard<std::mutex> transaction_lock(
+      state->transaction_mutex);
+  state->lifetime_observer = lifetime_observer;
+  resources.lifetime_observer = lifetime_observer;
+  return true;
 }
 
 std::string_view execution_profile_name(ExecutionProfile profile) {
@@ -868,12 +1160,17 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
                                        SourceLocation location,
                                        std::string_view producer_name) {
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   std::unique_lock<std::mutex> transaction;
   if (resource_state != nullptr) {
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   std::optional<Error> profile_error =
       validate_profile_configuration(resources, location, producer_name);
   if (profile_error.has_value()) {
@@ -940,16 +1237,19 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
       HostResourceErrorReason::none;
   switch (element_type) {
   case ScalarType::boolean:
-    host_allocation = allocate_host_buffer(
-        candidate.vector.booleans, element_count);
+    host_allocation = allocate_tracked_host_buffer(
+        candidate.vector.booleans, element_count, resources.owner,
+        byte_count, ordinal, AllocationPurpose::vector_payload);
     break;
   case ScalarType::integer:
-    host_allocation = allocate_host_buffer(
-        candidate.vector.integers, element_count);
+    host_allocation = allocate_tracked_host_buffer(
+        candidate.vector.integers, element_count, resources.owner,
+        byte_count, ordinal, AllocationPurpose::vector_payload);
     break;
   case ScalarType::double_precision:
-    host_allocation = allocate_host_buffer(
-        candidate.vector.doubles, element_count);
+    host_allocation = allocate_tracked_host_buffer(
+        candidate.vector.doubles, element_count, resources.owner,
+        byte_count, ordinal, AllocationPurpose::vector_payload);
     break;
   }
   if (host_allocation != HostResourceErrorReason::none) {
@@ -980,26 +1280,21 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
   candidate.vector.canonical_bytes = byte_count;
   candidate.vector.accounting_active = true;
   candidate.vector.accounting_owner = resources.owner;
-  if (!retain_accounting_owner(resources.owner)) {
-    reset_vector_storage(candidate.vector);
-    return allocation_failure(
-        std::move(candidate),
-        make_resource_failure(
-            resources, ResourceErrorReason::allocation_unavailable,
-            location, producer_name, element_count, byte_count,
-            std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-            ordinal));
-  }
   candidate.vector.allocation_ordinal = ordinal;
   candidate.vector.lifetime_observer = resources.lifetime_observer;
   commit_admission(resources, admission);
-  if (transaction.owns_lock()) {
+  finish_resource_record_sync(&record_sync);
+  const bool relock_after_observer = transaction.owns_lock();
+  if (relock_after_observer) {
     transaction.unlock();
   }
   observe_lifetime(resources.lifetime_observer,
                    ResourceLifetimeEventKind::admitted,
                    ResourceStorageKind::vector_payload, ordinal,
                    vector_storage(candidate.vector), byte_count);
+  if (relock_after_observer) {
+    transaction.lock();
+  }
   return VectorAllocationResult{true, std::move(candidate), ValueInvariant::none,
                                 no_error()};
 }
@@ -1057,12 +1352,17 @@ WorkspaceReservationResult reserve_workspace(
     std::size_t work_units, SourceLocation location,
     std::string_view producer_name) {
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   std::unique_lock<std::mutex> transaction;
   if (resource_state != nullptr) {
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   std::optional<Error> profile_error =
       validate_profile_configuration(resources, location, producer_name);
   if (profile_error.has_value()) {
@@ -1108,7 +1408,9 @@ WorkspaceReservationResult reserve_workspace(
   }
   WorkspaceStorage storage{nullptr, &release_host_buffer<std::byte>};
   const HostResourceErrorReason host_allocation =
-      allocate_host_buffer(storage, byte_count);
+      allocate_tracked_host_buffer(
+          storage, byte_count, resources.owner, byte_count, ordinal,
+          AllocationPurpose::workspace);
   if (host_allocation != HostResourceErrorReason::none) {
     return WorkspaceReservationResult{
         false,
@@ -1126,7 +1428,8 @@ WorkspaceReservationResult reserve_workspace(
   commit_admission(resources, admission);
   return WorkspaceReservationResult{
       true,
-      WorkspaceReservation{std::move(storage), byte_count},
+      WorkspaceReservation{std::move(storage), byte_count,
+                           resources.owner, ordinal},
       no_error(),
   };
 }
@@ -1136,12 +1439,17 @@ WorkChargeResult charge_work(EvaluationResources &resources,
                              SourceLocation location,
                              std::string_view producer_name) {
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   std::unique_lock<std::mutex> transaction;
   if (resource_state != nullptr) {
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   std::optional<Error> profile_error =
       validate_profile_configuration(resources, location, producer_name);
   if (profile_error.has_value()) {
@@ -1161,12 +1469,17 @@ TupleReservationResult reserve_tuple_table(
     EvaluationResources &resources, std::size_t element_count,
     SourceLocation location, std::string_view producer_name) {
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   std::unique_lock<std::mutex> transaction;
   if (resource_state != nullptr) {
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   std::optional<Error> profile_error =
       validate_profile_configuration(resources, location, producer_name);
   if (profile_error.has_value()) {
@@ -1246,7 +1559,9 @@ TupleReservationResult reserve_tuple_table(
   }
   TupleTableStorage storage{nullptr, &release_host_buffer<std::byte>};
   const HostResourceErrorReason host_allocation =
-      allocate_host_buffer(storage, byte_count);
+      allocate_tracked_host_buffer(
+          storage, byte_count, resources.owner, byte_count, ordinal,
+          AllocationPurpose::tuple_table);
   if (host_allocation != HostResourceErrorReason::none) {
     Error error = make_resource_failure(
         resources,
@@ -1268,25 +1583,20 @@ TupleReservationResult reserve_tuple_table(
   reservation.canonical_bytes = byte_count;
   reservation.accounting_active = true;
   reservation.accounting_owner = resources.owner;
-  if (!retain_accounting_owner(resources.owner)) {
-    reservation.storage.reset();
-    return TupleReservationResult{
-        false, TupleTableReservation{},
-        make_resource_failure(
-            resources, ResourceErrorReason::allocation_unavailable,
-            location, producer_name, element_count, byte_count,
-            std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-            ordinal)};
-  }
   reservation.allocation_ordinal = ordinal;
   reservation.lifetime_observer = resources.lifetime_observer;
-  if (transaction.owns_lock()) {
+  finish_resource_record_sync(&record_sync);
+  const bool relock_after_observer = transaction.owns_lock();
+  if (relock_after_observer) {
     transaction.unlock();
   }
   observe_lifetime(resources.lifetime_observer,
                    ResourceLifetimeEventKind::admitted,
                    ResourceStorageKind::tuple_table, ordinal,
                    reservation.storage.get(), byte_count);
+  if (relock_after_observer) {
+    transaction.lock();
+  }
   return TupleReservationResult{true, std::move(reservation), no_error()};
 }
 
@@ -1316,7 +1626,13 @@ ValueReleaseResult release_tuple_table(
        (expected_bytes != 0U && reservation.storage != nullptr &&
         reservation.accounting_active &&
         reservation.accounting_owner.token != 0U &&
-        reservation.allocation_ordinal.has_value()));
+        reservation.allocation_ordinal.has_value() &&
+        allocation_binding_matches(
+            reservation.storage.get(),
+            reservation.accounting_owner,
+            reservation.canonical_bytes,
+            reservation.allocation_ordinal,
+            AllocationPurpose::tuple_table)));
   if (!metadata_valid) {
     return ValueReleaseResult{
         false, ValueInvariant::invalid_tuple_reservation_count};
@@ -1327,7 +1643,8 @@ ValueReleaseResult release_tuple_table(
                               ValueReleaseError::resource_context_mismatch};
   }
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
     return ValueReleaseResult{false, ValueInvariant::none,
                               ValueReleaseError::resource_context_mismatch};
@@ -1337,12 +1654,24 @@ ValueReleaseResult release_tuple_table(
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   const void *storage = reservation.storage.get();
   const ResourceLifetimeObserver observer =
       reservation.lifetime_observer;
   const std::optional<std::size_t> ordinal =
       reservation.allocation_ordinal;
   const std::size_t canonical_bytes = reservation.canonical_bytes;
+  if (canonical_bytes != 0U &&
+      !consume_allocation_binding(
+          storage, reservation.accounting_owner,
+          canonical_bytes, ordinal,
+          AllocationPurpose::tuple_table)) {
+    return ValueReleaseResult{
+        false, ValueInvariant::invalid_tuple_reservation_count};
+  }
   bool logical_release = false;
   if (reservation.canonical_bytes <= resources.live_evaluation_bytes) {
     resources.live_evaluation_bytes -= reservation.canonical_bytes;
@@ -1361,7 +1690,9 @@ ValueReleaseResult release_tuple_table(
   reservation.canonical_bytes = 0U;
   reservation.allocation_ordinal = std::nullopt;
   reservation.lifetime_observer = ResourceLifetimeObserver{};
-  if (transaction.owns_lock()) {
+  finish_resource_record_sync(&record_sync);
+  const bool relock_after_observer = transaction.owns_lock();
+  if (relock_after_observer) {
     transaction.unlock();
   }
   if (logical_release) {
@@ -1373,6 +1704,9 @@ ValueReleaseResult release_tuple_table(
     observe_lifetime(observer, ResourceLifetimeEventKind::physical_release,
                      ResourceStorageKind::tuple_table, ordinal, storage,
                      canonical_bytes);
+  }
+  if (relock_after_observer) {
+    transaction.lock();
   }
   return ValueReleaseResult{true, ValueInvariant::none};
 }
@@ -1794,7 +2128,8 @@ ValueReleaseResult release_vector_reservation(
                               ValueReleaseError::resource_context_mismatch};
   }
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
     return ValueReleaseResult{false, ValueInvariant::none,
                               ValueReleaseError::resource_context_mismatch};
@@ -1804,6 +2139,10 @@ ValueReleaseResult release_vector_reservation(
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   const ResourceLifetimeObserver observer =
       value.vector.lifetime_observer;
   const std::optional<std::size_t> ordinal =
@@ -1811,6 +2150,14 @@ ValueReleaseResult release_vector_reservation(
   const void *storage = vector_storage(value.vector);
   const std::size_t canonical_bytes =
       value.vector.canonical_bytes;
+  if (canonical_bytes != 0U &&
+      !consume_allocation_binding(
+          storage, value.vector.accounting_owner,
+          canonical_bytes, ordinal,
+          AllocationPurpose::vector_payload)) {
+    return ValueReleaseResult{
+        false, ValueInvariant::invalid_vector_payload_handle};
+  }
   bool logical_release = false;
   std::size_t element_count = 0;
   switch (value.vector.element_type) {
@@ -1849,7 +2196,9 @@ ValueReleaseResult release_vector_reservation(
   value.vector.allocation_ordinal = std::nullopt;
   value.vector.lifetime_observer = ResourceLifetimeObserver{};
   value = make_int_value(0);
-  if (transaction.owns_lock()) {
+  finish_resource_record_sync(&record_sync);
+  const bool relock_after_observer = transaction.owns_lock();
+  if (relock_after_observer) {
     transaction.unlock();
   }
   if (logical_release) {
@@ -1862,16 +2211,18 @@ ValueReleaseResult release_vector_reservation(
                      ResourceStorageKind::vector_payload, ordinal, storage,
                      canonical_bytes);
   }
+  if (relock_after_observer) {
+    transaction.lock();
+  }
   return ValueReleaseResult{true, ValueInvariant::none};
 }
 
 void release_workspace(EvaluationResources &resources,
                        WorkspaceReservation &reservation) {
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
-    reservation.storage.reset();
-    reservation.bytes = 0U;
     return;
   }
   std::unique_lock<std::mutex> transaction;
@@ -1879,9 +2230,27 @@ void release_workspace(EvaluationResources &resources,
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
+  if (reservation.bytes != 0U &&
+      (!same_owner(reservation.accounting_owner, resources.owner) ||
+       !consume_allocation_binding(
+           reservation.storage.get(),
+           reservation.accounting_owner, reservation.bytes,
+           reservation.allocation_ordinal,
+           AllocationPurpose::workspace))) {
+    return;
+  }
   if (reservation.bytes <= resources.live_evaluation_bytes) {
     resources.live_evaluation_bytes -= reservation.bytes;
   }
+  const EvaluationResourceOwner accounting_owner =
+      reservation.accounting_owner;
+  reservation.accounting_owner = EvaluationResourceOwner{};
+  reservation.allocation_ordinal = std::nullopt;
+  detail::release_resource_state_owner(accounting_owner);
   reservation.storage.reset();
   reservation.bytes = 0;
 }
@@ -1907,7 +2276,8 @@ ValueReleaseResult release_value_reservations(
     return ValueReleaseResult{true, ValueInvariant::none};
   }
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
     return ValueReleaseResult{false, ValueInvariant::none,
                               ValueReleaseError::resource_context_mismatch};
@@ -1953,7 +2323,10 @@ ValueReleaseResult release_value_reservations(
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
-
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   const auto set_parent = [&value](std::size_t child_index,
                                    std::size_t parent_index) {
     ValueNode &child = value.tuple.nodes.storage.get()[child_index];
@@ -2005,11 +2378,22 @@ ValueReleaseResult release_value_reservations(
           root ? value.tuple.root_reservation
                : value.tuple.reservations.storage.get()[
                      node->tuple_reservation_index];
+      if (reservation.canonical_bytes != 0U &&
+          !consume_allocation_binding(
+              reservation.storage.get(),
+              reservation.accounting_owner,
+              reservation.canonical_bytes,
+              reservation.allocation_ordinal,
+              AllocationPurpose::tuple_table)) {
+        return ValueReleaseResult{
+            false, ValueInvariant::invalid_tuple_reservation_count};
+      }
       if (reservation.accounting_active &&
           reservation.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
         observe_lifetime_unlocked(
-            transaction, reservation.lifetime_observer,
+            transaction, &record_sync,
+            reservation.lifetime_observer,
             ResourceLifetimeEventKind::logical_release,
             ResourceStorageKind::tuple_table,
             reservation.allocation_ordinal,
@@ -2023,7 +2407,8 @@ ValueReleaseResult release_value_reservations(
       const void *storage = reservation.storage.get();
       if (storage != nullptr) {
         observe_lifetime_unlocked(
-            transaction, reservation.lifetime_observer,
+            transaction, &record_sync,
+            reservation.lifetime_observer,
             ResourceLifetimeEventKind::physical_release,
             ResourceStorageKind::tuple_table,
             reservation.allocation_ordinal, storage,
@@ -2052,11 +2437,21 @@ ValueReleaseResult release_value_reservations(
       if (width.has_value() &&
           element_count <= std::numeric_limits<std::size_t>::max() / *width) {
         const std::size_t bytes = element_count * *width;
+        if (bytes != 0U &&
+            !consume_allocation_binding(
+                vector_storage(vector), vector.accounting_owner,
+                vector.canonical_bytes,
+                vector.allocation_ordinal,
+                AllocationPurpose::vector_payload)) {
+          return ValueReleaseResult{
+              false, ValueInvariant::invalid_vector_payload_handle};
+        }
         if (vector.accounting_active && bytes == vector.canonical_bytes &&
             bytes <= resources.live_evaluation_bytes) {
           resources.live_evaluation_bytes -= bytes;
           observe_lifetime_unlocked(
-              transaction, vector.lifetime_observer,
+              transaction, &record_sync,
+              vector.lifetime_observer,
               ResourceLifetimeEventKind::logical_release,
               ResourceStorageKind::vector_payload,
               vector.allocation_ordinal, vector_storage(vector), bytes);
@@ -2069,7 +2464,8 @@ ValueReleaseResult release_value_reservations(
         const void *storage = vector_storage(vector);
         if (storage != nullptr) {
           observe_lifetime_unlocked(
-              transaction, vector.lifetime_observer,
+              transaction, &record_sync,
+              vector.lifetime_observer,
               ResourceLifetimeEventKind::physical_release,
               ResourceStorageKind::vector_payload,
               vector.allocation_ordinal, storage,
@@ -2105,7 +2501,8 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
     return ValueReleaseResult{true, ValueInvariant::none};
   }
   EvaluationResourceState *resource_state =
-      validated_resource_state(resources);
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
     return ValueReleaseResult{false, ValueInvariant::none,
                               ValueReleaseError::resource_context_mismatch};
@@ -2122,11 +2519,26 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
       transaction =
           std::unique_lock<std::mutex>(resource_state->transaction_mutex);
     }
+    ResourceRecordSync record_sync{};
+    ResourceRecordSyncGuard record_sync_guard =
+        begin_resource_record_sync(record_sync, resources,
+                                   resource_state);
+    if (value.vector.canonical_bytes != 0U &&
+        !consume_allocation_binding(
+            vector_storage(value.vector),
+            value.vector.accounting_owner,
+            value.vector.canonical_bytes,
+            value.vector.allocation_ordinal,
+            AllocationPurpose::vector_payload)) {
+      return ValueReleaseResult{
+          false, ValueInvariant::invalid_vector_payload_handle};
+    }
     if (value.vector.accounting_active &&
         value.vector.canonical_bytes <= resources.live_evaluation_bytes) {
       resources.live_evaluation_bytes -= value.vector.canonical_bytes;
       observe_lifetime_unlocked(
-          transaction, value.vector.lifetime_observer,
+          transaction, &record_sync,
+          value.vector.lifetime_observer,
           ResourceLifetimeEventKind::logical_release,
           ResourceStorageKind::vector_payload,
           value.vector.allocation_ordinal,
@@ -2169,7 +2581,10 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
     transaction =
         std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
-
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
   const auto set_parent = [&value](std::size_t child_index,
                                    std::size_t parent_index) {
     ValueNode &child = value.tuple.nodes.storage.get()[child_index];
@@ -2220,11 +2635,22 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
           root ? value.tuple.root_reservation
                : value.tuple.reservations.storage.get()[
                      node->tuple_reservation_index];
+      if (reservation.canonical_bytes != 0U &&
+          !consume_allocation_binding(
+              reservation.storage.get(),
+              reservation.accounting_owner,
+              reservation.canonical_bytes,
+              reservation.allocation_ordinal,
+              AllocationPurpose::tuple_table)) {
+        return ValueReleaseResult{
+            false, ValueInvariant::invalid_tuple_reservation_count};
+      }
       if (reservation.accounting_active &&
           reservation.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= reservation.canonical_bytes;
         observe_lifetime_unlocked(
-            transaction, reservation.lifetime_observer,
+            transaction, &record_sync,
+            reservation.lifetime_observer,
             ResourceLifetimeEventKind::logical_release,
             ResourceStorageKind::tuple_table,
             reservation.allocation_ordinal,
@@ -2239,11 +2665,21 @@ ValueReleaseResult detach_value_reservations(EvaluationResources &resources,
       VectorValue &vector =
           value.tuple.vector_payloads.storage.get()[
               node->vector_payload_index];
+      if (vector.canonical_bytes != 0U &&
+          !consume_allocation_binding(
+              vector_storage(vector), vector.accounting_owner,
+              vector.canonical_bytes,
+              vector.allocation_ordinal,
+              AllocationPurpose::vector_payload)) {
+        return ValueReleaseResult{
+            false, ValueInvariant::invalid_vector_payload_handle};
+      }
       if (vector.accounting_active &&
           vector.canonical_bytes <= resources.live_evaluation_bytes) {
         resources.live_evaluation_bytes -= vector.canonical_bytes;
         observe_lifetime_unlocked(
-            transaction, vector.lifetime_observer,
+            transaction, &record_sync,
+            vector.lifetime_observer,
             ResourceLifetimeEventKind::logical_release,
             ResourceStorageKind::vector_payload,
             vector.allocation_ordinal, vector_storage(vector),
@@ -2506,9 +2942,10 @@ TEST_CASE("vector boundary enforces zero exact and one-past profile limits") {
 TEST_CASE("each profile limit honors zero one exact and one-past semantics") {
   EvaluationResources vector_zero = make_bounded_resources(
       limits(0, std::nullopt, std::nullopt), no_allocation_failure);
-  REQUIRE(allocate_vector(vector_zero, ScalarType::boolean, 0, 0,
-                          test_location, "vector-literal")
-              .ok);
+  VectorAllocationResult vector_zero_value = allocate_vector(
+      vector_zero, ScalarType::boolean, 0, 0,
+      test_location, "vector-literal");
+  REQUIRE(vector_zero_value.ok);
   const VectorAllocationResult vector_zero_refused = allocate_vector(
       vector_zero, ScalarType::boolean, 1, 0, test_location, "vector-literal");
   CHECK_FALSE(vector_zero_refused.ok);
@@ -2517,9 +2954,10 @@ TEST_CASE("each profile limit honors zero one exact and one-past semantics") {
 
   EvaluationResources vector_one = make_bounded_resources(
       limits(1, std::nullopt, std::nullopt), no_allocation_failure);
-  REQUIRE(allocate_vector(vector_one, ScalarType::boolean, 1, 0,
-                          test_location, "vector-literal")
-              .ok);
+  VectorAllocationResult vector_one_value = allocate_vector(
+      vector_one, ScalarType::boolean, 1, 0,
+      test_location, "vector-literal");
+  REQUIRE(vector_one_value.ok);
   const VectorAllocationResult vector_one_past = allocate_vector(
       vector_one, ScalarType::boolean, 2, 0, test_location, "vector-literal");
   CHECK_FALSE(vector_one_past.ok);
@@ -2528,9 +2966,10 @@ TEST_CASE("each profile limit honors zero one exact and one-past semantics") {
 
   EvaluationResources live_zero = make_bounded_resources(
       limits(std::nullopt, 0, std::nullopt), no_allocation_failure);
-  REQUIRE(allocate_vector(live_zero, ScalarType::boolean, 0, 0,
-                          test_location, "vector-literal")
-              .ok);
+  VectorAllocationResult live_zero_value = allocate_vector(
+      live_zero, ScalarType::boolean, 0, 0,
+      test_location, "vector-literal");
+  REQUIRE(live_zero_value.ok);
   const VectorAllocationResult live_zero_refused = allocate_vector(
       live_zero, ScalarType::boolean, 1, 0, test_location, "vector-literal");
   CHECK_FALSE(live_zero_refused.ok);
@@ -2539,14 +2978,21 @@ TEST_CASE("each profile limit honors zero one exact and one-past semantics") {
 
   EvaluationResources live_one = make_bounded_resources(
       limits(std::nullopt, 1, std::nullopt), no_allocation_failure);
-  REQUIRE(allocate_vector(live_one, ScalarType::boolean, 1, 0,
-                          test_location, "vector-literal")
-              .ok);
+  VectorAllocationResult live_one_value = allocate_vector(
+      live_one, ScalarType::boolean, 1, 0,
+      test_location, "vector-literal");
+  REQUIRE(live_one_value.ok);
   const VectorAllocationResult live_one_past = allocate_vector(
       live_one, ScalarType::boolean, 1, 0, test_location, "vector-literal");
   CHECK_FALSE(live_one_past.ok);
   check_profile_refusal(live_one_past.error,
                         ResourceLimitKind::max_live_evaluation_bytes, 1, 1, 1);
+  CHECK(release_vector_reservation(
+            vector_one, vector_one_value.value)
+            .ok);
+  CHECK(release_vector_reservation(
+            live_one, live_one_value.value)
+            .ok);
 
   EvaluationResources work_zero = make_bounded_resources(
       limits(std::nullopt, std::nullopt, 0), no_allocation_failure);
@@ -2583,26 +3029,37 @@ TEST_CASE("resource sizing rejects multiplication and cumulative overflow") {
   CHECK_FALSE(multiplication.error.resource->requested_bytes.has_value());
   CHECK(resources.reservation_ordinal == 0);
 
-  resources.live_evaluation_bytes = maximum - 3;
+  EvaluationResources cumulative_resources =
+      make_evaluation_resources(
+          ExecutionProfile::trusted_local_v1,
+          ResourceLimits{std::nullopt, std::nullopt,
+                         std::nullopt},
+          no_allocation_failure, maximum - 3U, 0U, 0U);
   VectorAllocationResult cumulative = allocate_vector(
-      resources, ScalarType::boolean, 4, 0, test_location, "vector-literal");
+      cumulative_resources, ScalarType::boolean, 4, 0,
+      test_location, "vector-literal");
   CHECK_FALSE(cumulative.ok);
   REQUIRE(cumulative.error.resource.has_value());
   CHECK(cumulative.error.resource->reason ==
         ResourceErrorReason::size_overflow);
   REQUIRE(cumulative.error.resource->requested_bytes.has_value());
   CHECK(*cumulative.error.resource->requested_bytes == 4);
-  CHECK(resources.live_evaluation_bytes == maximum - 3);
-  CHECK(resources.reservation_ordinal == 0);
+  CHECK(cumulative_resources.live_evaluation_bytes ==
+        maximum - 3);
+  CHECK(cumulative_resources.reservation_ordinal == 0);
 
-  resources.live_evaluation_bytes = 0;
-  resources.work_units = maximum;
+  EvaluationResources work_resources =
+      make_evaluation_resources(
+          ExecutionProfile::trusted_local_v1,
+          ResourceLimits{std::nullopt, std::nullopt,
+                         std::nullopt},
+          no_allocation_failure, 0U, maximum, 0U);
   const WorkChargeResult work =
-      charge_work(resources, 1, test_location, "inc");
+      charge_work(work_resources, 1, test_location, "inc");
   CHECK_FALSE(work.ok);
   REQUIRE(work.error.resource.has_value());
   CHECK(work.error.resource->reason == ResourceErrorReason::size_overflow);
-  CHECK(resources.work_units == maximum);
+  CHECK(work_resources.work_units == maximum);
 
   EvaluationResources maximum_count = make_trusted_local_resources(
       AllocationFailureInjection{std::size_t{0}});
@@ -2846,6 +3303,18 @@ TEST_CASE("trusted profile omits policy limits but retains mandatory safety") {
   REQUIRE(first.ok);
   REQUIRE(second.ok);
   CHECK(trusted.work_units == 3);
+}
+
+TEST_CASE("resource token issuance permanently exhausts without reuse") {
+  std::uint64_t synthetic_next =
+      std::numeric_limits<std::uint64_t>::max() - 1U;
+  CHECK(issue_resource_token_locked(synthetic_next) ==
+        std::numeric_limits<std::uint64_t>::max() - 1U);
+  CHECK(issue_resource_token_locked(synthetic_next) ==
+        std::numeric_limits<std::uint64_t>::max());
+  CHECK(synthetic_next == 0U);
+  CHECK(issue_resource_token_locked(synthetic_next) == 0U);
+  CHECK(synthetic_next == 0U);
 }
 
 } // namespace bennu

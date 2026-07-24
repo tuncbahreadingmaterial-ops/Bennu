@@ -32,6 +32,16 @@ enum class HostAllocationPurpose {
   buffer,
 };
 
+enum class SemanticHostAllocationPurpose : std::uint8_t {
+  none,
+  vector_payload,
+  tuple_table,
+  workspace,
+};
+
+using SemanticHostAllocationRelease =
+    void (*)(std::uint64_t, std::size_t);
+
 struct HostAllocationRecord {
   HostAllocationRecord *next;
   void *allocation;
@@ -39,6 +49,13 @@ struct HostAllocationRecord {
   std::size_t byte_count;
   HostAllocationPurpose purpose;
   const void *element_type;
+  std::uint64_t semantic_owner_token{0U};
+  std::size_t semantic_canonical_bytes{0U};
+  std::size_t semantic_allocation_ordinal{0U};
+  SemanticHostAllocationPurpose semantic_purpose{
+      SemanticHostAllocationPurpose::none};
+  SemanticHostAllocationRelease semantic_release{nullptr};
+  bool semantic_active{false};
 };
 
 constexpr std::size_t host_allocation_bucket_count = 4096U;
@@ -148,6 +165,12 @@ void release_host_buffer(Element *elements) {
       elements, HostAllocationPurpose::buffer,
       &host_element_type_identity<Element>);
   if (record != nullptr) {
+    if (record->semantic_active &&
+        record->semantic_release != nullptr) {
+      record->semantic_release(record->semantic_owner_token,
+                               record->semantic_canonical_bytes);
+      record->semantic_active = false;
+    }
     std::free(record->allocation);
   }
 }
@@ -210,6 +233,97 @@ bool host_buffer_valid(const HostBufferStorage<Element> &storage,
       storage.get(), HostAllocationPurpose::buffer,
       &host_element_type_identity<Element>);
   return record != nullptr && required_bytes == record->byte_count;
+}
+
+template <typename Element>
+bool bind_semantic_host_buffer(
+    const HostBufferStorage<Element> &storage,
+    std::uint64_t owner_token, std::size_t canonical_bytes,
+    std::size_t allocation_ordinal,
+    SemanticHostAllocationPurpose semantic_purpose,
+    SemanticHostAllocationRelease semantic_release) {
+  if (storage == nullptr || owner_token == 0U ||
+      semantic_purpose == SemanticHostAllocationPurpose::none ||
+      semantic_release == nullptr) {
+    return false;
+  }
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(storage.get())];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  HostAllocationRecord *record = find_host_allocation_unlocked(
+      bucket, storage.get(), HostAllocationPurpose::buffer,
+      &host_element_type_identity<Element>);
+  if (record == nullptr || record->semantic_active) {
+    return false;
+  }
+  record->semantic_owner_token = owner_token;
+  record->semantic_canonical_bytes = canonical_bytes;
+  record->semantic_allocation_ordinal = allocation_ordinal;
+  record->semantic_purpose = semantic_purpose;
+  record->semantic_release = semantic_release;
+  record->semantic_active = true;
+  return true;
+}
+
+inline bool semantic_host_buffer_matches(
+    const void *payload, std::uint64_t owner_token,
+    std::size_t canonical_bytes,
+    std::optional<std::size_t> allocation_ordinal,
+    SemanticHostAllocationPurpose semantic_purpose) {
+  if (payload == nullptr || owner_token == 0U ||
+      !allocation_ordinal.has_value() ||
+      semantic_purpose == SemanticHostAllocationPurpose::none) {
+    return false;
+  }
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(payload)];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  for (const HostAllocationRecord *record = bucket.records;
+       record != nullptr; record = record->next) {
+    if (record->payload == payload &&
+        record->purpose == HostAllocationPurpose::buffer) {
+      return record->semantic_active &&
+             record->semantic_owner_token == owner_token &&
+             record->semantic_canonical_bytes == canonical_bytes &&
+             record->semantic_allocation_ordinal ==
+                 *allocation_ordinal &&
+             record->semantic_purpose == semantic_purpose;
+    }
+  }
+  return false;
+}
+
+inline bool consume_semantic_host_buffer(
+    const void *payload, std::uint64_t owner_token,
+    std::size_t canonical_bytes,
+    std::optional<std::size_t> allocation_ordinal,
+    SemanticHostAllocationPurpose semantic_purpose) {
+  if (payload == nullptr || owner_token == 0U ||
+      !allocation_ordinal.has_value() ||
+      semantic_purpose == SemanticHostAllocationPurpose::none) {
+    return false;
+  }
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(payload)];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  for (HostAllocationRecord *record = bucket.records;
+       record != nullptr; record = record->next) {
+    if (record->payload != payload ||
+        record->purpose != HostAllocationPurpose::buffer) {
+      continue;
+    }
+    if (!record->semantic_active ||
+        record->semantic_owner_token != owner_token ||
+        record->semantic_canonical_bytes != canonical_bytes ||
+        record->semantic_allocation_ordinal !=
+            *allocation_ordinal ||
+        record->semantic_purpose != semantic_purpose) {
+      return false;
+    }
+    record->semantic_active = false;
+    return true;
+  }
+  return false;
 }
 
 inline HostResourceErrorReason

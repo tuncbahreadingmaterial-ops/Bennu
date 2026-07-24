@@ -205,6 +205,20 @@ void record_reentrant_lifetime_event(
   probe.inside_callback = false;
 }
 
+struct ReentrantReleaseProbe {
+  EvaluationResources *resources;
+  std::atomic<std::size_t> callback_count{0U};
+};
+
+void release_context_from_observer(
+    void *context, ResourceLifetimeEvent) {
+  auto &probe = *static_cast<ReentrantReleaseProbe *>(context);
+  if (probe.callback_count.fetch_add(
+          1U, std::memory_order_relaxed) == 0U) {
+    release_evaluation_resources(*probe.resources);
+  }
+}
+
 struct ReducedStackProbe {
   bool construction_ok{false};
   bool validation_ok{false};
@@ -515,9 +529,9 @@ TEST_CASE("TUP-003-VALUES") {
       detached_resources, ScalarType::integer, 2U, 0U, tuple_location,
       "detached-vector");
   REQUIRE(detached_vector.ok);
-  detached_vector.value.vector.accounting_active = false;
-  detached_vector.value.vector.accounting_owner =
-      EvaluationResourceOwner{};
+  CHECK(detach_value_reservations(
+            detached_resources, detached_vector.value)
+            .ok);
   CHECK(validate_value(detached_vector.value).ok);
   CHECK(destroy_value(detached_vector.value).ok);
 
@@ -838,7 +852,7 @@ TEST_CASE("TUP-003-VALUES") {
                        tuple_location, "cross-input-vector-alias");
   CHECK_FALSE(rejected_vector_alias.ok);
   CHECK(rejected_vector_alias.invariant ==
-        ValueInvariant::aliased_vector_payload);
+        ValueInvariant::invalid_vector_payload_handle);
   CHECK(aliased_vector_inputs[0].claimed);
   CHECK(aliased_vector_inputs[1].claimed);
   CHECK(invariant_resources.live_evaluation_bytes ==
@@ -1049,6 +1063,7 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
   REQUIRE(destroy_tuple.ok);
   CHECK(destroy_resources.live_evaluation_bytes == 16U);
   CHECK(destroy_value(destroy_tuple.value).ok);
+  REQUIRE(refresh_evaluation_resources(destroy_resources));
   CHECK(destroy_resources.live_evaluation_bytes == 0U);
 
   VectorAllocationResult direct_vector = allocate_vector(
@@ -1057,6 +1072,7 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
   REQUIRE(direct_vector.ok);
   CHECK(destroy_resources.live_evaluation_bytes == sizeof(std::int64_t));
   CHECK(destroy_value(direct_vector.value).ok);
+  REQUIRE(refresh_evaluation_resources(destroy_resources));
   CHECK(destroy_resources.live_evaluation_bytes == 0U);
 
   EvaluationResources first_context =
@@ -1150,7 +1166,8 @@ TEST_CASE("TUP-004-MOVE-CLEANUP") {
   std::vector<ResourceLifetimeEvent> lifetime_events;
   EvaluationResources observed_resources =
       make_trusted_local_v2_resources(no_failure);
-  observed_resources.lifetime_observer = observer_for(lifetime_events);
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      observed_resources, observer_for(lifetime_events)));
   Value observed_inner_vector = make_test_vector(observed_resources, {7});
   std::array<Value, 1> observed_inner_children{{
       move_value(observed_inner_vector),
@@ -1450,6 +1467,7 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   REQUIRE(shared_third.error.resource.has_value());
   CHECK(shared_third.error.resource->allocation_ordinal ==
         std::optional<std::size_t>{2U});
+  REQUIRE(refresh_evaluation_resources(shared));
   CHECK(shared.reservation_ordinal == 3U);
   CHECK(moved.reservation_ordinal == 3U);
   CHECK(release_vector_reservation(moved, shared_first.value).ok);
@@ -1460,12 +1478,20 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   EvaluationResources configuration_alias = shared_configuration;
   configuration_alias.profile = ExecutionProfile::bounded_v2;
   configuration_alias.limits.max_work_units = 5U;
+  CHECK(charge_work(configuration_alias, 0U, tuple_location,
+                    "publish-configuration-alias")
+            .ok);
+  REQUIRE(refresh_evaluation_resources(shared_configuration));
   CHECK(shared_configuration.profile ==
         ExecutionProfile::bounded_v2);
   CHECK(shared_configuration.limits.max_work_units ==
         std::optional<std::size_t>{5U});
   shared_configuration.creation_error =
       HostResourceErrorReason::size_overflow;
+  CHECK_FALSE(charge_work(shared_configuration, 0U, tuple_location,
+                          "publish-creation-error")
+                  .ok);
+  REQUIRE(refresh_evaluation_resources(configuration_alias));
   CHECK(configuration_alias.creation_error ==
         HostResourceErrorReason::size_overflow);
 
@@ -1494,9 +1520,11 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   }
   CHECK(concurrent_failures.load(std::memory_order_relaxed) == 0U);
   CHECK(concurrent.work_units == 8000U);
-  EvaluationResources vector_overflow =
-      make_trusted_local_v2_resources(no_failure);
-  vector_overflow.reservation_ordinal = maximum;
+  EvaluationResources vector_overflow = make_evaluation_resources(
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      no_failure, 0U, 0U, maximum);
   const VectorAllocationResult vector_ordinal_overflow = allocate_vector(
       vector_overflow, ScalarType::boolean, 1U, 0U, tuple_location,
       "vector-ordinal-overflow");
@@ -1506,9 +1534,11 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
         ResourceErrorReason::size_overflow);
   CHECK(vector_overflow.reservation_ordinal == maximum);
 
-  EvaluationResources workspace_overflow =
-      make_trusted_local_v2_resources(no_failure);
-  workspace_overflow.reservation_ordinal = maximum;
+  EvaluationResources workspace_overflow = make_evaluation_resources(
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      no_failure, 0U, 0U, maximum);
   const WorkspaceReservationResult workspace_ordinal_overflow =
       reserve_workspace(workspace_overflow, 1U, 0U, tuple_location,
                         "workspace-ordinal-overflow");
@@ -1518,9 +1548,11 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
         ResourceErrorReason::size_overflow);
   CHECK(workspace_overflow.reservation_ordinal == maximum);
 
-  EvaluationResources tuple_overflow =
-      make_trusted_local_v2_resources(no_failure);
-  tuple_overflow.reservation_ordinal = maximum;
+  EvaluationResources tuple_overflow = make_evaluation_resources(
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      no_failure, 0U, 0U, maximum);
   const TupleReservationResult tuple_ordinal_overflow = reserve_tuple_table(
       tuple_overflow, 1U, tuple_location, "tuple-ordinal-overflow");
   CHECK_FALSE(tuple_ordinal_overflow.ok);
@@ -1697,6 +1729,37 @@ TEST_CASE("TUP-008-REGISTRY-REENTRANCY") {
                                    forged_owner.value)
             .ok);
 
+  EvaluationResources alternate_resources =
+      make_trusted_local_v2_resources(no_failure);
+  VectorAllocationResult live_owner_substitution =
+      allocate_vector(
+          forged_resources, ScalarType::integer, 1U, 0U,
+          tuple_location, "live-owner-substitution");
+  REQUIRE(live_owner_substitution.ok);
+  const EvaluationResourceOwner original_live_owner =
+      live_owner_substitution.value.vector.accounting_owner;
+  const std::size_t original_live_bytes =
+      forged_resources.live_evaluation_bytes;
+  const std::size_t alternate_live_bytes =
+      alternate_resources.live_evaluation_bytes;
+  live_owner_substitution.value.vector.accounting_owner =
+      alternate_resources.owner;
+  CHECK_FALSE(validate_value(live_owner_substitution.value).ok);
+  CHECK_FALSE(release_vector_reservation(
+                  alternate_resources,
+                  live_owner_substitution.value)
+                  .ok);
+  CHECK(live_owner_substitution.value.vector.integers != nullptr);
+  CHECK(forged_resources.live_evaluation_bytes ==
+        original_live_bytes);
+  CHECK(alternate_resources.live_evaluation_bytes ==
+        alternate_live_bytes);
+  live_owner_substitution.value.vector.accounting_owner =
+      original_live_owner;
+  CHECK(release_vector_reservation(
+            forged_resources, live_owner_substitution.value)
+            .ok);
+
   EvaluationResources stale_resources =
       make_trusted_local_v2_resources(no_failure);
   EvaluationResources stale_alias = stale_resources;
@@ -1718,9 +1781,10 @@ TEST_CASE("TUP-008-REGISTRY-REENTRANCY") {
   EvaluationResources reentrant =
       make_trusted_local_v2_resources(no_failure);
   ReentrantObserverProbe probe{&reentrant};
-  reentrant.lifetime_observer =
-      ResourceLifetimeObserver{&probe,
-                               &record_reentrant_lifetime_event};
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      reentrant,
+      ResourceLifetimeObserver{
+          &probe, &record_reentrant_lifetime_event}));
   VectorAllocationResult outer = allocate_vector(
       reentrant, ScalarType::integer, 1U, 0U, tuple_location,
       "reentrant-outer");
@@ -1808,8 +1872,47 @@ TEST_CASE("TUP-008-REGISTRY-REENTRANCY") {
   CHECK(mixed.reservation_ordinal == operation_count);
   CHECK(mixed.live_evaluation_bytes == 0U);
 
+  EvaluationResources observer_released =
+      make_trusted_local_v2_resources(no_failure);
+  ReentrantReleaseProbe release_probe{&observer_released};
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      observer_released,
+      ResourceLifetimeObserver{
+          &release_probe, &release_context_from_observer}));
+  VectorAllocationResult observer_release_value =
+      allocate_vector(
+          observer_released, ScalarType::integer, 1U, 0U,
+          tuple_location, "observer-context-release");
+  REQUIRE(observer_release_value.ok);
+  CHECK(release_probe.callback_count.load(
+            std::memory_order_relaxed) > 0U);
+  CHECK(observer_released.owner.token == 0U);
+  CHECK(validate_value(observer_release_value.value).ok);
+  CHECK(destroy_value(observer_release_value.value).ok);
+
+  EvaluationResources concurrently_released =
+      make_trusted_local_v2_resources(no_failure);
+  VectorAllocationResult concurrent_release_value =
+      allocate_vector(
+          concurrently_released, ScalarType::integer, 1U, 0U,
+          tuple_location, "concurrent-context-release");
+  REQUIRE(concurrent_release_value.ok);
+  std::array<std::thread, 4U> release_workers;
+  for (std::thread &worker : release_workers) {
+    worker = std::thread([&concurrently_released]() {
+      release_evaluation_resources(concurrently_released);
+    });
+  }
+  for (std::thread &worker : release_workers) {
+    worker.join();
+  }
+  CHECK(concurrently_released.owner.token == 0U);
+  CHECK(validate_value(concurrent_release_value.value).ok);
+  CHECK(destroy_value(concurrent_release_value.value).ok);
+
   release_evaluation_resources(mixed);
   release_evaluation_resources(reentrant);
+  release_evaluation_resources(alternate_resources);
   release_evaluation_resources(forged_resources);
 }
 
@@ -1850,7 +1953,8 @@ TEST_CASE("TUP-009-CONSTRUCTION") {
   std::vector<ResourceLifetimeEvent> success_events;
   EvaluationResources success_resources =
       make_trusted_local_v2_resources(no_failure);
-  success_resources.lifetime_observer = observer_for(success_events);
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      success_resources, observer_for(success_events)));
   ConstructionProbe success_probe;
   std::array<Value, 3> success_scratch{{make_int_value(0), make_int_value(0),
                                         make_int_value(0)}};
@@ -1893,14 +1997,16 @@ TEST_CASE("TUP-009-CONSTRUCTION") {
           std::optional<std::size_t>{success_release_ordinals[index]});
     CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
   }
+  REQUIRE(refresh_evaluation_resources(success_resources));
   CHECK(success_resources.live_evaluation_bytes == 0U);
   CHECK(success_resources.work_units == 6U);
 
   std::vector<ResourceLifetimeEvent> child_failure_events;
   EvaluationResources child_failure_resources =
       make_trusted_local_v2_resources(no_failure);
-  child_failure_resources.lifetime_observer =
-      observer_for(child_failure_events);
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      child_failure_resources,
+      observer_for(child_failure_events)));
   ConstructionProbe child_failure_probe;
   child_failure_probe.fail_element = 1U;
   std::array<Value, 3> child_failure_scratch{{
@@ -1932,13 +2038,15 @@ TEST_CASE("TUP-009-CONSTRUCTION") {
         std::optional<std::size_t>{0U});
   CHECK(child_failure_probe.published_output.empty());
   CHECK(child_failure.value.container != ContainerKind::tuple);
+  REQUIRE(refresh_evaluation_resources(child_failure_resources));
   CHECK(child_failure_resources.live_evaluation_bytes == 0U);
 
   std::vector<ResourceLifetimeEvent> outer_failure_events;
   EvaluationResources outer_failure_resources =
       make_trusted_local_v2_resources(AllocationFailureInjection{3U});
-  outer_failure_resources.lifetime_observer =
-      observer_for(outer_failure_events);
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      outer_failure_resources,
+      observer_for(outer_failure_events)));
   ConstructionProbe outer_failure_probe;
   std::array<Value, 3> outer_failure_scratch{{
       make_int_value(0), make_int_value(0), make_int_value(0)}};
@@ -1979,6 +2087,7 @@ TEST_CASE("TUP-009-CONSTRUCTION") {
   }
   CHECK(outer_failure_probe.published_output.empty());
   CHECK(outer_failure.value.container != ContainerKind::tuple);
+  REQUIRE(refresh_evaluation_resources(outer_failure_resources));
   CHECK(outer_failure_resources.live_evaluation_bytes == 0U);
 }
 
@@ -2137,6 +2246,7 @@ TEST_CASE("TUP-HOST-ALLOCATION-FAILURES") {
   CHECK(destroy_tuple.value.claimed);
   CHECK(destroy_resources.live_evaluation_bytes == 16U);
   CHECK(destroy_value(destroy_tuple.value).ok);
+  REQUIRE(refresh_evaluation_resources(destroy_resources));
   CHECK(destroy_resources.live_evaluation_bytes == 0U);
 
   EvaluationResources release_resources =

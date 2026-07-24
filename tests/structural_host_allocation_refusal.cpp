@@ -16,7 +16,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+namespace bennu::detail {
+bool release_all_evaluation_resources_for_testing();
+}
+
 namespace {
+
+namespace resource_detail = bennu::detail;
 
 constexpr std::size_t large_child_count = 1024U * 1024U - 1U;
 constexpr std::size_t refusal_headroom = 4U * 1024U * 1024U;
@@ -527,6 +533,7 @@ int nested_construction_cleanup_refusal() {
           resources, bennu::host_array_span(scratch),
           &execute_nested_cleanup_element, &context,
           bennu::SourceLocation{}, "real-nested-cleanup");
+  (void)bennu::refresh_evaluation_resources(resources);
   if (result.ok || !result.error.resource.has_value() ||
       result.error.resource->reason !=
           bennu::ResourceErrorReason::allocation_unavailable ||
@@ -554,7 +561,11 @@ int run_isolated(RefusalProbe probe) {
     return 10;
   }
   if (child == 0) {
-    _exit(probe());
+    const int result = probe();
+    const bool resources_released =
+        resource_detail::
+            release_all_evaluation_resources_for_testing();
+    _exit(result != 0 ? result : resources_released ? 0 : 61);
   }
   int status = 0;
   if (waitpid(child, &status, 0) != child) {
