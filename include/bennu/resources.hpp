@@ -33,6 +33,13 @@ struct EvaluationResourceStateHandle {
   std::uint64_t token{0U};
 };
 
+enum class EvaluationResourceConfigurationUpdate {
+  updated,
+  stale_snapshot,
+  invalid_resource,
+  version_exhausted,
+};
+
 struct EvaluationResources {
   EvaluationResourceOwner owner;
   EvaluationResourceStateHandle state_handle;
@@ -44,12 +51,16 @@ struct EvaluationResources {
   std::size_t work_units;
   std::size_t reservation_ordinal;
   ResourceLifetimeObserver lifetime_observer;
+  std::uint64_t configuration_version;
 };
 
 void release_evaluation_resources(EvaluationResources &resources);
 EvaluationResources
 move_evaluation_resources(EvaluationResources &resources);
 bool refresh_evaluation_resources(EvaluationResources &resources);
+EvaluationResourceConfigurationUpdate
+update_evaluation_resource_configuration(
+    EvaluationResources &resources);
 bool set_evaluation_resource_lifetime_observer(
     EvaluationResources &resources,
     ResourceLifetimeObserver lifetime_observer);

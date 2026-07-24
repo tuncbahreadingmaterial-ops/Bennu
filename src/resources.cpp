@@ -1,5 +1,7 @@
 #include "bennu/resources.hpp"
 
+#include "host_storage_internal.hpp"
+
 #include "doctest/doctest.h"
 
 #include <array>
@@ -28,6 +30,7 @@ struct EvaluationResourceState {
   std::size_t work_units;
   std::size_t reservation_ordinal;
   ResourceLifetimeObserver lifetime_observer;
+  std::uint64_t configuration_version;
 };
 
 namespace {
@@ -44,17 +47,17 @@ enum class AllocationPurpose : std::uint8_t {
   workspace,
 };
 
-SemanticHostAllocationPurpose semantic_allocation_purpose(
+detail::SemanticHostAllocationPurpose semantic_allocation_purpose(
     AllocationPurpose purpose) {
   switch (purpose) {
   case AllocationPurpose::vector_payload:
-    return SemanticHostAllocationPurpose::vector_payload;
+    return detail::SemanticHostAllocationPurpose::vector_payload;
   case AllocationPurpose::tuple_table:
-    return SemanticHostAllocationPurpose::tuple_table;
+    return detail::SemanticHostAllocationPurpose::tuple_table;
   case AllocationPurpose::workspace:
-    return SemanticHostAllocationPurpose::workspace;
+    return detail::SemanticHostAllocationPurpose::workspace;
   }
-  return SemanticHostAllocationPurpose::none;
+  return detail::SemanticHostAllocationPurpose::workspace;
 }
 
 bool allocation_binding_matches(
@@ -62,7 +65,7 @@ bool allocation_binding_matches(
     std::size_t canonical_bytes,
     std::optional<std::size_t> allocation_ordinal,
     AllocationPurpose purpose) {
-  return semantic_host_buffer_matches(
+  return detail::semantic_host_buffer_matches(
       payload, owner.token, canonical_bytes, allocation_ordinal,
       semantic_allocation_purpose(purpose));
 }
@@ -72,7 +75,7 @@ bool consume_allocation_binding(
     std::size_t canonical_bytes,
     std::optional<std::size_t> allocation_ordinal,
     AllocationPurpose purpose) {
-  return consume_semantic_host_buffer(
+  return detail::consume_semantic_host_buffer(
       payload, owner.token, canonical_bytes, allocation_ordinal,
       semantic_allocation_purpose(purpose));
 }
@@ -173,14 +176,9 @@ void finish_resource_record_sync(ResourceRecordSync *sync) {
   }
   EvaluationResources &resources = *sync->resources;
   EvaluationResourceState &state = *sync->state;
-  state.profile = resources.profile;
-  state.limits = resources.limits;
-  state.creation_error = resources.creation_error;
-  state.allocation_failure = resources.allocation_failure;
   state.live_evaluation_bytes = resources.live_evaluation_bytes;
   state.work_units = resources.work_units;
   state.reservation_ordinal = resources.reservation_ordinal;
-  state.lifetime_observer = resources.lifetime_observer;
   sync->state = nullptr;
 }
 
@@ -193,15 +191,16 @@ ResourceRecordSyncGuard begin_resource_record_sync(
     EvaluationResourceState *state) {
   sync = ResourceRecordSync{&resources, state};
   if (state != nullptr) {
-    state->profile = resources.profile;
-    state->limits = resources.limits;
-    state->creation_error = resources.creation_error;
-    state->allocation_failure = resources.allocation_failure;
+    resources.profile = state->profile;
+    resources.limits = state->limits;
+    resources.creation_error = state->creation_error;
+    resources.allocation_failure = state->allocation_failure;
     resources.live_evaluation_bytes =
         state->live_evaluation_bytes;
     resources.work_units = state->work_units;
     resources.reservation_ordinal = state->reservation_ordinal;
-    state->lifetime_observer = resources.lifetime_observer;
+    resources.lifetime_observer = state->lifetime_observer;
+    resources.configuration_version = state->configuration_version;
   }
   return ResourceRecordSyncGuard{
       &sync, &finish_resource_record_sync};
@@ -272,8 +271,9 @@ HostResourceErrorReason allocate_tracked_host_buffer(
     storage.reset();
     return HostResourceErrorReason::allocation_unavailable;
   }
-  if (!bind_semantic_host_buffer(
-          storage, owner.token, canonical_bytes,
+  if (!detail::bind_semantic_host_buffer(
+          storage.get(), &host_element_type_identity<Element>,
+          owner.token, canonical_bytes,
           allocation_ordinal,
           semantic_allocation_purpose(purpose),
           &release_abandoned_semantic_allocation)) {
@@ -380,6 +380,7 @@ std::size_t failed_live_evaluation_bytes{0U};
 std::size_t failed_work_units{0U};
 std::size_t failed_reservation_ordinal{0U};
 ResourceLifetimeObserver failed_lifetime_observer{};
+std::uint64_t failed_configuration_version{0U};
 
 EvaluationResources make_resource_record(
     ExecutionProfile profile, ResourceLimits limits,
@@ -393,7 +394,7 @@ EvaluationResources make_resource_record(
         failed_profile, failed_limits, failed_creation_error,
         failed_allocation_failure, failed_live_evaluation_bytes,
         failed_work_units, failed_reservation_ordinal,
-        failed_lifetime_observer};
+        failed_lifetime_observer, failed_configuration_version};
   }
   auto *state = new (allocation) EvaluationResourceState{};
   state->reference_count = 1U;
@@ -408,6 +409,7 @@ EvaluationResources make_resource_record(
   state->work_units = work_units;
   state->reservation_ordinal = reservation_ordinal;
   state->lifetime_observer = ResourceLifetimeObserver{};
+  state->configuration_version = 1U;
   {
     const std::lock_guard<std::mutex> registry_lock(
         resource_registry_mutex);
@@ -421,7 +423,7 @@ EvaluationResources make_resource_record(
           failed_profile, failed_limits, failed_creation_error,
           failed_allocation_failure, failed_live_evaluation_bytes,
           failed_work_units, failed_reservation_ordinal,
-          failed_lifetime_observer};
+          failed_lifetime_observer, failed_configuration_version};
     }
     state->token = token;
     EvaluationResourceState *&head =
@@ -435,7 +437,7 @@ EvaluationResources make_resource_record(
       state->profile, state->limits, state->creation_error,
       state->allocation_failure, state->live_evaluation_bytes,
       state->work_units, state->reservation_ordinal,
-      state->lifetime_observer};
+      state->lifetime_observer, state->configuration_version};
 }
 
 constexpr std::size_t bool_payload_width = 1;
@@ -789,7 +791,7 @@ Error make_resource_failure(
     std::optional<std::size_t> configured_limit,
     std::optional<std::size_t> usage_before,
     std::optional<std::size_t> refused_charge,
-    std::optional<std::size_t> allocation_ordinal = std::nullopt) {
+    std::optional<std::size_t> allocation_ordinal) {
   Error error = make_error(ErrorKind::resource_error, location);
   if (!producer_name.empty()) {
     error.primitive =
@@ -845,7 +847,7 @@ validate_profile_configuration(const EvaluationResources &resources,
         resources,
         ResourceErrorReason::allocation_unavailable, location,
         producer_name, std::nullopt, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt, std::nullopt);
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt);
   }
   const bool has_configured_limit =
       resources.limits.max_vector_bytes.has_value() ||
@@ -920,7 +922,7 @@ AdmissionResult preflight(
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, requested_elements,
                               requested_bytes, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt),
+                              std::nullopt, std::nullopt, std::nullopt),
     };
   }
   const std::size_t live_after = resources.live_evaluation_bytes + live_charge;
@@ -937,7 +939,8 @@ AdmissionResult preflight(
             resources, ResourceErrorReason::profile_limit, location,
             producer_name, requested_elements, requested_bytes,
             ResourceLimitKind::max_vector_bytes,
-            resources.limits.max_vector_bytes, 0, *vector_bytes),
+            resources.limits.max_vector_bytes, 0, *vector_bytes,
+            std::nullopt),
     };
   }
   if (resources.limits.max_live_evaluation_bytes.has_value() &&
@@ -951,7 +954,8 @@ AdmissionResult preflight(
             producer_name, requested_elements, requested_bytes,
             ResourceLimitKind::max_live_evaluation_bytes,
             resources.limits.max_live_evaluation_bytes,
-            resources.live_evaluation_bytes, live_charge),
+            resources.live_evaluation_bytes, live_charge,
+            std::nullopt),
     };
   }
   if (resources.limits.max_work_units.has_value() &&
@@ -965,7 +969,8 @@ AdmissionResult preflight(
                               requested_bytes,
                               ResourceLimitKind::max_work_units,
                               resources.limits.max_work_units,
-                              resources.work_units, work_charge),
+                              resources.work_units, work_charge,
+                              std::nullopt),
     };
   }
   return AdmissionResult{true, live_after, work_after, no_error()};
@@ -1012,6 +1017,8 @@ void release_evaluation_resources(EvaluationResources &resources) {
       resources.work_units = state->work_units;
       resources.reservation_ordinal = state->reservation_ordinal;
       resources.lifetime_observer = state->lifetime_observer;
+      resources.configuration_version =
+          state->configuration_version;
       {
         const std::lock_guard<std::mutex> registry_lock(
             resource_registry_mutex);
@@ -1041,16 +1048,12 @@ move_evaluation_resources(EvaluationResources &resources) {
   }
   const std::lock_guard<std::mutex> transaction_lock(
       state->transaction_mutex);
-  state->profile = resources.profile;
-  state->limits = resources.limits;
-  state->creation_error = resources.creation_error;
-  state->allocation_failure = resources.allocation_failure;
-  state->lifetime_observer = resources.lifetime_observer;
   EvaluationResources moved{
       resources.owner, resources.state_handle, state->profile,
       state->limits, state->creation_error, state->allocation_failure,
       state->live_evaluation_bytes, state->work_units,
-      state->reservation_ordinal, state->lifetime_observer};
+      state->reservation_ordinal, state->lifetime_observer,
+      state->configuration_version};
   resources.owner = EvaluationResourceOwner{};
   resources.state_handle = EvaluationResourceStateHandle{};
   return moved;
@@ -1073,7 +1076,47 @@ bool refresh_evaluation_resources(EvaluationResources &resources) {
   resources.work_units = state->work_units;
   resources.reservation_ordinal = state->reservation_ordinal;
   resources.lifetime_observer = state->lifetime_observer;
+  resources.configuration_version = state->configuration_version;
   return true;
+}
+
+EvaluationResourceConfigurationUpdate
+update_evaluation_resource_configuration(
+    EvaluationResources &resources) {
+  EvaluationResourceState *state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(state);
+  if (state == nullptr) {
+    return EvaluationResourceConfigurationUpdate::invalid_resource;
+  }
+  const std::lock_guard<std::mutex> transaction_lock(
+      state->transaction_mutex);
+  if (resources.configuration_version !=
+      state->configuration_version) {
+    resources.profile = state->profile;
+    resources.limits = state->limits;
+    resources.creation_error = state->creation_error;
+    resources.allocation_failure = state->allocation_failure;
+    resources.live_evaluation_bytes = state->live_evaluation_bytes;
+    resources.work_units = state->work_units;
+    resources.reservation_ordinal = state->reservation_ordinal;
+    resources.lifetime_observer = state->lifetime_observer;
+    resources.configuration_version =
+        state->configuration_version;
+    return EvaluationResourceConfigurationUpdate::stale_snapshot;
+  }
+  if (state->configuration_version ==
+      std::numeric_limits<std::uint64_t>::max()) {
+    return EvaluationResourceConfigurationUpdate::version_exhausted;
+  }
+  state->profile = resources.profile;
+  state->limits = resources.limits;
+  state->creation_error = resources.creation_error;
+  state->allocation_failure = resources.allocation_failure;
+  ++state->configuration_version;
+  resources.configuration_version =
+      state->configuration_version;
+  return EvaluationResourceConfigurationUpdate::updated;
 }
 
 bool set_evaluation_resource_lifetime_observer(
@@ -1185,7 +1228,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt));
+                              std::nullopt, std::nullopt, std::nullopt));
   }
   const std::size_t element_count =
       static_cast<std::size_t>(requested_element_count);
@@ -1195,7 +1238,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt));
+                              std::nullopt, std::nullopt, std::nullopt));
   }
   const std::size_t byte_count = element_count * *width;
   AdmissionResult admission =
@@ -1218,7 +1261,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               byte_count, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt));
+                              std::nullopt, std::nullopt, std::nullopt));
   }
   const std::size_t ordinal = resources.reservation_ordinal;
   ++resources.reservation_ordinal;
@@ -1389,7 +1432,7 @@ WorkspaceReservationResult reserve_workspace(
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, std::nullopt, byte_count,
                               std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt),
+                              std::nullopt, std::nullopt),
     };
   }
   const std::size_t ordinal = resources.reservation_ordinal;
@@ -1502,7 +1545,7 @@ TupleReservationResult reserve_tuple_table(
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               std::nullopt, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt),
+                              std::nullopt, std::nullopt, std::nullopt),
     };
   }
   const std::size_t byte_count = element_count * tuple_element_slot_bytes;
@@ -1515,7 +1558,8 @@ TupleReservationResult reserve_tuple_table(
             resources, ResourceErrorReason::profile_limit, location,
             producer_name, element_count, byte_count,
             ResourceLimitKind::max_tuple_table_bytes,
-            resources.limits.max_tuple_table_bytes, 0U, byte_count),
+            resources.limits.max_tuple_table_bytes, 0U, byte_count,
+            std::nullopt),
     };
   }
 
@@ -1541,7 +1585,7 @@ TupleReservationResult reserve_tuple_table(
         make_resource_failure(resources, ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               byte_count, std::nullopt, std::nullopt,
-                              std::nullopt, std::nullopt),
+                              std::nullopt, std::nullopt, std::nullopt),
     };
   }
   const std::size_t ordinal = resources.reservation_ordinal;
@@ -1552,7 +1596,7 @@ TupleReservationResult reserve_tuple_table(
     Error error = make_resource_failure(
         resources, ResourceErrorReason::allocation_unavailable, location,
         producer_name, element_count, byte_count, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt);
+        std::nullopt, std::nullopt, std::nullopt);
     error.resource->allocation_ordinal = ordinal;
     return TupleReservationResult{false, TupleTableReservation{},
                                   std::move(error)};
@@ -1570,7 +1614,7 @@ TupleReservationResult reserve_tuple_table(
             : ResourceErrorReason::allocation_unavailable,
         location,
         producer_name, element_count, byte_count, std::nullopt, std::nullopt,
-        std::nullopt, std::nullopt);
+        std::nullopt, std::nullopt, std::nullopt);
     error.resource->allocation_ordinal = ordinal;
     return TupleReservationResult{false, TupleTableReservation{},
                                   std::move(error)};
@@ -1756,7 +1800,7 @@ TupleConstructionResult make_tuple_value(
         Error error = make_resource_failure(
             resources, reason, location, producer_name, elements.size(),
             std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-            std::nullopt);
+            std::nullopt, std::nullopt);
         return TupleConstructionResult{false, make_int_value(0),
                                        ValueInvariant::none,
                                        std::move(error)};
@@ -1790,7 +1834,7 @@ TupleConstructionResult make_tuple_value(
       Error error = make_resource_failure(
           resources, ResourceErrorReason::size_overflow, location,
           producer_name, elements.size(), std::nullopt, std::nullopt,
-          std::nullopt, std::nullopt, std::nullopt);
+          std::nullopt, std::nullopt, std::nullopt, std::nullopt);
       return TupleConstructionResult{false, make_int_value(0),
                                      ValueInvariant::none, std::move(error)};
     }
@@ -2030,7 +2074,8 @@ TupleConstructionResult execute_tuple_construction(
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable,
             location, producer_name, element_storage.size(), std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+            std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+            std::nullopt);
       } else {
         error = make_error(ErrorKind::invalid_value, location);
         error.static_message =
@@ -2081,7 +2126,8 @@ TupleConstructionResult execute_tuple_construction(
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable,
             location, producer_name, element_storage.size(), std::nullopt,
-            std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+            std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+            std::nullopt);
       } else {
         error = make_error(ErrorKind::invalid_value, location);
         error.static_message =
@@ -2778,15 +2824,26 @@ TEST_CASE("malformed profile configurations refuse every admission entry") {
   EvaluationResources trusted_with_vector_limit =
       make_trusted_local_resources(fail_first);
   trusted_with_vector_limit.limits.max_vector_bytes = 0;
+  REQUIRE(update_evaluation_resource_configuration(
+              trusted_with_vector_limit) ==
+          EvaluationResourceConfigurationUpdate::updated);
   EvaluationResources trusted_with_live_limit =
       make_trusted_local_resources(fail_first);
   trusted_with_live_limit.limits.max_live_evaluation_bytes = 0;
+  REQUIRE(update_evaluation_resource_configuration(
+              trusted_with_live_limit) ==
+          EvaluationResourceConfigurationUpdate::updated);
   EvaluationResources trusted_with_work_limit =
       make_trusted_local_resources(fail_first);
   trusted_with_work_limit.limits.max_work_units = 0;
+  REQUIRE(update_evaluation_resource_configuration(
+              trusted_with_work_limit) ==
+          EvaluationResourceConfigurationUpdate::updated);
   EvaluationResources unknown_profile =
       make_trusted_local_resources(fail_first);
   unknown_profile.profile = static_cast<ExecutionProfile>(99);
+  REQUIRE(update_evaluation_resource_configuration(unknown_profile) ==
+          EvaluationResourceConfigurationUpdate::updated);
 
   const std::array<EvaluationResources, 5> malformed{{
       bounded_without_limits,

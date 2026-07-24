@@ -40,6 +40,7 @@ endif()
 set(bennu_implementation_sources
   src/application.cpp
   src/error.cpp
+  src/host_storage.cpp
   src/native_builder.cpp
   src/path_encoding.cpp
   src/primitive.cpp
@@ -119,6 +120,7 @@ if(BENNU_BUILD_ISSUE33_BENCHMARK)
     tools/issue33/prototype.cpp
     src/application.cpp
     src/error.cpp
+    src/host_storage.cpp
     src/primitive.cpp
     src/resources.cpp
     src/value.cpp
@@ -218,6 +220,7 @@ if(BUILD_TESTING)
     add_executable(bennu_structural_host_allocation_refusal
       tests/structural_host_allocation_refusal.cpp
       src/error.cpp
+      src/host_storage.cpp
       src/resources.cpp
       src/type.cpp
       src/value.cpp

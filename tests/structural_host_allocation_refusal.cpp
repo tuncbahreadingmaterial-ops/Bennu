@@ -381,6 +381,10 @@ int profile_and_coordinator_refusal() {
   }
 
   invalid.profile = static_cast<bennu::ExecutionProfile>(999U);
+  if (bennu::update_evaluation_resource_configuration(invalid) !=
+      bennu::EvaluationResourceConfigurationUpdate::updated) {
+    return 56;
+  }
   const bennu::WorkChargeResult invalid_profile =
       bennu::charge_work(invalid, 1U, bennu::SourceLocation{},
                          "invalid-profile-refusal");

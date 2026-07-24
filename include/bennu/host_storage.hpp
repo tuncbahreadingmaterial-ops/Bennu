@@ -4,10 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <array>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -32,117 +30,53 @@ enum class HostAllocationPurpose {
   buffer,
 };
 
-enum class SemanticHostAllocationPurpose : std::uint8_t {
-  none,
-  vector_payload,
-  tuple_table,
-  workspace,
-};
-
-using SemanticHostAllocationRelease =
-    void (*)(std::uint64_t, std::size_t);
-
-struct HostAllocationRecord {
-  HostAllocationRecord *next;
+struct HostAllocationSnapshot {
+  bool found;
   void *allocation;
-  void *payload;
   std::size_t byte_count;
-  HostAllocationPurpose purpose;
-  const void *element_type;
-  std::uint64_t semantic_owner_token{0U};
-  std::size_t semantic_canonical_bytes{0U};
-  std::size_t semantic_allocation_ordinal{0U};
-  SemanticHostAllocationPurpose semantic_purpose{
-      SemanticHostAllocationPurpose::none};
-  SemanticHostAllocationRelease semantic_release{nullptr};
-  bool semantic_active{false};
-};
-
-constexpr std::size_t host_allocation_bucket_count = 4096U;
-
-struct HostAllocationBucket {
-  HostAllocationRecord *records{nullptr};
-  std::mutex mutex{};
-};
-
-inline std::array<HostAllocationBucket, host_allocation_bucket_count>
-    host_allocation_buckets{};
-
-template <typename Element>
-inline const std::byte host_element_type_identity{};
-
-inline std::size_t host_allocation_bucket_index(const void *payload) {
-  const std::uintptr_t address =
-      reinterpret_cast<std::uintptr_t>(payload);
-  return ((address >> 4U) ^ (address >> 17U)) &
-         (host_allocation_bucket_count - 1U);
-}
-
-inline void register_host_allocation(HostAllocationRecord &record) {
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(record.payload)];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  record.next = bucket.records;
-  bucket.records = &record;
-}
-
-inline HostAllocationRecord *find_host_allocation_unlocked(
-    HostAllocationBucket &bucket,
-    const void *payload, HostAllocationPurpose purpose,
-    const void *element_type) {
-  for (HostAllocationRecord *record = bucket.records;
-       record != nullptr; record = record->next) {
-    if (record->payload == payload && record->purpose == purpose &&
-        record->element_type == element_type) {
-      return record;
-    }
-  }
-  return nullptr;
-}
-
-inline HostAllocationRecord *remove_host_allocation(
-    const void *payload, HostAllocationPurpose purpose,
-    const void *element_type) {
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(payload)];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  HostAllocationRecord **link = &bucket.records;
-  while (*link != nullptr) {
-    HostAllocationRecord *record = *link;
-    if (record->payload == payload && record->purpose == purpose &&
-        record->element_type == element_type) {
-      *link = record->next;
-      record->next = nullptr;
-      return record;
-    }
-    link = &record->next;
-  }
-  return nullptr;
-}
-
-template <typename Element>
-struct HostArrayHeader {
-  HostAllocationRecord allocation_record;
   std::size_t constructed;
   std::size_t capacity;
 };
+
+namespace detail {
+
+std::size_t host_allocation_header_size();
+std::size_t host_allocation_header_alignment();
+bool register_host_allocation(
+    void *allocation, void *payload, std::size_t byte_count,
+    HostAllocationPurpose purpose, const void *element_type,
+    std::size_t constructed, std::size_t capacity);
+HostAllocationSnapshot find_host_allocation(
+    const void *payload, HostAllocationPurpose purpose,
+    const void *element_type);
+HostAllocationSnapshot remove_host_allocation(
+    const void *payload, HostAllocationPurpose purpose,
+    const void *element_type);
+bool claim_host_array_elements(
+    const void *payload, const void *element_type,
+    std::size_t expected_capacity, std::size_t current_size,
+    std::size_t count);
+
+} // namespace detail
+
+template <typename Element>
+inline const std::byte host_element_type_identity{};
 
 template <typename Element>
 void release_host_array(Element *elements) {
   if (elements == nullptr) {
     return;
   }
-  HostAllocationRecord *record = remove_host_allocation(
+  const HostAllocationSnapshot record = detail::remove_host_allocation(
       elements, HostAllocationPurpose::array,
       &host_element_type_identity<Element>);
-  if (record == nullptr) {
+  if (!record.found) {
     return;
   }
-  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(record);
-  for (std::size_t index = header->constructed; index > 0U; --index) {
+  for (std::size_t index = record.constructed; index > 0U; --index) {
     std::destroy_at(elements + index - 1U);
   }
-  std::free(record->allocation);
+  std::free(record.allocation);
 }
 
 template <typename Element>
@@ -161,17 +95,11 @@ void release_host_buffer(Element *elements) {
   if (elements == nullptr) {
     return;
   }
-  HostAllocationRecord *record = remove_host_allocation(
+  const HostAllocationSnapshot record = detail::remove_host_allocation(
       elements, HostAllocationPurpose::buffer,
       &host_element_type_identity<Element>);
-  if (record != nullptr) {
-    if (record->semantic_active &&
-        record->semantic_release != nullptr) {
-      record->semantic_release(record->semantic_owner_token,
-                               record->semantic_canonical_bytes);
-      record->semantic_active = false;
-    }
-    std::free(record->allocation);
+  if (record.found) {
+    std::free(record.allocation);
   }
 }
 
@@ -188,12 +116,14 @@ HostResourceErrorReason allocate_host_buffer(
   if (element_count == 0U) {
     return HostResourceErrorReason::none;
   }
-  constexpr std::size_t header_size = sizeof(HostAllocationRecord);
-  constexpr std::size_t alignment =
-      alignof(Element) > alignof(HostAllocationRecord)
+  const std::size_t header_size = detail::host_allocation_header_size();
+  const std::size_t header_alignment =
+      detail::host_allocation_header_alignment();
+  const std::size_t alignment =
+      alignof(Element) > header_alignment
           ? alignof(Element)
-          : alignof(HostAllocationRecord);
-  constexpr std::size_t alignment_slack = alignment - 1U;
+          : header_alignment;
+  const std::size_t alignment_slack = alignment - 1U;
   const std::size_t maximum = std::numeric_limits<std::size_t>::max();
   if (element_count >
       (maximum - header_size - alignment_slack) / sizeof(Element)) {
@@ -211,10 +141,13 @@ HostResourceErrorReason allocate_host_buffer(
       (unaligned + alignment_slack) &
       ~static_cast<std::uintptr_t>(alignment_slack);
   auto *elements = reinterpret_cast<Element *>(aligned);
-  auto *record = new (allocation) HostAllocationRecord{
-      nullptr, allocation, elements, byte_count,
-      HostAllocationPurpose::buffer, &host_element_type_identity<Element>};
-  register_host_allocation(*record);
+  if (!detail::register_host_allocation(
+          allocation, elements, byte_count,
+          HostAllocationPurpose::buffer,
+          &host_element_type_identity<Element>, 0U, 0U)) {
+    std::free(allocation);
+    return HostResourceErrorReason::allocation_unavailable;
+  }
   storage.reset(elements);
   return HostResourceErrorReason::none;
 }
@@ -225,105 +158,10 @@ bool host_buffer_valid(const HostBufferStorage<Element> &storage,
   if (storage == nullptr) {
     return required_bytes == 0U;
   }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(storage.get())];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  const HostAllocationRecord *record = find_host_allocation_unlocked(
-      bucket,
+  const HostAllocationSnapshot record = detail::find_host_allocation(
       storage.get(), HostAllocationPurpose::buffer,
       &host_element_type_identity<Element>);
-  return record != nullptr && required_bytes == record->byte_count;
-}
-
-template <typename Element>
-bool bind_semantic_host_buffer(
-    const HostBufferStorage<Element> &storage,
-    std::uint64_t owner_token, std::size_t canonical_bytes,
-    std::size_t allocation_ordinal,
-    SemanticHostAllocationPurpose semantic_purpose,
-    SemanticHostAllocationRelease semantic_release) {
-  if (storage == nullptr || owner_token == 0U ||
-      semantic_purpose == SemanticHostAllocationPurpose::none ||
-      semantic_release == nullptr) {
-    return false;
-  }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(storage.get())];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  HostAllocationRecord *record = find_host_allocation_unlocked(
-      bucket, storage.get(), HostAllocationPurpose::buffer,
-      &host_element_type_identity<Element>);
-  if (record == nullptr || record->semantic_active) {
-    return false;
-  }
-  record->semantic_owner_token = owner_token;
-  record->semantic_canonical_bytes = canonical_bytes;
-  record->semantic_allocation_ordinal = allocation_ordinal;
-  record->semantic_purpose = semantic_purpose;
-  record->semantic_release = semantic_release;
-  record->semantic_active = true;
-  return true;
-}
-
-inline bool semantic_host_buffer_matches(
-    const void *payload, std::uint64_t owner_token,
-    std::size_t canonical_bytes,
-    std::optional<std::size_t> allocation_ordinal,
-    SemanticHostAllocationPurpose semantic_purpose) {
-  if (payload == nullptr || owner_token == 0U ||
-      !allocation_ordinal.has_value() ||
-      semantic_purpose == SemanticHostAllocationPurpose::none) {
-    return false;
-  }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(payload)];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  for (const HostAllocationRecord *record = bucket.records;
-       record != nullptr; record = record->next) {
-    if (record->payload == payload &&
-        record->purpose == HostAllocationPurpose::buffer) {
-      return record->semantic_active &&
-             record->semantic_owner_token == owner_token &&
-             record->semantic_canonical_bytes == canonical_bytes &&
-             record->semantic_allocation_ordinal ==
-                 *allocation_ordinal &&
-             record->semantic_purpose == semantic_purpose;
-    }
-  }
-  return false;
-}
-
-inline bool consume_semantic_host_buffer(
-    const void *payload, std::uint64_t owner_token,
-    std::size_t canonical_bytes,
-    std::optional<std::size_t> allocation_ordinal,
-    SemanticHostAllocationPurpose semantic_purpose) {
-  if (payload == nullptr || owner_token == 0U ||
-      !allocation_ordinal.has_value() ||
-      semantic_purpose == SemanticHostAllocationPurpose::none) {
-    return false;
-  }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(payload)];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  for (HostAllocationRecord *record = bucket.records;
-       record != nullptr; record = record->next) {
-    if (record->payload != payload ||
-        record->purpose != HostAllocationPurpose::buffer) {
-      continue;
-    }
-    if (!record->semantic_active ||
-        record->semantic_owner_token != owner_token ||
-        record->semantic_canonical_bytes != canonical_bytes ||
-        record->semantic_allocation_ordinal !=
-            *allocation_ordinal ||
-        record->semantic_purpose != semantic_purpose) {
-      return false;
-    }
-    record->semantic_active = false;
-    return true;
-  }
-  return false;
+  return record.found && required_bytes == record.byte_count;
 }
 
 inline HostResourceErrorReason
@@ -355,12 +193,14 @@ host_array_allocation_preflight(
       capacity > *max_container_elements) {
     return HostResourceErrorReason::size_overflow;
   }
-  constexpr std::size_t header_size = sizeof(HostArrayHeader<Element>);
-  constexpr std::size_t alignment =
-      alignof(Element) > alignof(HostArrayHeader<Element>)
+  const std::size_t header_size = detail::host_allocation_header_size();
+  const std::size_t header_alignment =
+      detail::host_allocation_header_alignment();
+  const std::size_t alignment =
+      alignof(Element) > header_alignment
           ? alignof(Element)
-          : alignof(HostArrayHeader<Element>);
-  constexpr std::size_t alignment_slack = alignment - 1U;
+          : header_alignment;
+  const std::size_t alignment_slack = alignment - 1U;
   const std::size_t maximum = std::numeric_limits<std::size_t>::max();
   if (capacity > (maximum - header_size - alignment_slack) / sizeof(Element)) {
     return HostResourceErrorReason::size_overflow;
@@ -377,12 +217,14 @@ allocate_host_array(HostArray<Element> &array, std::size_t capacity,
   if (preflight != HostResourceErrorReason::none || capacity == 0U) {
     return preflight;
   }
-  constexpr std::size_t header_size = sizeof(HostArrayHeader<Element>);
-  constexpr std::size_t alignment =
-      alignof(Element) > alignof(HostArrayHeader<Element>)
+  const std::size_t header_size = detail::host_allocation_header_size();
+  const std::size_t header_alignment =
+      detail::host_allocation_header_alignment();
+  const std::size_t alignment =
+      alignof(Element) > header_alignment
           ? alignof(Element)
-          : alignof(HostArrayHeader<Element>);
-  constexpr std::size_t alignment_slack = alignment - 1U;
+          : header_alignment;
+  const std::size_t alignment_slack = alignment - 1U;
   const std::size_t allocation_size =
       header_size + alignment_slack + capacity * sizeof(Element);
   void *allocation = std::malloc(allocation_size);
@@ -395,17 +237,13 @@ allocate_host_array(HostArray<Element> &array, std::size_t capacity,
       (unaligned + alignment_slack) & ~static_cast<std::uintptr_t>(
                                             alignment_slack);
   auto *elements = reinterpret_cast<Element *>(aligned);
-  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(
-      reinterpret_cast<std::byte *>(elements) - header_size);
-  std::construct_at(
-      header,
-      HostArrayHeader<Element>{
-          HostAllocationRecord{
-              nullptr, allocation, elements, capacity * sizeof(Element),
-              HostAllocationPurpose::array,
-              &host_element_type_identity<Element>},
-          0U, capacity});
-  register_host_allocation(header->allocation_record);
+  if (!detail::register_host_allocation(
+          allocation, elements, capacity * sizeof(Element),
+          HostAllocationPurpose::array,
+          &host_element_type_identity<Element>, 0U, capacity)) {
+    std::free(allocation);
+    return HostResourceErrorReason::allocation_unavailable;
+  }
   array.storage.reset(elements);
   array.capacity = capacity;
   return HostResourceErrorReason::none;
@@ -435,28 +273,14 @@ host_array_push(HostArray<Element> &array, Source &&source) {
   if (array.storage == nullptr || array.size >= array.capacity) {
     return HostResourceErrorReason::size_overflow;
   }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(
-          array.storage.get())];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  HostAllocationRecord *record = find_host_allocation_unlocked(
-      bucket,
-      array.storage.get(), HostAllocationPurpose::array,
-      &host_element_type_identity<Element>);
-  if (record == nullptr) {
-    return HostResourceErrorReason::size_overflow;
-  }
-  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(record);
-  if (array.capacity != header->capacity ||
-      array.size >= header->capacity) {
+  if (!detail::claim_host_array_elements(
+          array.storage.get(), &host_element_type_identity<Element>,
+          array.capacity, array.size, 1U)) {
     return HostResourceErrorReason::size_overflow;
   }
   std::construct_at(array.storage.get() + array.size,
                     std::forward<Source>(source));
   ++array.size;
-  if (array.size > header->constructed) {
-    header->constructed = array.size;
-  }
   return HostResourceErrorReason::none;
 }
 
@@ -470,29 +294,14 @@ host_array_fill(HostArray<Element> &array, std::size_t count,
                ? HostResourceErrorReason::none
                : HostResourceErrorReason::size_overflow;
   }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(
-          array.storage.get())];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  HostAllocationRecord *record = find_host_allocation_unlocked(
-      bucket, array.storage.get(), HostAllocationPurpose::array,
-      &host_element_type_identity<Element>);
-  if (record == nullptr) {
-    return HostResourceErrorReason::size_overflow;
-  }
-  auto *header =
-      reinterpret_cast<HostArrayHeader<Element> *>(record);
-  if (array.capacity != header->capacity ||
-      array.size > header->capacity ||
-      count > header->capacity - array.size) {
+  if (!detail::claim_host_array_elements(
+          array.storage.get(), &host_element_type_identity<Element>,
+          array.capacity, array.size, count)) {
     return HostResourceErrorReason::size_overflow;
   }
   for (std::size_t index = 0U; index < count; ++index) {
     std::construct_at(array.storage.get() + array.size, value);
     ++array.size;
-  }
-  if (array.size > header->constructed) {
-    header->constructed = array.size;
   }
   return HostResourceErrorReason::none;
 }
@@ -502,23 +311,16 @@ bool host_array_metadata_valid(const HostArray<Element> &array) {
   if (array.storage == nullptr) {
     return array.size == 0U && array.capacity == 0U;
   }
-  HostAllocationBucket &bucket =
-      host_allocation_buckets[host_allocation_bucket_index(
-          array.storage.get())];
-  const std::lock_guard<std::mutex> lock(bucket.mutex);
-  const HostAllocationRecord *record = find_host_allocation_unlocked(
-      bucket,
+  const HostAllocationSnapshot record = detail::find_host_allocation(
       array.storage.get(), HostAllocationPurpose::array,
       &host_element_type_identity<Element>);
-  if (record == nullptr) {
+  if (!record.found) {
     return false;
   }
-  const auto *header =
-      reinterpret_cast<const HostArrayHeader<Element> *>(record);
-  return array.capacity == header->capacity &&
-         array.size <= header->capacity &&
-         header->constructed <= header->capacity &&
-         array.size <= header->constructed;
+  return array.capacity == record.capacity &&
+         array.size <= record.capacity &&
+         record.constructed <= record.capacity &&
+         array.size <= record.constructed;
 }
 
 template <typename Element>

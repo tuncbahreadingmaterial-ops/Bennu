@@ -1333,6 +1333,9 @@ TEST_CASE("TUP-006-PROFILE-IDENTITY") {
   EvaluationResources trusted_with_limit =
       make_trusted_local_v2_resources(no_failure);
   trusted_with_limit.limits.max_tuple_table_bytes = 0U;
+  REQUIRE(update_evaluation_resource_configuration(
+              trusted_with_limit) ==
+          EvaluationResourceConfigurationUpdate::updated);
   const TupleReservationResult unexpected_limit = reserve_tuple_table(
       trusted_with_limit, 0U, tuple_location, "invalid-trusted-v2");
   CHECK_FALSE(unexpected_limit.ok);
@@ -1476,24 +1479,72 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   EvaluationResources shared_configuration =
       make_trusted_local_v2_resources(no_failure);
   EvaluationResources configuration_alias = shared_configuration;
+  EvaluationResources stale_configuration = shared_configuration;
   configuration_alias.profile = ExecutionProfile::bounded_v2;
   configuration_alias.limits.max_work_units = 5U;
-  CHECK(charge_work(configuration_alias, 0U, tuple_location,
-                    "publish-configuration-alias")
-            .ok);
+  REQUIRE(update_evaluation_resource_configuration(
+              configuration_alias) ==
+          EvaluationResourceConfigurationUpdate::updated);
+  const WorkChargeResult stale_bypass = charge_work(
+      stale_configuration, 6U, tuple_location,
+      "stale-configuration-cannot-bypass");
+  CHECK_FALSE(stale_bypass.ok);
+  CHECK(stale_configuration.profile ==
+        ExecutionProfile::bounded_v2);
+  CHECK(stale_configuration.limits.max_work_units ==
+        std::optional<std::size_t>{5U});
   REQUIRE(refresh_evaluation_resources(shared_configuration));
   CHECK(shared_configuration.profile ==
         ExecutionProfile::bounded_v2);
   CHECK(shared_configuration.limits.max_work_units ==
         std::optional<std::size_t>{5U});
+  EvaluationResources stale_update = shared_configuration;
+  configuration_alias.limits.max_work_units = 6U;
+  REQUIRE(update_evaluation_resource_configuration(
+              configuration_alias) ==
+          EvaluationResourceConfigurationUpdate::updated);
+  stale_update.profile = ExecutionProfile::trusted_local_v2;
+  stale_update.limits = ResourceLimits{
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  CHECK(update_evaluation_resource_configuration(stale_update) ==
+        EvaluationResourceConfigurationUpdate::stale_snapshot);
+  CHECK(stale_update.profile == ExecutionProfile::bounded_v2);
+  CHECK(stale_update.limits.max_work_units ==
+        std::optional<std::size_t>{6U});
+  REQUIRE(refresh_evaluation_resources(shared_configuration));
   shared_configuration.creation_error =
       HostResourceErrorReason::size_overflow;
+  REQUIRE(update_evaluation_resource_configuration(
+              shared_configuration) ==
+          EvaluationResourceConfigurationUpdate::updated);
   CHECK_FALSE(charge_work(shared_configuration, 0U, tuple_location,
                           "publish-creation-error")
                   .ok);
   REQUIRE(refresh_evaluation_resources(configuration_alias));
   CHECK(configuration_alias.creation_error ==
         HostResourceErrorReason::size_overflow);
+
+  EvaluationResources shared_failure_policy =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources stale_failure_policy =
+      shared_failure_policy;
+  shared_failure_policy.allocation_failure
+      .fail_at_reservation_ordinal = 0U;
+  REQUIRE(update_evaluation_resource_configuration(
+              shared_failure_policy) ==
+          EvaluationResourceConfigurationUpdate::updated);
+  VectorAllocationResult injected_through_shared_policy =
+      allocate_vector(
+          stale_failure_policy, ScalarType::boolean, 1U, 0U,
+          tuple_location, "shared-failure-policy");
+  CHECK_FALSE(injected_through_shared_policy.ok);
+  REQUIRE(injected_through_shared_policy.error.resource.has_value());
+  CHECK(injected_through_shared_policy.error.resource
+            ->allocation_ordinal ==
+        std::optional<std::size_t>{0U});
+  CHECK(stale_failure_policy.allocation_failure
+            .fail_at_reservation_ordinal ==
+        std::optional<std::size_t>{0U});
 
   EvaluationResources concurrent =
       make_bounded_v2_resources(
@@ -1725,6 +1776,27 @@ TEST_CASE("TUP-008-REGISTRY-REENTRANCY") {
         preserved_storage);
   CHECK(forged_resources.live_evaluation_bytes == preserved_live);
   forged_owner.value.vector.accounting_owner = valid_owner;
+  const std::optional<std::size_t> valid_ordinal =
+      forged_owner.value.vector.allocation_ordinal;
+  forged_owner.value.vector.allocation_ordinal =
+      std::numeric_limits<std::size_t>::max();
+  CHECK_FALSE(validate_value(forged_owner.value).ok);
+  CHECK_FALSE(release_vector_reservation(
+                  forged_resources, forged_owner.value)
+                  .ok);
+  CHECK(forged_owner.value.vector.integers.get() ==
+        preserved_storage);
+  CHECK(forged_resources.live_evaluation_bytes == preserved_live);
+  forged_owner.value.vector.allocation_ordinal = valid_ordinal;
+  ++forged_owner.value.vector.canonical_bytes;
+  CHECK_FALSE(validate_value(forged_owner.value).ok);
+  CHECK_FALSE(release_vector_reservation(
+                  forged_resources, forged_owner.value)
+                  .ok);
+  CHECK(forged_owner.value.vector.integers.get() ==
+        preserved_storage);
+  CHECK(forged_resources.live_evaluation_bytes == preserved_live);
+  --forged_owner.value.vector.canonical_bytes;
   CHECK(release_vector_reservation(forged_resources,
                                    forged_owner.value)
             .ok);

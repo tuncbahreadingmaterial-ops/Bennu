@@ -46,6 +46,31 @@ foreach(path IN LISTS active_files)
   endforeach()
 endforeach()
 
+file(READ
+  "${BENNU_SOURCE_DIR}/include/bennu/host_storage.hpp"
+  public_host_storage)
+foreach(private_semantic_surface IN ITEMS
+    "SemanticHostAllocationPurpose"
+    "SemanticHostAllocationRelease"
+    "bind_semantic_host_buffer"
+    "semantic_host_buffer_matches"
+    "consume_semantic_host_buffer"
+    "semantic_owner_token"
+    "semantic_canonical_bytes"
+    "semantic_allocation_ordinal"
+    "semantic_purpose"
+    "semantic_release"
+    "semantic_active")
+  string(FIND
+    "${public_host_storage}"
+    "${private_semantic_surface}"
+    private_semantic_at)
+  if(NOT private_semantic_at EQUAL -1)
+    message(FATAL_ERROR
+      "implementation-private semantic allocation authority is public: ${private_semantic_surface}")
+  endif()
+endforeach()
+
 foreach(removed IN ITEMS
     "src/evaluator.cpp"
     "src/c_emitter.cpp"
