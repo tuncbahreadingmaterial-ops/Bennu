@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -15,6 +16,7 @@
 #include <ostream>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -779,6 +781,144 @@ TEST_CASE("TUP-003-VALUES") {
   cross_kind_payload.integers.reset(cross_kind_storage);
   CHECK(release_value_reservations(invariant_resources, cross_kind.value).ok);
 
+  std::array<Value, 2U> aliased_vector_inputs{{
+      make_test_vector(invariant_resources, {1}),
+      make_test_vector(invariant_resources, {2}),
+  }};
+  std::int64_t *second_input_storage =
+      aliased_vector_inputs[1].vector.integers.release();
+  aliased_vector_inputs[1].vector.integers.reset(
+      aliased_vector_inputs[0].vector.integers.get());
+  const std::size_t alias_live_before =
+      invariant_resources.live_evaluation_bytes;
+  const TupleConstructionResult rejected_vector_alias =
+      make_tuple_value(invariant_resources, aliased_vector_inputs,
+                       tuple_location, "cross-input-vector-alias");
+  CHECK_FALSE(rejected_vector_alias.ok);
+  CHECK(rejected_vector_alias.invariant ==
+        ValueInvariant::aliased_vector_payload);
+  CHECK(aliased_vector_inputs[0].claimed);
+  CHECK(aliased_vector_inputs[1].claimed);
+  CHECK(invariant_resources.live_evaluation_bytes ==
+        alias_live_before);
+  (void)aliased_vector_inputs[1].vector.integers.release();
+  aliased_vector_inputs[1].vector.integers.reset(
+      second_input_storage);
+  CHECK(release_vector_reservation(invariant_resources,
+                                   aliased_vector_inputs[1])
+            .ok);
+  CHECK(release_vector_reservation(invariant_resources,
+                                   aliased_vector_inputs[0])
+            .ok);
+
+  std::array<Value, 1U> first_alias_child{{make_int_value(1)}};
+  std::array<Value, 1U> second_alias_child{{make_int_value(2)}};
+  TupleConstructionResult first_alias_tuple = make_tuple_value(
+      invariant_resources, first_alias_child, tuple_location,
+      "cross-input-table-alias");
+  TupleConstructionResult second_alias_tuple = make_tuple_value(
+      invariant_resources, second_alias_child, tuple_location,
+      "cross-input-table-alias");
+  REQUIRE(first_alias_tuple.ok);
+  REQUIRE(second_alias_tuple.ok);
+  std::byte *second_table_storage =
+      second_alias_tuple.value.tuple.root_reservation.storage.release();
+  second_alias_tuple.value.tuple.root_reservation.storage.reset(
+      first_alias_tuple.value.tuple.root_reservation.storage.get());
+  std::array<Value, 2U> aliased_table_inputs{{
+      move_value(first_alias_tuple.value),
+      move_value(second_alias_tuple.value),
+  }};
+  const TupleConstructionResult rejected_table_alias =
+      make_tuple_value(invariant_resources, aliased_table_inputs,
+                       tuple_location, "cross-input-table-alias");
+  CHECK_FALSE(rejected_table_alias.ok);
+  CHECK(aliased_table_inputs[0].claimed);
+  CHECK(aliased_table_inputs[1].claimed);
+  (void)aliased_table_inputs[1]
+      .tuple.root_reservation.storage.release();
+  aliased_table_inputs[1].tuple.root_reservation.storage.reset(
+      second_table_storage);
+  CHECK(release_value_reservations(invariant_resources,
+                                   aliased_table_inputs[1])
+            .ok);
+  CHECK(release_value_reservations(invariant_resources,
+                                   aliased_table_inputs[0])
+            .ok);
+
+  std::array<Value, 1U> first_metadata_child{{make_int_value(3)}};
+  std::array<Value, 1U> second_metadata_child{{make_int_value(4)}};
+  TupleConstructionResult first_metadata_tuple = make_tuple_value(
+      invariant_resources, first_metadata_child, tuple_location,
+      "cross-input-metadata-alias");
+  TupleConstructionResult second_metadata_tuple = make_tuple_value(
+      invariant_resources, second_metadata_child, tuple_location,
+      "cross-input-metadata-alias");
+  REQUIRE(first_metadata_tuple.ok);
+  REQUIRE(second_metadata_tuple.ok);
+  ValueNode *second_nodes =
+      second_metadata_tuple.value.tuple.nodes.storage.release();
+  second_metadata_tuple.value.tuple.nodes.storage.reset(
+      first_metadata_tuple.value.tuple.nodes.storage.get());
+  std::array<Value, 2U> aliased_metadata_inputs{{
+      move_value(first_metadata_tuple.value),
+      move_value(second_metadata_tuple.value),
+  }};
+  const TupleConstructionResult rejected_metadata_alias =
+      make_tuple_value(invariant_resources, aliased_metadata_inputs,
+                       tuple_location, "cross-input-metadata-alias");
+  CHECK_FALSE(rejected_metadata_alias.ok);
+  CHECK(aliased_metadata_inputs[0].claimed);
+  CHECK(aliased_metadata_inputs[1].claimed);
+  (void)aliased_metadata_inputs[1].tuple.nodes.storage.release();
+  aliased_metadata_inputs[1].tuple.nodes.storage.reset(second_nodes);
+  CHECK(release_value_reservations(invariant_resources,
+                                   aliased_metadata_inputs[1])
+            .ok);
+  CHECK(release_value_reservations(invariant_resources,
+                                   aliased_metadata_inputs[0])
+            .ok);
+
+  Value shrunk_vector =
+      make_test_vector(invariant_resources, {1, 2});
+  const std::size_t shrunk_vector_live =
+      invariant_resources.live_evaluation_bytes;
+  shrunk_vector.vector.integer_count = 1U;
+  shrunk_vector.vector.canonical_bytes = sizeof(std::int64_t);
+  const ValueReleaseResult shrunk_vector_release =
+      release_vector_reservation(invariant_resources, shrunk_vector);
+  CHECK_FALSE(shrunk_vector_release.ok);
+  CHECK(shrunk_vector_release.invariant ==
+        ValueInvariant::invalid_vector_payload_handle);
+  CHECK(invariant_resources.live_evaluation_bytes ==
+        shrunk_vector_live);
+  shrunk_vector.vector.integer_count = 2U;
+  shrunk_vector.vector.canonical_bytes = 2U * sizeof(std::int64_t);
+  CHECK(release_vector_reservation(invariant_resources,
+                                   shrunk_vector)
+            .ok);
+
+  TupleReservationResult shrunk_table = reserve_tuple_table(
+      invariant_resources, 2U, tuple_location, "shrunk-table");
+  REQUIRE(shrunk_table.ok);
+  const std::size_t shrunk_table_live =
+      invariant_resources.live_evaluation_bytes;
+  shrunk_table.reservation.element_count = 1U;
+  shrunk_table.reservation.canonical_bytes = 16U;
+  const ValueReleaseResult shrunk_table_release =
+      release_tuple_table(invariant_resources,
+                          shrunk_table.reservation);
+  CHECK_FALSE(shrunk_table_release.ok);
+  CHECK(shrunk_table_release.invariant ==
+        ValueInvariant::invalid_tuple_reservation_count);
+  CHECK(invariant_resources.live_evaluation_bytes ==
+        shrunk_table_live);
+  shrunk_table.reservation.element_count = 2U;
+  shrunk_table.reservation.canonical_bytes = 32U;
+  CHECK(release_tuple_table(invariant_resources,
+                            shrunk_table.reservation)
+            .ok);
+
   Value forged_vector = make_int_value(0);
   forged_vector.container = ContainerKind::vector;
   forged_vector.scalar =
@@ -810,6 +950,21 @@ TEST_CASE("TUP-003-VALUES") {
 }
 
 TEST_CASE("TUP-004-MOVE-CLEANUP") {
+  Value escaped_value = make_int_value(0);
+  {
+    EvaluationResources scoped_resources =
+        make_trusted_local_v2_resources(no_failure);
+    VectorAllocationResult scoped_vector = allocate_vector(
+        scoped_resources, ScalarType::integer, 1U, 0U,
+        tuple_location, "scoped-resource-owner");
+    REQUIRE(scoped_vector.ok);
+    REQUIRE(scoped_resources.state != nullptr);
+    CHECK(scoped_resources.state->reference_count.load(
+              std::memory_order_relaxed) == 2U);
+    escaped_value = move_value(scoped_vector.value);
+  }
+  CHECK(destroy_value(escaped_value).ok);
+
   EvaluationResources resources = make_bounded_v2_resources(
       v2_limits(16U, 64U, std::nullopt, 32U), no_failure);
 
@@ -1251,6 +1406,46 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   CHECK(moved.reservation_ordinal == 3U);
   CHECK(release_vector_reservation(moved, shared_first.value).ok);
   CHECK(release_vector_reservation(shared, shared_second.value).ok);
+
+  EvaluationResources shared_configuration =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources configuration_alias = shared_configuration;
+  configuration_alias.profile = ExecutionProfile::bounded_v2;
+  configuration_alias.limits.max_work_units = 5U;
+  CHECK(shared_configuration.profile ==
+        ExecutionProfile::bounded_v2);
+  CHECK(shared_configuration.limits.max_work_units ==
+        std::optional<std::size_t>{5U});
+  shared_configuration.creation_error =
+      HostResourceErrorReason::size_overflow;
+  CHECK(configuration_alias.creation_error ==
+        HostResourceErrorReason::size_overflow);
+
+  EvaluationResources concurrent =
+      make_bounded_v2_resources(
+          v2_limits(std::nullopt, std::nullopt, 8000U,
+                    std::nullopt),
+          no_failure);
+  std::atomic<std::size_t> concurrent_failures{0U};
+  std::array<std::thread, 8U> workers;
+  for (std::thread &worker : workers) {
+    worker = std::thread([&concurrent, &concurrent_failures]() {
+      for (std::size_t index = 0U; index < 1000U; ++index) {
+        const WorkChargeResult charged =
+            charge_work(concurrent, 1U, tuple_location,
+                        "concurrent-shared-work");
+        if (!charged.ok) {
+          (void)concurrent_failures.fetch_add(
+              1U, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  for (std::thread &worker : workers) {
+    worker.join();
+  }
+  CHECK(concurrent_failures.load(std::memory_order_relaxed) == 0U);
+  CHECK(concurrent.work_units == 8000U);
   EvaluationResources vector_overflow =
       make_trusted_local_v2_resources(no_failure);
   vector_overflow.reservation_ordinal = maximum;

@@ -544,6 +544,7 @@ ValueValidationResult validate_value(
     std::size_t parent_index;
     std::size_t child_offset;
   };
+  static_assert(std::is_trivially_destructible_v<ValidationWork>);
   HostArray<std::uint8_t> visited;
   HostArray<std::uint8_t> edge_owners;
   HostArray<std::size_t> parent_count;
@@ -674,8 +675,18 @@ ValueValidationResult validate_value(
     return result;
   };
 
-  allocated = host_array_push(
-      stack, ValidationWork{root_index, no_parent, 0U});
+  const auto push_validation_work =
+      [&stack](ValidationWork work) {
+        if (stack.storage == nullptr ||
+            stack.size >= stack.capacity) {
+          return HostResourceErrorReason::size_overflow;
+        }
+        std::construct_at(stack.storage.get() + stack.size, work);
+        ++stack.size;
+        return HostResourceErrorReason::none;
+      };
+  allocated = push_validation_work(
+      ValidationWork{root_index, no_parent, 0U});
   if (allocated != HostResourceErrorReason::none) {
     ValueValidationResult result{false, ValueInvariant::none};
     result.resource_error = allocated;
@@ -899,8 +910,7 @@ ValueValidationResult validate_value(
     }
     for (std::size_t offset = child_count; offset > 0U; --offset) {
       const std::size_t child_offset = offset - 1U;
-      const HostResourceErrorReason pushed = host_array_push(
-          stack,
+      const HostResourceErrorReason pushed = push_validation_work(
           ValidationWork{
               value.tuple.child_indexes.storage.get()[
                   first_child + child_offset],
@@ -1399,18 +1409,19 @@ ValueDestructionResult destroy_value(
   const auto release_vector_accounting = [](VectorValue &vector) {
     const void *storage = vector_storage_address(vector);
     if (vector.accounting_active && vector.accounting_owner != nullptr &&
-        vector.canonical_bytes <=
-            vector.accounting_owner->live_evaluation_bytes) {
-      vector.accounting_owner->live_evaluation_bytes -=
-          vector.canonical_bytes;
+        refund_resource_state_bytes(vector.accounting_owner,
+                                    vector.canonical_bytes)) {
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::vector_payload,
                        vector.allocation_ordinal, storage,
                        vector.canonical_bytes);
     }
+    EvaluationResourceState *accounting_owner =
+        vector.accounting_owner;
     vector.accounting_active = false;
     vector.accounting_owner = nullptr;
+    release_resource_state(accounting_owner);
     if (storage != nullptr) {
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::physical_release,
@@ -1426,18 +1437,19 @@ ValueDestructionResult destroy_value(
     const void *storage = reservation.storage.get();
     if (reservation.accounting_active &&
         reservation.accounting_owner != nullptr &&
-        reservation.canonical_bytes <=
-            reservation.accounting_owner->live_evaluation_bytes) {
-      reservation.accounting_owner->live_evaluation_bytes -=
-          reservation.canonical_bytes;
+        refund_resource_state_bytes(reservation.accounting_owner,
+                                    reservation.canonical_bytes)) {
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::tuple_table,
                        reservation.allocation_ordinal, storage,
                        reservation.canonical_bytes);
     }
+    EvaluationResourceState *accounting_owner =
+        reservation.accounting_owner;
     reservation.accounting_active = false;
     reservation.accounting_owner = nullptr;
+    release_resource_state(accounting_owner);
     if (storage != nullptr) {
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::physical_release,

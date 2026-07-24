@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <sys/resource.h>
@@ -290,26 +292,105 @@ int tuple_metadata_refusal() {
 }
 
 int resource_creation_refusal() {
-  if (!impose_address_limit(256U * 1024U)) {
+  constexpr std::size_t context_capacity = 65536U;
+  void *context_storage =
+      std::malloc(sizeof(bennu::EvaluationResources) *
+                  context_capacity);
+  if (context_storage == nullptr) {
     return 44;
   }
-  for (std::size_t index = 0U; index < 1024U * 1024U; ++index) {
+  if (!impose_address_limit(256U * 1024U)) {
+    std::free(context_storage);
+    return 44;
+  }
+  for (std::size_t index = 0U; index < 4096U; ++index) {
+    bennu::EvaluationResources resources =
+        bennu::make_trusted_local_v2_resources(
+            bennu::AllocationFailureInjection{std::nullopt});
+    if (resources.creation_error ==
+        bennu::HostResourceErrorReason::allocation_unavailable) {
+      std::free(context_storage);
+      return 45;
+    }
+  }
+  auto *contexts =
+      static_cast<bennu::EvaluationResources *>(context_storage);
+  std::size_t constructed = 0U;
+  for (; constructed < context_capacity; ++constructed) {
     bennu::EvaluationResources resources =
         bennu::make_trusted_local_v2_resources(
             bennu::AllocationFailureInjection{std::nullopt});
     if (resources.creation_error ==
         bennu::HostResourceErrorReason::allocation_unavailable) {
       const bennu::WorkChargeResult refused = bennu::charge_work(
-          resources, 1U, bennu::SourceLocation{}, "resource-create-refusal");
-      return !refused.ok &&
-                     refused.error.resource.has_value() &&
-                     refused.error.resource->reason ==
-                         bennu::ResourceErrorReason::allocation_unavailable
-                 ? 0
-                 : 45;
+          resources, 1U, bennu::SourceLocation{},
+          "resource-create-refusal");
+      const bool explicit_refusal =
+          !refused.ok && refused.error.resource.has_value() &&
+          refused.error.resource->reason ==
+              bennu::ResourceErrorReason::allocation_unavailable;
+      for (std::size_t index = constructed; index > 0U; --index) {
+        std::destroy_at(contexts + index - 1U);
+      }
+      std::free(context_storage);
+      return explicit_refusal ? 0 : 46;
     }
+    std::construct_at(contexts + constructed,
+                      std::move(resources));
   }
+  for (std::size_t index = constructed; index > 0U; --index) {
+    std::destroy_at(contexts + index - 1U);
+  }
+  std::free(context_storage);
   return 46;
+}
+
+int profile_and_coordinator_refusal() {
+  bennu::EvaluationResources v1 =
+      bennu::make_trusted_local_resources(
+          bennu::AllocationFailureInjection{std::nullopt});
+  bennu::EvaluationResources invalid =
+      bennu::make_trusted_local_v2_resources(
+          bennu::AllocationFailureInjection{std::nullopt});
+  bennu::EvaluationResources coordinator =
+      bennu::make_trusted_local_v2_resources(
+          bennu::AllocationFailureInjection{std::nullopt});
+  if (!impose_address_limit(64U * 1024U)) {
+    return 54;
+  }
+
+  std::array<bennu::Value, 0U> empty{};
+  const bennu::TupleConstructionResult unsupported =
+      bennu::make_tuple_value(v1, empty, bennu::SourceLocation{},
+                              "v1-profile-refusal");
+  if (unsupported.ok ||
+      unsupported.error.kind != bennu::ErrorKind::profile_error ||
+      !unsupported.error.profile.has_value() ||
+      unsupported.error.profile->profile_name != "trusted-local-v1") {
+    return 55;
+  }
+
+  invalid.profile = static_cast<bennu::ExecutionProfile>(999U);
+  const bennu::WorkChargeResult invalid_profile =
+      bennu::charge_work(invalid, 1U, bennu::SourceLocation{},
+                         "invalid-profile-refusal");
+  if (invalid_profile.ok ||
+      invalid_profile.error.kind !=
+          bennu::ErrorKind::invalid_execution_profile ||
+      invalid_profile.error.static_message.empty()) {
+    return 56;
+  }
+
+  const bennu::TupleConstructionResult null_executor =
+      bennu::execute_tuple_construction(
+          coordinator, empty, nullptr, nullptr,
+          bennu::SourceLocation{}, "null-coordinator");
+  return !null_executor.ok &&
+                 null_executor.error.kind ==
+                     bennu::ErrorKind::domain_error &&
+                 !null_executor.error.static_message.empty()
+             ? 0
+             : 57;
 }
 
 int malformed_pointer_refusal() {
@@ -446,7 +527,7 @@ int main(int argument_count, char **arguments) {
       std::strcmp(arguments[1], "--malformed-pointers") == 0) {
     return run_isolated(&malformed_pointer_refusal);
   }
-  constexpr std::array<RefusalCase, 14U> probes{{
+  constexpr std::array<RefusalCase, 15U> probes{{
       {"type validation", &type_validation_refusal},
       {"type construction", &type_construction_refusal},
       {"type equality", &type_equality_refusal},
@@ -459,6 +540,7 @@ int main(int argument_count, char **arguments) {
       {"value detach", &value_detach_refusal},
       {"tuple metadata", &tuple_metadata_refusal},
       {"resource creation", &resource_creation_refusal},
+      {"profile and coordinator", &profile_and_coordinator_refusal},
       {"malformed pointers", &malformed_pointer_refusal},
       {"nested construction cleanup", &nested_construction_cleanup_refusal},
   }};

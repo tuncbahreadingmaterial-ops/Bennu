@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <array>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -40,22 +41,39 @@ struct HostAllocationRecord {
   const void *element_type;
 };
 
-inline HostAllocationRecord *host_allocation_records{nullptr};
-inline std::mutex host_allocation_records_mutex{};
+constexpr std::size_t host_allocation_bucket_count = 4096U;
+
+struct HostAllocationBucket {
+  HostAllocationRecord *records{nullptr};
+  std::mutex mutex{};
+};
+
+inline std::array<HostAllocationBucket, host_allocation_bucket_count>
+    host_allocation_buckets{};
 
 template <typename Element>
 inline const std::byte host_element_type_identity{};
 
-inline void register_host_allocation(HostAllocationRecord &record) {
-  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-  record.next = host_allocation_records;
-  host_allocation_records = &record;
+inline std::size_t host_allocation_bucket_index(const void *payload) {
+  const std::uintptr_t address =
+      reinterpret_cast<std::uintptr_t>(payload);
+  return ((address >> 4U) ^ (address >> 17U)) &
+         (host_allocation_bucket_count - 1U);
 }
 
-inline HostAllocationRecord *find_host_allocation(
+inline void register_host_allocation(HostAllocationRecord &record) {
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(record.payload)];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  record.next = bucket.records;
+  bucket.records = &record;
+}
+
+inline HostAllocationRecord *find_host_allocation_unlocked(
+    HostAllocationBucket &bucket,
     const void *payload, HostAllocationPurpose purpose,
     const void *element_type) {
-  for (HostAllocationRecord *record = host_allocation_records;
+  for (HostAllocationRecord *record = bucket.records;
        record != nullptr; record = record->next) {
     if (record->payload == payload && record->purpose == purpose &&
         record->element_type == element_type) {
@@ -68,8 +86,10 @@ inline HostAllocationRecord *find_host_allocation(
 inline HostAllocationRecord *remove_host_allocation(
     const void *payload, HostAllocationPurpose purpose,
     const void *element_type) {
-  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-  HostAllocationRecord **link = &host_allocation_records;
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(payload)];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  HostAllocationRecord **link = &bucket.records;
   while (*link != nullptr) {
     HostAllocationRecord *record = *link;
     if (record->payload == payload && record->purpose == purpose &&
@@ -182,11 +202,14 @@ bool host_buffer_valid(const HostBufferStorage<Element> &storage,
   if (storage == nullptr) {
     return required_bytes == 0U;
   }
-  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-  const HostAllocationRecord *record = find_host_allocation(
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(storage.get())];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  const HostAllocationRecord *record = find_host_allocation_unlocked(
+      bucket,
       storage.get(), HostAllocationPurpose::buffer,
       &host_element_type_identity<Element>);
-  return record != nullptr && required_bytes <= record->byte_count;
+  return record != nullptr && required_bytes == record->byte_count;
 }
 
 inline HostResourceErrorReason
@@ -298,8 +321,12 @@ host_array_push(HostArray<Element> &array, Source &&source) {
   if (array.storage == nullptr || array.size >= array.capacity) {
     return HostResourceErrorReason::size_overflow;
   }
-  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-  HostAllocationRecord *record = find_host_allocation(
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(
+          array.storage.get())];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  HostAllocationRecord *record = find_host_allocation_unlocked(
+      bucket,
       array.storage.get(), HostAllocationPurpose::array,
       &host_element_type_identity<Element>);
   if (record == nullptr) {
@@ -329,27 +356,29 @@ host_array_fill(HostArray<Element> &array, std::size_t count,
                ? HostResourceErrorReason::none
                : HostResourceErrorReason::size_overflow;
   }
-  {
-    const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-    const HostAllocationRecord *record = find_host_allocation(
-        array.storage.get(), HostAllocationPurpose::array,
-        &host_element_type_identity<Element>);
-    if (record == nullptr) {
-      return HostResourceErrorReason::size_overflow;
-    }
-    const auto *header =
-        reinterpret_cast<const HostArrayHeader<Element> *>(record);
-    if (array.capacity != header->capacity ||
-        array.size > header->capacity ||
-        count > header->capacity - array.size) {
-      return HostResourceErrorReason::size_overflow;
-    }
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(
+          array.storage.get())];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  HostAllocationRecord *record = find_host_allocation_unlocked(
+      bucket, array.storage.get(), HostAllocationPurpose::array,
+      &host_element_type_identity<Element>);
+  if (record == nullptr) {
+    return HostResourceErrorReason::size_overflow;
+  }
+  auto *header =
+      reinterpret_cast<HostArrayHeader<Element> *>(record);
+  if (array.capacity != header->capacity ||
+      array.size > header->capacity ||
+      count > header->capacity - array.size) {
+    return HostResourceErrorReason::size_overflow;
   }
   for (std::size_t index = 0U; index < count; ++index) {
-    const HostResourceErrorReason pushed = host_array_push(array, value);
-    if (pushed != HostResourceErrorReason::none) {
-      return pushed;
-    }
+    std::construct_at(array.storage.get() + array.size, value);
+    ++array.size;
+  }
+  if (array.size > header->constructed) {
+    header->constructed = array.size;
   }
   return HostResourceErrorReason::none;
 }
@@ -359,8 +388,12 @@ bool host_array_metadata_valid(const HostArray<Element> &array) {
   if (array.storage == nullptr) {
     return array.size == 0U && array.capacity == 0U;
   }
-  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
-  const HostAllocationRecord *record = find_host_allocation(
+  HostAllocationBucket &bucket =
+      host_allocation_buckets[host_allocation_bucket_index(
+          array.storage.get())];
+  const std::lock_guard<std::mutex> lock(bucket.mutex);
+  const HostAllocationRecord *record = find_host_allocation_unlocked(
+      bucket,
       array.storage.get(), HostAllocationPurpose::array,
       &host_element_type_identity<Element>);
   if (record == nullptr) {

@@ -76,7 +76,7 @@ enum class ProfileErrorReason {
 
 struct ProfileErrorContext {
   ProfileErrorReason reason;
-  std::string profile_name;
+  std::string_view profile_name;
   TypeKind value_kind;
 };
 
@@ -192,6 +192,7 @@ struct Error {
   ErrorKind kind;
   SourceLocation location;
   std::string message;
+  std::string_view static_message{};
   std::optional<PrimitiveErrorContext> primitive{};
   std::optional<ArityErrorContext> arity{};
   std::optional<TypeErrorContext> type{};

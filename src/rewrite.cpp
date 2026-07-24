@@ -2625,7 +2625,7 @@ Error public_error_from_diagnostic(
           make_primitive_error_context(name, std::nullopt);
       error.message = "unknown primitive '" + name + "'";
     }
-    if (error.message.empty()) {
+    if (error.message.empty() && error.static_message.empty()) {
       error.message = semantic_error_message(error);
     }
     if (!error.primary_span.has_value()) {
