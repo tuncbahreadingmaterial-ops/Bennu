@@ -344,7 +344,7 @@ ValueValidationResult validate_value(
         return true;
       };
   const auto invalid = [](ValueInvariant invariant, std::size_t node_index,
-                          std::optional<std::size_t> edge_index = std::nullopt) {
+                          std::optional<std::size_t> edge_index) {
     ValueValidationResult result{false, invariant,
                                  ValueAccessError::invalid_value};
     result.node_index = node_index;
@@ -375,7 +375,7 @@ ValueValidationResult validate_value(
                                       std::size_t width) {
       if (count > std::numeric_limits<std::size_t>::max() / width) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+                       node_index, std::nullopt);
       }
       const std::size_t bytes = count * width;
       if (payload.canonical_bytes != bytes ||
@@ -395,7 +395,7 @@ ValueValidationResult validate_value(
                payload.allocation_ordinal,
                ResourceStorageKind::vector_payload))) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+                       node_index, std::nullopt);
       }
       return ValueValidationResult{true, ValueInvariant::none};
     };
@@ -405,15 +405,15 @@ ValueValidationResult validate_value(
           vector.doubles.get() != nullptr || vector.double_count != 0U ||
           (vector.boolean_count == 0U) !=
               (vector.booleans.get() == nullptr)) {
-        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+        return invalid(ValueInvariant::inactive_vector_payload, node_index, std::nullopt);
       }
       if (!host_buffer_valid(vector.booleans, vector.boolean_count)) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+                       node_index, std::nullopt);
       }
       for (std::size_t index = 0U; index < vector.boolean_count; ++index) {
         if (vector.booleans.get()[index] > 1U) {
-          return invalid(ValueInvariant::invalid_boolean_element, node_index);
+          return invalid(ValueInvariant::invalid_boolean_element, node_index, std::nullopt);
         }
       }
       return accounting_valid(vector, vector.boolean_count, 1U);
@@ -422,7 +422,7 @@ ValueValidationResult validate_value(
           vector.doubles.get() != nullptr || vector.double_count != 0U ||
           (vector.integer_count == 0U) !=
               (vector.integers.get() == nullptr)) {
-        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+        return invalid(ValueInvariant::inactive_vector_payload, node_index, std::nullopt);
       }
       if (vector.integer_count >
               std::numeric_limits<std::size_t>::max() /
@@ -431,7 +431,7 @@ ValueValidationResult validate_value(
               vector.integers,
               vector.integer_count * sizeof(std::int64_t))) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+                       node_index, std::nullopt);
       }
       return accounting_valid(vector, vector.integer_count,
                               sizeof(std::int64_t));
@@ -440,27 +440,27 @@ ValueValidationResult validate_value(
           vector.integers.get() != nullptr || vector.integer_count != 0U ||
           (vector.double_count == 0U) !=
               (vector.doubles.get() == nullptr)) {
-        return invalid(ValueInvariant::inactive_vector_payload, node_index);
+        return invalid(ValueInvariant::inactive_vector_payload, node_index, std::nullopt);
       }
       if (vector.double_count >
               std::numeric_limits<std::size_t>::max() / sizeof(double) ||
           !host_buffer_valid(vector.doubles,
                              vector.double_count * sizeof(double))) {
         return invalid(ValueInvariant::invalid_vector_payload_handle,
-                       node_index);
+                       node_index, std::nullopt);
       }
       for (std::size_t index = 0U; index < vector.double_count; ++index) {
         if (!is_canonical_double(vector.doubles.get()[index])) {
-          return invalid(ValueInvariant::noncanonical_nan, node_index);
+          return invalid(ValueInvariant::noncanonical_nan, node_index, std::nullopt);
         }
       }
       return accounting_valid(vector, vector.double_count, sizeof(double));
     }
-    return invalid(ValueInvariant::unknown_scalar_type, node_index);
+    return invalid(ValueInvariant::unknown_scalar_type, node_index, std::nullopt);
   };
 
   if (!value.claimed) {
-    return invalid(ValueInvariant::empty_owner, 0U);
+    return invalid(ValueInvariant::empty_owner, 0U, std::nullopt);
   }
   const bool tuple_arrays_valid =
       host_array_metadata_valid(value.tuple.nodes) &&
@@ -471,7 +471,7 @@ ValueValidationResult validate_value(
     return invalid(value.container == ContainerKind::tuple
                        ? ValueInvariant::invalid_value_root
                        : ValueInvariant::inactive_tuple_field,
-                   value.tuple.root_index);
+                   value.tuple.root_index, std::nullopt);
   }
   if (value.container == ContainerKind::scalar) {
     if (value.vector.element_type != ScalarType::boolean ||
@@ -487,47 +487,47 @@ ValueValidationResult validate_value(
         value.vector.allocation_ordinal.has_value() ||
         value.vector.lifetime_observer.context != nullptr ||
         value.vector.lifetime_observer.record != nullptr) {
-      return invalid(ValueInvariant::inactive_vector_payload, 0U);
+      return invalid(ValueInvariant::inactive_vector_payload, 0U, std::nullopt);
     }
     if (!tuple_fields_empty(value.tuple)) {
-      return invalid(ValueInvariant::inactive_tuple_field, 0U);
+      return invalid(ValueInvariant::inactive_tuple_field, 0U, std::nullopt);
     }
     const ValueValidationResult scalar_validation =
         validate_scalar(value.scalar);
     if (!scalar_validation.ok) {
-      return invalid(scalar_validation.invariant, 0U);
+      return invalid(scalar_validation.invariant, 0U, std::nullopt);
     }
     return ValueValidationResult{true, ValueInvariant::none};
   }
   if (value.container == ContainerKind::vector) {
     if (!is_empty_scalar(value.scalar)) {
-      return invalid(ValueInvariant::inactive_scalar_field, 0U);
+      return invalid(ValueInvariant::inactive_scalar_field, 0U, std::nullopt);
     }
     if (!tuple_fields_empty(value.tuple)) {
-      return invalid(ValueInvariant::inactive_tuple_field, 0U);
+      return invalid(ValueInvariant::inactive_tuple_field, 0U, std::nullopt);
     }
     return vector_validation(value.vector, 0U);
   }
   if (value.container != ContainerKind::tuple) {
-    return invalid(ValueInvariant::unknown_container, 0U);
+    return invalid(ValueInvariant::unknown_container, 0U, std::nullopt);
   }
 
   const std::size_t root_index = value.tuple.root_index;
   if (value.tuple.nodes.size ==
       std::numeric_limits<std::size_t>::max()) {
-    return invalid(ValueInvariant::invalid_value_root, root_index);
+    return invalid(ValueInvariant::invalid_value_root, root_index, std::nullopt);
   }
   const std::size_t node_count = value.tuple.nodes.size + 1U;
   if (root_index >= node_count) {
-    return invalid(ValueInvariant::invalid_value_root, root_index);
+    return invalid(ValueInvariant::invalid_value_root, root_index, std::nullopt);
   }
   if (root_index != node_count - 1U) {
-    return invalid(ValueInvariant::nonfinal_value_root, root_index);
+    return invalid(ValueInvariant::nonfinal_value_root, root_index, std::nullopt);
   }
 
   if (!is_empty_scalar(value.scalar)) {
     return invalid(ValueInvariant::inactive_scalar_field,
-                   value.tuple.root_index);
+                   value.tuple.root_index, std::nullopt);
   }
   if (value.vector.element_type != ScalarType::boolean ||
       value.vector.booleans.get() != nullptr ||
@@ -542,7 +542,7 @@ ValueValidationResult validate_value(
       value.vector.lifetime_observer.context != nullptr ||
       value.vector.lifetime_observer.record != nullptr) {
     return invalid(ValueInvariant::inactive_vector_payload,
-                   value.tuple.root_index);
+                   value.tuple.root_index, std::nullopt);
   }
 
   if (allocation_failure.max_container_elements.has_value()) {
@@ -669,8 +669,7 @@ ValueValidationResult validate_value(
 
   const auto invalid_at = [&](ValueInvariant invariant,
                               std::size_t node_index,
-                              std::optional<std::size_t> edge_index =
-                                  std::nullopt) {
+                              std::optional<std::size_t> edge_index) {
     ValueValidationResult result{
         false, invariant, ValueAccessError::invalid_value};
     result.node_index = node_index;
@@ -738,7 +737,7 @@ ValueValidationResult validate_value(
     path_parents.storage.get()[node_index] = work.parent_index;
     path_offsets.storage.get()[node_index] = work.child_offset;
     if (visited.storage.get()[node_index] != 0U) {
-      return invalid_at(ValueInvariant::aliased_tuple_child, node_index);
+      return invalid_at(ValueInvariant::aliased_tuple_child, node_index, std::nullopt);
     }
     visited.storage.get()[node_index] = 1U;
 
@@ -752,11 +751,11 @@ ValueValidationResult validate_value(
       if (node.first_child != 0U || node.child_count != 0U ||
           node.tuple_reservation_index != 0U ||
           node.vector_payload_index != 0U) {
-        return invalid_at(ValueInvariant::inactive_tuple_field, node_index);
+        return invalid_at(ValueInvariant::inactive_tuple_field, node_index, std::nullopt);
       }
       const ValueValidationResult scalar_validation = validate_scalar(node.scalar);
       if (!scalar_validation.ok) {
-        return invalid_at(scalar_validation.invariant, node_index);
+        return invalid_at(scalar_validation.invariant, node_index, std::nullopt);
       }
       continue;
     }
@@ -764,20 +763,20 @@ ValueValidationResult validate_value(
       const ValueNode &node =
           value.tuple.nodes.storage.get()[node_index];
       if (!is_empty_scalar(node.scalar)) {
-        return invalid_at(ValueInvariant::inactive_scalar_field, node_index);
+        return invalid_at(ValueInvariant::inactive_scalar_field, node_index, std::nullopt);
       }
       if (node.first_child != 0U || node.child_count != 0U ||
           node.tuple_reservation_index != 0U) {
-        return invalid_at(ValueInvariant::inactive_tuple_field, node_index);
+        return invalid_at(ValueInvariant::inactive_tuple_field, node_index, std::nullopt);
       }
       if (node.vector_payload_index >=
           value.tuple.vector_payloads.size) {
         return invalid_at(ValueInvariant::invalid_vector_payload_handle,
-                          node_index);
+                          node_index, std::nullopt);
       }
       if (payload_owners.storage.get()[node.vector_payload_index] != 0U) {
         return invalid_at(ValueInvariant::aliased_vector_payload,
-                          node_index);
+                          node_index, std::nullopt);
       }
       payload_owners.storage.get()[node.vector_payload_index] = 1U;
       const void *storage = vector_storage_address(
@@ -795,7 +794,7 @@ ValueValidationResult validate_value(
                   value.tuple.vector_payloads.storage.get()[payload_index]) ==
               storage) {
             return invalid_at(ValueInvariant::aliased_vector_payload,
-                              node_index);
+                              node_index, std::nullopt);
           }
         }
         for (std::size_t reservation_index = 0U;
@@ -811,7 +810,7 @@ ValueValidationResult validate_value(
                         reservation_index];
           if (reservation.storage.get() == storage) {
             return invalid_at(ValueInvariant::aliased_vector_payload,
-                              node_index);
+                              node_index, std::nullopt);
           }
         }
       }
@@ -821,24 +820,24 @@ ValueValidationResult validate_value(
                   node.vector_payload_index],
               node_index);
       if (!vector_result.ok) {
-        return invalid_at(vector_result.invariant, node_index);
+        return invalid_at(vector_result.invariant, node_index, std::nullopt);
       }
       continue;
     }
     if (container != ContainerKind::tuple) {
-      return invalid_at(ValueInvariant::unknown_container, node_index);
+      return invalid_at(ValueInvariant::unknown_container, node_index, std::nullopt);
     }
 
     const ScalarValue &scalar = root ? value.scalar
         : value.tuple.nodes.storage.get()[node_index].scalar;
     if (!is_empty_scalar(scalar)) {
-      return invalid_at(ValueInvariant::inactive_scalar_field, node_index);
+      return invalid_at(ValueInvariant::inactive_scalar_field, node_index, std::nullopt);
     }
     if (!root &&
         value.tuple.nodes.storage.get()[node_index]
                 .vector_payload_index != 0U) {
       return invalid_at(ValueInvariant::inactive_vector_payload,
-                        node_index);
+                        node_index, std::nullopt);
     }
     const std::size_t first_child =
         root ? value.tuple.first_child
@@ -883,11 +882,11 @@ ValueValidationResult validate_value(
                    .tuple_reservation_index;
     if (reservation_index > value.tuple.reservations.size) {
       return invalid_at(ValueInvariant::missing_tuple_reservation,
-                        node_index);
+                        node_index, std::nullopt);
     }
     if (reservation_owners.storage.get()[reservation_index] != 0U) {
       return invalid_at(ValueInvariant::aliased_tuple_reservation,
-                        node_index);
+                        node_index, std::nullopt);
     }
     reservation_owners.storage.get()[reservation_index] = 1U;
     const TupleTableReservation &reservation =
@@ -907,7 +906,7 @@ ValueValidationResult validate_value(
                 : value.tuple.reservations.storage.get()[prior_index];
         if (prior.storage.get() == reservation_storage) {
           return invalid_at(ValueInvariant::aliased_tuple_reservation,
-                            node_index);
+                            node_index, std::nullopt);
         }
       }
       for (std::size_t payload_index = 0U;
@@ -917,18 +916,18 @@ ValueValidationResult validate_value(
                 value.tuple.vector_payloads.storage.get()[payload_index]) ==
                 reservation_storage) {
           return invalid_at(ValueInvariant::aliased_tuple_reservation,
-                            node_index);
+                            node_index, std::nullopt);
         }
       }
     }
     if (child_count > std::numeric_limits<std::size_t>::max() / 16U) {
       return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
-                        node_index);
+                        node_index, std::nullopt);
     }
     const std::size_t expected_bytes = child_count * 16U;
     if (!host_buffer_valid(reservation.storage, expected_bytes)) {
       return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
-                        node_index);
+                        node_index, std::nullopt);
     }
     if (reservation.element_count != child_count ||
         reservation.canonical_bytes != expected_bytes ||
@@ -951,7 +950,7 @@ ValueValidationResult validate_value(
              reservation.allocation_ordinal,
              ResourceStorageKind::tuple_table))) {
       return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
-                        node_index);
+                        node_index, std::nullopt);
     }
     for (std::size_t offset = child_count; offset > 0U; --offset) {
       const std::size_t child_offset = offset - 1U;
@@ -970,7 +969,7 @@ ValueValidationResult validate_value(
 
   for (std::size_t index = 0U; index < visited.size; ++index) {
     if (visited.storage.get()[index] == 0U) {
-      return invalid_at(ValueInvariant::orphan_value_node, index);
+      return invalid_at(ValueInvariant::orphan_value_node, index, std::nullopt);
     }
   }
   for (std::size_t index = 0U; index < edge_owners.size; ++index) {
@@ -982,13 +981,13 @@ ValueValidationResult validate_value(
   for (std::size_t index = 0U; index < payload_owners.size; ++index) {
     if (payload_owners.storage.get()[index] == 0U) {
       return invalid_at(ValueInvariant::orphan_vector_payload_handle,
-                        root_index);
+                        root_index, std::nullopt);
     }
   }
   for (std::size_t index = 0U; index < reservation_owners.size; ++index) {
     if (reservation_owners.storage.get()[index] == 0U) {
       return invalid_at(ValueInvariant::orphan_tuple_reservation,
-                        root_index);
+                        root_index, std::nullopt);
     }
   }
   return ValueValidationResult{true, ValueInvariant::none};

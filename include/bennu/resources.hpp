@@ -185,8 +185,9 @@ ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
 ValueReleaseResult release_vector_reservation(
     EvaluationResources &resources, Value &value,
     HostAllocationFailureInjection &allocation_failure);
-void release_workspace(EvaluationResources &resources,
-                       WorkspaceReservation &reservation);
+ValueReleaseResult release_workspace(
+    EvaluationResources &resources,
+    WorkspaceReservation &reservation);
 ValueReleaseResult release_value_reservations(EvaluationResources &resources,
                                               Value &value);
 ValueReleaseResult release_value_reservations(

@@ -823,26 +823,20 @@ Error make_unsupported_tuple_profile(
     error.primitive =
         make_primitive_error_context(producer_name, std::nullopt);
   }
-  EvaluationResourceState *state =
-      acquire_validated_resource_state(resources);
-  ResourceStatePin state_pin = pin_resource_state(state);
   error.profile = ProfileErrorContext{
       ProfileErrorReason::unsupported_value_kind,
-      state == nullptr ? std::string_view{}
-                       : execution_profile_name(state->profile),
+      execution_profile_name(resources.profile),
       TypeKind::tuple};
   return error;
 }
 
 std::optional<Error>
-validate_profile_configuration(const EvaluationResources &resources,
-                               SourceLocation location,
-                               std::string_view producer_name) {
-  EvaluationResourceState *state =
-      acquire_validated_resource_state(resources);
-  ResourceStatePin state_pin = pin_resource_state(state);
+validate_profile_configuration_locked(
+    const EvaluationResources &resources,
+    const EvaluationResourceState *state, SourceLocation location,
+    std::string_view producer_name) {
   if (state == nullptr ||
-      state->creation_error != HostResourceErrorReason::none) {
+      resources.creation_error != HostResourceErrorReason::none) {
     return make_resource_failure(
         resources,
         ResourceErrorReason::allocation_unavailable, location,
@@ -896,6 +890,24 @@ validate_profile_configuration(const EvaluationResources &resources,
         make_primitive_error_context(producer_name, std::nullopt);
   }
   return error;
+}
+
+std::optional<Error> validate_tuple_profile_locked(
+    const EvaluationResources &resources,
+    const EvaluationResourceState *state, SourceLocation location,
+    std::string_view producer_name) {
+  std::optional<Error> configuration_error =
+      validate_profile_configuration_locked(
+          resources, state, location, producer_name);
+  if (configuration_error.has_value()) {
+    return configuration_error;
+  }
+  if (resources.profile == ExecutionProfile::trusted_local_v1 ||
+      resources.profile == ExecutionProfile::bounded_v1) {
+    return make_unsupported_tuple_profile(
+        resources, location, producer_name);
+  }
+  return std::nullopt;
 }
 
 struct AdmissionResult {
@@ -1215,7 +1227,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
       begin_resource_record_sync(record_sync, resources,
                                  resource_state);
   std::optional<Error> profile_error =
-      validate_profile_configuration(resources, location, producer_name);
+      validate_profile_configuration_locked(
+          resources, resource_state, location, producer_name);
   if (profile_error.has_value()) {
     return allocation_failure(make_int_value(0), std::move(*profile_error));
   }
@@ -1407,7 +1420,8 @@ WorkspaceReservationResult reserve_workspace(
       begin_resource_record_sync(record_sync, resources,
                                  resource_state);
   std::optional<Error> profile_error =
-      validate_profile_configuration(resources, location, producer_name);
+      validate_profile_configuration_locked(
+          resources, resource_state, location, producer_name);
   if (profile_error.has_value()) {
     return WorkspaceReservationResult{false, empty_workspace(),
                                       std::move(*profile_error)};
@@ -1494,7 +1508,8 @@ WorkChargeResult charge_work(EvaluationResources &resources,
       begin_resource_record_sync(record_sync, resources,
                                  resource_state);
   std::optional<Error> profile_error =
-      validate_profile_configuration(resources, location, producer_name);
+      validate_profile_configuration_locked(
+          resources, resource_state, location, producer_name);
   if (profile_error.has_value()) {
     return WorkChargeResult{false, std::move(*profile_error)};
   }
@@ -1508,32 +1523,18 @@ WorkChargeResult charge_work(EvaluationResources &resources,
   return WorkChargeResult{true, no_error()};
 }
 
-TupleReservationResult reserve_tuple_table(
+namespace {
+
+TupleReservationResult reserve_tuple_table_locked(
     EvaluationResources &resources, std::size_t element_count,
-    SourceLocation location, std::string_view producer_name) {
-  EvaluationResourceState *resource_state =
-      acquire_validated_resource_state(resources);
-  ResourceStatePin resource_pin = pin_resource_state(resource_state);
-  std::unique_lock<std::mutex> transaction;
-  if (resource_state != nullptr) {
-    transaction =
-        std::unique_lock<std::mutex>(resource_state->transaction_mutex);
-  }
-  ResourceRecordSync record_sync{};
-  ResourceRecordSyncGuard record_sync_guard =
-      begin_resource_record_sync(record_sync, resources,
-                                 resource_state);
+    SourceLocation location, std::string_view producer_name,
+    EvaluationResourceState *resource_state) {
   std::optional<Error> profile_error =
-      validate_profile_configuration(resources, location, producer_name);
+      validate_tuple_profile_locked(
+          resources, resource_state, location, producer_name);
   if (profile_error.has_value()) {
     return TupleReservationResult{false, TupleTableReservation{},
                                   std::move(*profile_error)};
-  }
-  if (resources.profile == ExecutionProfile::trusted_local_v1 ||
-      resources.profile == ExecutionProfile::bounded_v1) {
-    return TupleReservationResult{
-        false, TupleTableReservation{},
-        make_unsupported_tuple_profile(resources, location, producer_name)};
   }
 
   constexpr std::size_t tuple_element_slot_bytes = 16U;
@@ -1629,19 +1630,51 @@ TupleReservationResult reserve_tuple_table(
   reservation.accounting_owner = resources.owner;
   reservation.allocation_ordinal = ordinal;
   reservation.lifetime_observer = resources.lifetime_observer;
+  return TupleReservationResult{true, std::move(reservation), no_error()};
+}
+
+void observe_tuple_admission(
+    const TupleTableReservation &reservation) {
+  if (reservation.canonical_bytes == 0U) {
+    return;
+  }
+  observe_lifetime(
+      reservation.lifetime_observer,
+      ResourceLifetimeEventKind::admitted,
+      ResourceStorageKind::tuple_table,
+      reservation.allocation_ordinal, reservation.storage.get(),
+      reservation.canonical_bytes);
+}
+
+} // namespace
+
+TupleReservationResult reserve_tuple_table(
+    EvaluationResources &resources, std::size_t element_count,
+    SourceLocation location, std::string_view producer_name) {
+  EvaluationResourceState *resource_state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
+  std::unique_lock<std::mutex> transaction;
+  if (resource_state != nullptr) {
+    transaction =
+        std::unique_lock<std::mutex>(resource_state->transaction_mutex);
+  }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
+  TupleReservationResult result = reserve_tuple_table_locked(
+      resources, element_count, location, producer_name,
+      resource_state);
+  if (!result.ok) {
+    return result;
+  }
   finish_resource_record_sync(&record_sync);
-  const bool relock_after_observer = transaction.owns_lock();
-  if (relock_after_observer) {
+  if (transaction.owns_lock()) {
     transaction.unlock();
   }
-  observe_lifetime(resources.lifetime_observer,
-                   ResourceLifetimeEventKind::admitted,
-                   ResourceStorageKind::tuple_table, ordinal,
-                   reservation.storage.get(), byte_count);
-  if (relock_after_observer) {
-    transaction.lock();
-  }
-  return TupleReservationResult{true, std::move(reservation), no_error()};
+  observe_tuple_admission(result.reservation);
+  return result;
 }
 
 ValueReleaseResult release_tuple_table(
@@ -1767,19 +1800,25 @@ TupleConstructionResult make_tuple_value(
     EvaluationResources &resources, std::span<Value> elements,
     SourceLocation location, std::string_view producer_name,
     HostAllocationFailureInjection &allocation_failure) {
-  std::optional<Error> configuration_error =
-      validate_profile_configuration(resources, location, producer_name);
-  if (configuration_error.has_value()) {
-    return TupleConstructionResult{false, make_int_value(0),
-                                   ValueInvariant::none,
-                                   std::move(*configuration_error)};
+  EvaluationResourceState *resource_state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
+  std::unique_lock<std::mutex> transaction;
+  if (resource_state != nullptr) {
+    transaction =
+        std::unique_lock<std::mutex>(resource_state->transaction_mutex);
   }
-  if (resources.profile == ExecutionProfile::trusted_local_v1 ||
-      resources.profile == ExecutionProfile::bounded_v1) {
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
+  std::optional<Error> profile_error =
+      validate_tuple_profile_locked(
+          resources, resource_state, location, producer_name);
+  if (profile_error.has_value()) {
     return TupleConstructionResult{false, make_int_value(0),
                                    ValueInvariant::none,
-                                   make_unsupported_tuple_profile(
-                                       resources, location, producer_name)};
+                                   std::move(*profile_error)};
   }
 
   std::size_t node_count = elements.size();
@@ -1844,13 +1883,19 @@ TupleConstructionResult make_tuple_value(
     reservation_count += element.tuple.reservations.size + 1U;
   }
 
-  TupleReservationResult reserved = reserve_tuple_table(
-      resources, elements.size(), location, producer_name);
+  TupleReservationResult reserved = reserve_tuple_table_locked(
+      resources, elements.size(), location, producer_name,
+      resource_state);
   if (!reserved.ok) {
     return TupleConstructionResult{false, make_int_value(0),
                                    ValueInvariant::none,
                                    std::move(reserved.error)};
   }
+  finish_resource_record_sync(&record_sync);
+  if (transaction.owns_lock()) {
+    transaction.unlock();
+  }
+  observe_tuple_admission(reserved.reservation);
 
   const std::size_t reserved_bytes =
       reserved.reservation.canonical_bytes;
@@ -2045,6 +2090,31 @@ TupleConstructionResult execute_tuple_construction(
     EvaluationResources &resources, std::span<Value> element_storage,
     TupleElementExecutor execute_element, void *execution_context,
     SourceLocation location, std::string_view producer_name) {
+  {
+    EvaluationResourceState *resource_state =
+        acquire_validated_resource_state(resources);
+    ResourceStatePin resource_pin =
+        pin_resource_state(resource_state);
+    std::unique_lock<std::mutex> transaction;
+    if (resource_state != nullptr) {
+      transaction =
+          std::unique_lock<std::mutex>(
+              resource_state->transaction_mutex);
+    }
+    ResourceRecordSync record_sync{};
+    ResourceRecordSyncGuard record_sync_guard =
+        begin_resource_record_sync(
+            record_sync, resources, resource_state);
+    std::optional<Error> profile_error =
+        validate_tuple_profile_locked(
+            resources, resource_state, location, producer_name);
+    if (profile_error.has_value()) {
+      return TupleConstructionResult{
+          false, make_int_value(0), ValueInvariant::none,
+          std::move(*profile_error)};
+    }
+  }
+
   const auto release_completed = [&resources, &element_storage](
                                      std::size_t completed_count) {
     for (std::size_t offset = completed_count; offset > 0U; --offset) {
@@ -2263,13 +2333,35 @@ ValueReleaseResult release_vector_reservation(
   return ValueReleaseResult{true, ValueInvariant::none};
 }
 
-void release_workspace(EvaluationResources &resources,
-                       WorkspaceReservation &reservation) {
+ValueReleaseResult release_workspace(
+    EvaluationResources &resources,
+    WorkspaceReservation &reservation) {
+  const bool empty_shape =
+      reservation.bytes == 0U &&
+      reservation.storage == nullptr &&
+      reservation.accounting_owner.token == 0U &&
+      !reservation.allocation_ordinal.has_value();
+  if (reservation.bytes == 0U) {
+    return ValueReleaseResult{empty_shape, ValueInvariant::none,
+                              empty_shape
+                                  ? ValueReleaseError::none
+                                  : ValueReleaseError::
+                                        resource_context_mismatch};
+  }
+  if (reservation.storage == nullptr ||
+      reservation.accounting_owner.token == 0U ||
+      !reservation.allocation_ordinal.has_value()) {
+    return ValueReleaseResult{
+        false, ValueInvariant::none,
+        ValueReleaseError::resource_context_mismatch};
+  }
   EvaluationResourceState *resource_state =
       acquire_validated_resource_state(resources);
   ResourceStatePin resource_pin = pin_resource_state(resource_state);
   if (resource_state == nullptr) {
-    return;
+    return ValueReleaseResult{
+        false, ValueInvariant::none,
+        ValueReleaseError::resource_context_mismatch};
   }
   std::unique_lock<std::mutex> transaction;
   if (resource_state != nullptr) {
@@ -2280,25 +2372,26 @@ void release_workspace(EvaluationResources &resources,
   ResourceRecordSyncGuard record_sync_guard =
       begin_resource_record_sync(record_sync, resources,
                                  resource_state);
-  if (reservation.bytes != 0U &&
-      (!same_owner(reservation.accounting_owner, resources.owner) ||
-       !consume_allocation_binding(
-           reservation.storage.get(),
-           reservation.accounting_owner, reservation.bytes,
-           reservation.allocation_ordinal,
-           AllocationPurpose::workspace))) {
-    return;
+  if (!same_owner(reservation.accounting_owner, resources.owner) ||
+      reservation.bytes > resources.live_evaluation_bytes ||
+      !consume_allocation_binding(
+          reservation.storage.get(),
+          reservation.accounting_owner, reservation.bytes,
+          reservation.allocation_ordinal,
+          AllocationPurpose::workspace)) {
+    return ValueReleaseResult{
+        false, ValueInvariant::none,
+        ValueReleaseError::resource_context_mismatch};
   }
-  if (reservation.bytes <= resources.live_evaluation_bytes) {
-    resources.live_evaluation_bytes -= reservation.bytes;
-  }
+  resources.live_evaluation_bytes -= reservation.bytes;
   const EvaluationResourceOwner accounting_owner =
       reservation.accounting_owner;
   reservation.accounting_owner = EvaluationResourceOwner{};
   reservation.allocation_ordinal = std::nullopt;
   detail::release_resource_state_owner(accounting_owner);
   reservation.storage.reset();
-  reservation.bytes = 0;
+  reservation.bytes = 0U;
+  return ValueReleaseResult{true, ValueInvariant::none};
 }
 
 ValueReleaseResult release_value_reservations(EvaluationResources &resources,

@@ -1321,6 +1321,163 @@ TEST_CASE("TUP-006-PROFILE-IDENTITY") {
   CHECK(bounded_v1.reservation_ordinal == 0U);
   CHECK(bounded_v1.live_evaluation_bytes == 0U);
 
+  EvaluationResources authoritative_v1 =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources stale_v2_make = authoritative_v1;
+  EvaluationResources stale_v2_execute = authoritative_v1;
+  authoritative_v1.profile = ExecutionProfile::trusted_local_v1;
+  REQUIRE(update_evaluation_resource_configuration(
+              authoritative_v1) ==
+          EvaluationResourceConfigurationUpdate::updated);
+  Value malformed_child = make_int_value(0);
+  REQUIRE(destroy_value(malformed_child).ok);
+  std::array<Value, 1> malformed_children{{
+      std::move(malformed_child),
+  }};
+  const TupleConstructionResult authoritative_make_refusal =
+      make_tuple_value(
+          stale_v2_make, malformed_children, tuple_location,
+          "authoritative-v1-before-validation");
+  CHECK_FALSE(authoritative_make_refusal.ok);
+  CHECK(authoritative_make_refusal.error.kind ==
+        ErrorKind::profile_error);
+  REQUIRE(authoritative_make_refusal.error.profile.has_value());
+  CHECK(authoritative_make_refusal.error.profile->profile_name ==
+        "trusted-local-v1");
+  CHECK(authoritative_make_refusal.invariant == ValueInvariant::none);
+  CHECK_FALSE(malformed_children[0].claimed);
+  CHECK(stale_v2_make.profile ==
+        ExecutionProfile::trusted_local_v1);
+
+  ConstructionProbe refused_execution_probe;
+  Value malformed_scratch_value = make_int_value(0);
+  REQUIRE(destroy_value(malformed_scratch_value).ok);
+  std::array<Value, 1> malformed_execution_scratch{{
+      std::move(malformed_scratch_value),
+  }};
+  const TupleConstructionResult authoritative_execution_refusal =
+      execute_tuple_construction(
+          stale_v2_execute, malformed_execution_scratch,
+          &execute_construction_element, &refused_execution_probe,
+          tuple_location, "authoritative-v1-before-execution");
+  CHECK_FALSE(authoritative_execution_refusal.ok);
+  CHECK(authoritative_execution_refusal.error.kind ==
+        ErrorKind::profile_error);
+  CHECK(refused_execution_probe.execution_order.empty());
+  CHECK_FALSE(malformed_execution_scratch[0].claimed);
+  CHECK(stale_v2_execute.profile ==
+        ExecutionProfile::trusted_local_v1);
+
+  EvaluationResources authoritative_v2 =
+      make_trusted_local_resources(no_failure);
+  EvaluationResources stale_v1_make = authoritative_v2;
+  EvaluationResources stale_v1_execute = authoritative_v2;
+  authoritative_v2.profile = ExecutionProfile::trusted_local_v2;
+  REQUIRE(update_evaluation_resource_configuration(
+              authoritative_v2) ==
+          EvaluationResourceConfigurationUpdate::updated);
+  std::array<Value, 1> refreshed_children{{
+      make_int_value(7),
+  }};
+  TupleConstructionResult refreshed_make = make_tuple_value(
+      stale_v1_make, refreshed_children, tuple_location,
+      "authoritative-v2-before-validation");
+  REQUIRE(refreshed_make.ok);
+  CHECK(stale_v1_make.profile ==
+        ExecutionProfile::trusted_local_v2);
+  CHECK(release_value_reservations(
+            stale_v1_make, refreshed_make.value)
+            .ok);
+
+  ConstructionProbe refreshed_execution_probe;
+  std::array<Value, 1> refreshed_execution_scratch{{
+      make_int_value(0),
+  }};
+  TupleConstructionResult refreshed_execution =
+      execute_tuple_construction(
+          stale_v1_execute, refreshed_execution_scratch,
+          &execute_construction_element,
+          &refreshed_execution_probe, tuple_location,
+          "authoritative-v2-before-execution");
+  REQUIRE(refreshed_execution.ok);
+  CHECK(refreshed_execution_probe.execution_order ==
+        std::vector<std::size_t>{0U});
+  CHECK(stale_v1_execute.profile ==
+        ExecutionProfile::trusted_local_v2);
+  CHECK(release_value_reservations(
+            stale_v1_execute, refreshed_execution.value)
+            .ok);
+
+  EvaluationResources concurrent_authority =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources concurrent_writer = concurrent_authority;
+  EvaluationResources concurrent_reader = concurrent_authority;
+  std::atomic<bool> concurrent_start{false};
+  std::atomic<std::size_t> concurrent_profile_failures{0U};
+  std::atomic<std::size_t> concurrent_profile_results{0U};
+  constexpr std::size_t concurrent_profile_iterations = 500U;
+  std::thread profile_writer(
+      [&concurrent_writer, &concurrent_start,
+       &concurrent_profile_failures]() {
+        while (!concurrent_start.load(
+            std::memory_order_acquire)) {
+        }
+        for (std::size_t index = 0U;
+             index < concurrent_profile_iterations; ++index) {
+          concurrent_writer.profile =
+              (index & 1U) == 0U
+                  ? ExecutionProfile::trusted_local_v1
+                  : ExecutionProfile::trusted_local_v2;
+          if (update_evaluation_resource_configuration(
+                  concurrent_writer) !=
+              EvaluationResourceConfigurationUpdate::updated) {
+            (void)concurrent_profile_failures.fetch_add(
+                1U, std::memory_order_relaxed);
+          }
+        }
+      });
+  std::thread profile_reader(
+      [&concurrent_reader, &concurrent_start,
+       &concurrent_profile_failures,
+       &concurrent_profile_results]() {
+        concurrent_start.store(true, std::memory_order_release);
+        for (std::size_t index = 0U;
+             index < concurrent_profile_iterations; ++index) {
+          std::array<Value, 1> child{{
+              make_int_value(
+                  static_cast<std::int64_t>(index)),
+          }};
+          TupleConstructionResult tuple = make_tuple_value(
+              concurrent_reader, child, tuple_location,
+              "concurrent-profile-snapshot");
+          if (tuple.ok) {
+            if (!release_value_reservations(
+                     concurrent_reader, tuple.value)
+                     .ok) {
+              (void)concurrent_profile_failures.fetch_add(
+                  1U, std::memory_order_relaxed);
+            }
+          } else if (
+              tuple.error.kind != ErrorKind::profile_error ||
+              !tuple.error.profile.has_value() ||
+              tuple.error.profile->reason !=
+                  ProfileErrorReason::unsupported_value_kind ||
+              !child[0].claimed) {
+            (void)concurrent_profile_failures.fetch_add(
+                1U, std::memory_order_relaxed);
+          }
+          (void)concurrent_profile_results.fetch_add(
+              1U, std::memory_order_relaxed);
+        }
+      });
+  profile_writer.join();
+  profile_reader.join();
+  CHECK(concurrent_profile_failures.load(
+            std::memory_order_relaxed) == 0U);
+  CHECK(concurrent_profile_results.load(
+            std::memory_order_relaxed) ==
+        concurrent_profile_iterations);
+
   EvaluationResources bounded_without_limits = make_bounded_v2_resources(
       v2_limits(std::nullopt, std::nullopt, std::nullopt, std::nullopt),
       no_failure);
@@ -1635,8 +1792,55 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   CHECK(tuple_child[0].claimed);
 
   release_vector_reservation(resources, vector.value);
-  release_workspace(resources, workspace.reservation);
+  CHECK(release_workspace(resources, workspace.reservation).ok);
   CHECK(resources.live_evaluation_bytes == 0U);
+
+  EvaluationResources workspace_authentication =
+      make_trusted_local_v2_resources(no_failure);
+  TupleReservationResult tuple_storage = reserve_tuple_table(
+      workspace_authentication, 1U, tuple_location,
+      "workspace-authentication-source");
+  REQUIRE(tuple_storage.ok);
+  WorkspaceReservation malformed_zero_workspace{
+      std::move(tuple_storage.reservation.storage), 0U,
+      tuple_storage.reservation.accounting_owner,
+      tuple_storage.reservation.allocation_ordinal};
+  const EvaluationResourceOwner malformed_owner =
+      malformed_zero_workspace.accounting_owner;
+  const std::optional<std::size_t> malformed_ordinal =
+      malformed_zero_workspace.allocation_ordinal;
+  const ValueReleaseResult malformed_workspace_release =
+      release_workspace(
+          workspace_authentication, malformed_zero_workspace);
+  CHECK_FALSE(malformed_workspace_release.ok);
+  CHECK(malformed_workspace_release.error ==
+        ValueReleaseError::resource_context_mismatch);
+  CHECK(malformed_zero_workspace.storage != nullptr);
+  CHECK(malformed_zero_workspace.accounting_owner.token ==
+        malformed_owner.token);
+  CHECK(malformed_zero_workspace.allocation_ordinal ==
+        malformed_ordinal);
+  CHECK(workspace_authentication.live_evaluation_bytes == 16U);
+  tuple_storage.reservation.storage =
+      std::move(malformed_zero_workspace.storage);
+  malformed_zero_workspace.accounting_owner =
+      EvaluationResourceOwner{};
+  malformed_zero_workspace.allocation_ordinal = std::nullopt;
+  CHECK(release_tuple_table(
+            workspace_authentication,
+            tuple_storage.reservation)
+            .ok);
+  CHECK(workspace_authentication.live_evaluation_bytes == 0U);
+
+  WorkspaceReservationResult empty_workspace_result =
+      reserve_workspace(
+          workspace_authentication, 0U, 0U, tuple_location,
+          "exact-empty-workspace");
+  REQUIRE(empty_workspace_result.ok);
+  CHECK(release_workspace(
+            workspace_authentication,
+            empty_workspace_result.reservation)
+            .ok);
 
   for (std::size_t failed_ordinal = 0U; failed_ordinal < 3U;
        ++failed_ordinal) {
