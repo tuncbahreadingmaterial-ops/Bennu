@@ -48,8 +48,6 @@ struct EvaluationResources {
                       std::size_t reservation_ordinal);
   EvaluationResources(const EvaluationResources &other);
   EvaluationResources(EvaluationResources &&other) noexcept;
-  EvaluationResources &operator=(const EvaluationResources &other) = delete;
-  EvaluationResources &operator=(EvaluationResources &&other) = delete;
 };
 
 using WorkspaceStorage =
