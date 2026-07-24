@@ -180,6 +180,11 @@ TupleConstructionResult execute_tuple_construction(
     EvaluationResources &resources, std::span<Value> element_storage,
     TupleElementExecutor execute_element, void *execution_context,
     SourceLocation location, std::string_view producer_name);
+TupleConstructionResult execute_tuple_construction(
+    EvaluationResources &resources, std::span<Value> element_storage,
+    TupleElementExecutor execute_element, void *execution_context,
+    SourceLocation location, std::string_view producer_name,
+    HostAllocationFailureInjection &allocation_failure);
 ValueReleaseResult release_vector_reservation(EvaluationResources &resources,
                                               Value &value);
 ValueReleaseResult release_vector_reservation(

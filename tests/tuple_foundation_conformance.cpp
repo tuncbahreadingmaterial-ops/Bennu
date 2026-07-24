@@ -219,6 +219,65 @@ void release_context_from_observer(
   }
 }
 
+struct ConcurrentProfileTransitionProbe {
+  EvaluationResources *writer;
+  EvaluationResources *operation_resources;
+  std::atomic<bool> requested{false};
+  std::atomic<bool> completed{false};
+  std::atomic<EvaluationResourceConfigurationUpdate> result{
+      EvaluationResourceConfigurationUpdate::invalid_resource};
+  bool release_operation_resources{false};
+};
+
+void wait_for_profile_transition(
+    ConcurrentProfileTransitionProbe &probe) {
+  probe.requested.store(true, std::memory_order_release);
+  while (!probe.completed.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  if (probe.release_operation_resources) {
+    release_evaluation_resources(*probe.operation_resources);
+  }
+}
+
+void update_profile_after_request(
+    ConcurrentProfileTransitionProbe &probe) {
+  while (!probe.requested.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  probe.writer->profile = ExecutionProfile::bounded_v2;
+  probe.writer->limits =
+      v2_limits(std::nullopt, std::nullopt, 1024U, 1024U);
+  probe.result.store(
+      update_evaluation_resource_configuration(*probe.writer),
+      std::memory_order_relaxed);
+  probe.completed.store(true, std::memory_order_release);
+}
+
+void transition_profile_from_observer(
+    void *context, ResourceLifetimeEvent event) {
+  if (event.kind != ResourceLifetimeEventKind::admitted ||
+      event.storage_kind != ResourceStorageKind::tuple_table) {
+    return;
+  }
+  wait_for_profile_transition(
+      *static_cast<ConcurrentProfileTransitionProbe *>(context));
+}
+
+struct ProducedProfileFailureProbe {
+  ConcurrentProfileTransitionProbe *transition;
+  Value produced;
+};
+
+TupleElementExecutionResult execute_profile_failure_element(
+    void *context, EvaluationResources &, std::size_t) {
+  auto &probe = *static_cast<ProducedProfileFailureProbe *>(context);
+  wait_for_profile_transition(*probe.transition);
+  return TupleElementExecutionResult{
+      true, move_value(probe.produced),
+      make_error(ErrorKind::none, tuple_location)};
+}
+
 struct ReducedStackProbe {
   bool construction_ok{false};
   bool validation_ok{false};
@@ -1530,6 +1589,158 @@ TEST_CASE("TUP-006-PROFILE-IDENTITY") {
   CHECK(vector_v1.reservation_ordinal == vector_v2.reservation_ordinal);
   release_vector_reservation(vector_v1, allocated_v1.value);
   release_vector_reservation(vector_v2, allocated_v2.value);
+}
+
+TEST_CASE(
+    "resource failures retain their admitted profile during configuration changes") {
+  EvaluationResources metadata_resources =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources metadata_writer = metadata_resources;
+  ConcurrentProfileTransitionProbe metadata_transition{
+      &metadata_writer, &metadata_resources};
+  metadata_transition.release_operation_resources = true;
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      metadata_resources,
+      ResourceLifetimeObserver{
+          &metadata_transition, &transition_profile_from_observer}));
+  std::thread metadata_update(
+      [&metadata_transition]() {
+        update_profile_after_request(metadata_transition);
+      });
+  std::array<Value, 1> metadata_children{{make_int_value(7)}};
+  HostAllocationFailureInjection metadata_failure{0U, 0U};
+  const TupleConstructionResult metadata_result = make_tuple_value(
+      metadata_resources, metadata_children, tuple_location,
+      "concurrent-profile-metadata-failure", metadata_failure);
+  metadata_update.join();
+  CHECK(metadata_transition.result.load(std::memory_order_relaxed) ==
+        EvaluationResourceConfigurationUpdate::updated);
+  CHECK_FALSE(metadata_result.ok);
+  REQUIRE(metadata_result.error.resource.has_value());
+  CHECK(metadata_result.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(metadata_result.error.resource->profile ==
+        "trusted-local-v2");
+  CHECK(metadata_resources.owner.token == 0U);
+  CHECK(metadata_children[0].claimed);
+
+  EvaluationResources scratch_resources =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources scratch_writer = scratch_resources;
+  std::array<Value, 1> scratch_child{{make_int_value(11)}};
+  TupleConstructionResult scratch_tuple = make_tuple_value(
+      scratch_resources, scratch_child, tuple_location,
+      "concurrent-profile-scratch-seed");
+  REQUIRE(scratch_tuple.ok);
+  std::array<Value, 1> scratch{{
+      move_value(scratch_tuple.value),
+  }};
+  std::atomic<bool> scratch_start{false};
+  std::atomic<bool> scratch_stop{false};
+  std::atomic<std::size_t> scratch_update_count{0U};
+  std::atomic<std::size_t> scratch_update_failures{0U};
+  std::thread scratch_updates(
+      [&scratch_writer, &scratch_start, &scratch_stop,
+       &scratch_update_count,
+       &scratch_update_failures]() {
+        while (!scratch_start.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        std::size_t update_index = 0U;
+        while (!scratch_stop.load(std::memory_order_acquire)) {
+          const bool bounded = (update_index & 1U) != 0U;
+          scratch_writer.profile =
+              bounded ? ExecutionProfile::bounded_v2
+                      : ExecutionProfile::trusted_local_v2;
+          scratch_writer.limits =
+              bounded
+                  ? v2_limits(std::nullopt, std::nullopt,
+                              1024U, 1024U)
+                  : v2_limits(std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt);
+          if (update_evaluation_resource_configuration(
+                  scratch_writer) !=
+              EvaluationResourceConfigurationUpdate::updated) {
+            (void)scratch_update_failures.fetch_add(
+                1U, std::memory_order_relaxed);
+          }
+          ++update_index;
+          (void)scratch_update_count.fetch_add(
+              1U, std::memory_order_release);
+          std::this_thread::yield();
+        }
+      });
+  scratch_start.store(true, std::memory_order_release);
+  while (scratch_update_count.load(std::memory_order_acquire) == 0U) {
+    std::this_thread::yield();
+  }
+  ConstructionProbe scratch_executor_probe;
+  constexpr std::size_t scratch_failure_iterations = 100U;
+  for (std::size_t index = 0U;
+       index < scratch_failure_iterations; ++index) {
+    HostAllocationFailureInjection scratch_failure{0U, 0U};
+    const TupleConstructionResult scratch_result =
+        execute_tuple_construction(
+            scratch_resources, scratch,
+            &execute_construction_element,
+            &scratch_executor_probe, tuple_location,
+            "concurrent-profile-scratch-failure",
+            scratch_failure);
+    CHECK_FALSE(scratch_result.ok);
+    REQUIRE(scratch_result.error.resource.has_value());
+    CHECK(scratch_result.error.resource->reason ==
+          ResourceErrorReason::allocation_unavailable);
+    CHECK(scratch_result.error.resource->profile ==
+          execution_profile_name(scratch_resources.profile));
+    CHECK(scratch[0].claimed);
+  }
+  scratch_stop.store(true, std::memory_order_release);
+  scratch_updates.join();
+  CHECK(scratch_update_failures.load(std::memory_order_relaxed) == 0U);
+  CHECK(scratch_update_count.load(std::memory_order_relaxed) > 0U);
+  CHECK(scratch_executor_probe.execution_order.empty());
+  CHECK(release_value_reservations(
+            scratch_resources, scratch[0])
+            .ok);
+
+  EvaluationResources produced_resources =
+      make_trusted_local_v2_resources(no_failure);
+  EvaluationResources produced_writer = produced_resources;
+  std::array<Value, 1> produced_child{{make_int_value(13)}};
+  TupleConstructionResult produced_tuple = make_tuple_value(
+      produced_resources, produced_child, tuple_location,
+      "concurrent-profile-produced-seed");
+  REQUIRE(produced_tuple.ok);
+  ConcurrentProfileTransitionProbe produced_transition{
+      &produced_writer, &produced_resources};
+  ProducedProfileFailureProbe produced_probe{
+      &produced_transition, move_value(produced_tuple.value)};
+  std::thread produced_update(
+      [&produced_transition]() {
+        update_profile_after_request(produced_transition);
+      });
+  std::array<Value, 1> produced_storage{{make_int_value(0)}};
+  HostAllocationFailureInjection produced_failure{0U, 0U};
+  const TupleConstructionResult produced_result =
+      execute_tuple_construction(
+          produced_resources, produced_storage,
+          &execute_profile_failure_element, &produced_probe,
+          tuple_location, "concurrent-profile-produced-failure",
+          produced_failure);
+  produced_update.join();
+  CHECK(produced_transition.result.load(std::memory_order_relaxed) ==
+        EvaluationResourceConfigurationUpdate::updated);
+  CHECK_FALSE(produced_result.ok);
+  REQUIRE(produced_result.error.resource.has_value());
+  CHECK(produced_result.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(produced_result.error.resource->profile ==
+        "trusted-local-v2");
+  CHECK_FALSE(produced_probe.produced.claimed);
+  CHECK(produced_storage[0].claimed);
+  CHECK(release_value_reservations(
+            produced_resources, produced_storage[0])
+            .ok);
 }
 
 TEST_CASE("TUP-007-TABLE-CHARGE") {

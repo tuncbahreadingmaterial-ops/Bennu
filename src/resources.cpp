@@ -783,7 +783,7 @@ void observe_lifetime_unlocked(
 }
 
 Error make_resource_failure(
-    const EvaluationResources &resources, ResourceErrorReason reason,
+    std::string_view operation_profile, ResourceErrorReason reason,
     SourceLocation location, std::string_view producer_name,
     std::optional<std::size_t> requested_elements,
     std::optional<std::size_t> requested_bytes,
@@ -797,15 +797,11 @@ Error make_resource_failure(
     error.primitive =
         make_primitive_error_context(producer_name, std::nullopt);
   }
-  EvaluationResourceState *state =
-      acquire_validated_resource_state(resources);
-  ResourceStatePin state_pin = pin_resource_state(state);
   error.resource = ResourceErrorContext{
       reason,
       requested_elements,
       requested_bytes,
-      state == nullptr ? std::string_view{}
-                       : execution_profile_name(state->profile),
+      operation_profile,
       limit_kind,
       configured_limit,
       usage_before,
@@ -838,7 +834,8 @@ validate_profile_configuration_locked(
   if (state == nullptr ||
       resources.creation_error != HostResourceErrorReason::none) {
     return make_resource_failure(
-        resources,
+        state == nullptr ? std::string_view{}
+                         : execution_profile_name(resources.profile),
         ResourceErrorReason::allocation_unavailable, location,
         producer_name, std::nullopt, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt);
@@ -931,7 +928,8 @@ AdmissionResult preflight(
         false,
         resources.live_evaluation_bytes,
         resources.work_units,
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, requested_elements,
                               requested_bytes, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt),
@@ -948,7 +946,8 @@ AdmissionResult preflight(
         resources.live_evaluation_bytes,
         resources.work_units,
         make_resource_failure(
-            resources, ResourceErrorReason::profile_limit, location,
+            execution_profile_name(resources.profile),
+            ResourceErrorReason::profile_limit, location,
             producer_name, requested_elements, requested_bytes,
             ResourceLimitKind::max_vector_bytes,
             resources.limits.max_vector_bytes, 0, *vector_bytes,
@@ -962,7 +961,8 @@ AdmissionResult preflight(
         resources.live_evaluation_bytes,
         resources.work_units,
         make_resource_failure(
-            resources, ResourceErrorReason::profile_limit, location,
+            execution_profile_name(resources.profile),
+            ResourceErrorReason::profile_limit, location,
             producer_name, requested_elements, requested_bytes,
             ResourceLimitKind::max_live_evaluation_bytes,
             resources.limits.max_live_evaluation_bytes,
@@ -976,7 +976,8 @@ AdmissionResult preflight(
         false,
         resources.live_evaluation_bytes,
         resources.work_units,
-        make_resource_failure(resources, ResourceErrorReason::profile_limit,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::profile_limit,
                               location, producer_name, requested_elements,
                               requested_bytes,
                               ResourceLimitKind::max_work_units,
@@ -1238,7 +1239,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
   if (requested_element_count > maximum) {
     return allocation_failure(
         std::move(candidate),
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt));
@@ -1248,7 +1250,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
   if (!width.has_value() || element_count > maximum / *width) {
     return allocation_failure(
         std::move(candidate),
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               std::nullopt, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt));
@@ -1271,7 +1274,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
       std::numeric_limits<std::size_t>::max()) {
     return allocation_failure(
         std::move(candidate),
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               byte_count, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt));
@@ -1284,7 +1288,8 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
     return allocation_failure(
         std::move(candidate),
         make_resource_failure(
-            resources, ResourceErrorReason::allocation_unavailable, location,
+            execution_profile_name(resources.profile),
+            ResourceErrorReason::allocation_unavailable, location,
             producer_name, element_count, byte_count, std::nullopt,
             std::nullopt, std::nullopt, std::nullopt, ordinal));
   }
@@ -1312,7 +1317,7 @@ VectorAllocationResult allocate_vector(EvaluationResources &resources,
     return allocation_failure(
         std::move(candidate),
         make_resource_failure(
-            resources,
+            execution_profile_name(resources.profile),
             host_allocation == HostResourceErrorReason::size_overflow
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable,
@@ -1443,7 +1448,8 @@ WorkspaceReservationResult reserve_workspace(
     return WorkspaceReservationResult{
         false,
         empty_workspace(),
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, std::nullopt, byte_count,
                               std::nullopt, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt),
@@ -1458,7 +1464,8 @@ WorkspaceReservationResult reserve_workspace(
         false,
         empty_workspace(),
         make_resource_failure(
-            resources, ResourceErrorReason::allocation_unavailable, location,
+            execution_profile_name(resources.profile),
+            ResourceErrorReason::allocation_unavailable, location,
             producer_name, std::nullopt, byte_count, std::nullopt, std::nullopt,
             std::nullopt, std::nullopt, ordinal),
     };
@@ -1473,7 +1480,7 @@ WorkspaceReservationResult reserve_workspace(
         false,
         empty_workspace(),
         make_resource_failure(
-            resources,
+            execution_profile_name(resources.profile),
             host_allocation == HostResourceErrorReason::size_overflow
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable,
@@ -1543,7 +1550,8 @@ TupleReservationResult reserve_tuple_table_locked(
     return TupleReservationResult{
         false,
         TupleTableReservation{},
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               std::nullopt, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt),
@@ -1556,7 +1564,8 @@ TupleReservationResult reserve_tuple_table_locked(
         false,
         TupleTableReservation{},
         make_resource_failure(
-            resources, ResourceErrorReason::profile_limit, location,
+            execution_profile_name(resources.profile),
+            ResourceErrorReason::profile_limit, location,
             producer_name, element_count, byte_count,
             ResourceLimitKind::max_tuple_table_bytes,
             resources.limits.max_tuple_table_bytes, 0U, byte_count,
@@ -1583,7 +1592,8 @@ TupleReservationResult reserve_tuple_table_locked(
     return TupleReservationResult{
         false,
         TupleTableReservation{},
-        make_resource_failure(resources, ResourceErrorReason::size_overflow,
+        make_resource_failure(execution_profile_name(resources.profile),
+                              ResourceErrorReason::size_overflow,
                               location, producer_name, element_count,
                               byte_count, std::nullopt, std::nullopt,
                               std::nullopt, std::nullopt, std::nullopt),
@@ -1595,7 +1605,8 @@ TupleReservationResult reserve_tuple_table_locked(
       ordinal ==
           *resources.allocation_failure.fail_at_reservation_ordinal) {
     Error error = make_resource_failure(
-        resources, ResourceErrorReason::allocation_unavailable, location,
+        execution_profile_name(resources.profile),
+        ResourceErrorReason::allocation_unavailable, location,
         producer_name, element_count, byte_count, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, std::nullopt);
     error.resource->allocation_ordinal = ordinal;
@@ -1609,7 +1620,7 @@ TupleReservationResult reserve_tuple_table_locked(
           AllocationPurpose::tuple_table);
   if (host_allocation != HostResourceErrorReason::none) {
     Error error = make_resource_failure(
-        resources,
+        execution_profile_name(resources.profile),
         host_allocation == HostResourceErrorReason::size_overflow
             ? ResourceErrorReason::size_overflow
             : ResourceErrorReason::allocation_unavailable,
@@ -1812,6 +1823,8 @@ TupleConstructionResult make_tuple_value(
   ResourceRecordSyncGuard record_sync_guard =
       begin_resource_record_sync(record_sync, resources,
                                  resource_state);
+  const std::string_view operation_profile =
+      execution_profile_name(resources.profile);
   std::optional<Error> profile_error =
       validate_tuple_profile_locked(
           resources, resource_state, location, producer_name);
@@ -1837,7 +1850,7 @@ TupleConstructionResult make_tuple_value(
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable;
         Error error = make_resource_failure(
-            resources, reason, location, producer_name, elements.size(),
+            operation_profile, reason, location, producer_name, elements.size(),
             std::nullopt, std::nullopt, std::nullopt, std::nullopt,
             std::nullopt, std::nullopt);
         return TupleConstructionResult{false, make_int_value(0),
@@ -1871,7 +1884,7 @@ TupleConstructionResult make_tuple_value(
         element.tuple.reservations.size + 1U >
             std::numeric_limits<std::size_t>::max() - reservation_count) {
       Error error = make_resource_failure(
-          resources, ResourceErrorReason::size_overflow, location,
+          operation_profile, ResourceErrorReason::size_overflow, location,
           producer_name, elements.size(), std::nullopt, std::nullopt,
           std::nullopt, std::nullopt, std::nullopt, std::nullopt);
       return TupleConstructionResult{false, make_int_value(0),
@@ -1912,7 +1925,7 @@ TupleConstructionResult make_tuple_value(
             ? ResourceErrorReason::size_overflow
             : ResourceErrorReason::allocation_unavailable;
     Error error = make_resource_failure(
-        resources, reason, location,
+        operation_profile, reason, location,
         producer_name, elements.size(), reserved_bytes,
         std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         elements.empty() ? std::nullopt : tuple_ordinal);
@@ -2090,6 +2103,18 @@ TupleConstructionResult execute_tuple_construction(
     EvaluationResources &resources, std::span<Value> element_storage,
     TupleElementExecutor execute_element, void *execution_context,
     SourceLocation location, std::string_view producer_name) {
+  HostAllocationFailureInjection allocation_failure{std::nullopt, 0U};
+  return execute_tuple_construction(
+      resources, element_storage, execute_element, execution_context,
+      location, producer_name, allocation_failure);
+}
+
+TupleConstructionResult execute_tuple_construction(
+    EvaluationResources &resources, std::span<Value> element_storage,
+    TupleElementExecutor execute_element, void *execution_context,
+    SourceLocation location, std::string_view producer_name,
+    HostAllocationFailureInjection &allocation_failure) {
+  std::string_view operation_profile;
   {
     EvaluationResourceState *resource_state =
         acquire_validated_resource_state(resources);
@@ -2105,6 +2130,7 @@ TupleConstructionResult execute_tuple_construction(
     ResourceRecordSyncGuard record_sync_guard =
         begin_resource_record_sync(
             record_sync, resources, resource_state);
+    operation_profile = execution_profile_name(resources.profile);
     std::optional<Error> profile_error =
         validate_tuple_profile_locked(
             resources, resource_state, location, producer_name);
@@ -2134,12 +2160,13 @@ TupleConstructionResult execute_tuple_construction(
     if (!scratch.claimed) {
       continue;
     }
-    const ValueValidationResult validation = validate_value(scratch);
+    const ValueValidationResult validation =
+        validate_value(scratch, allocation_failure);
     if (!validation.ok) {
       Error error;
       if (validation.resource_error != HostResourceErrorReason::none) {
         error = make_resource_failure(
-            resources,
+            operation_profile,
             validation.resource_error == HostResourceErrorReason::size_overflow
                 ? ResourceErrorReason::size_overflow
                 : ResourceErrorReason::allocation_unavailable,
@@ -2182,7 +2209,7 @@ TupleConstructionResult execute_tuple_construction(
                                      std::move(produced.error)};
     }
     const ValueValidationResult produced_validation =
-        validate_value(produced.value);
+        validate_value(produced.value, allocation_failure);
     if (!produced_validation.ok) {
       element_storage[element_index] = move_value(produced.value);
       release_completed(completed_count);
@@ -2190,7 +2217,7 @@ TupleConstructionResult execute_tuple_construction(
       if (produced_validation.resource_error !=
           HostResourceErrorReason::none) {
         error = make_resource_failure(
-            resources,
+            operation_profile,
             produced_validation.resource_error ==
                     HostResourceErrorReason::size_overflow
                 ? ResourceErrorReason::size_overflow
@@ -2212,7 +2239,8 @@ TupleConstructionResult execute_tuple_construction(
   }
 
   TupleConstructionResult tuple = make_tuple_value(
-      resources, element_storage, location, producer_name);
+      resources, element_storage, location, producer_name,
+      allocation_failure);
   if (!tuple.ok) {
     release_completed(completed_count);
   }
