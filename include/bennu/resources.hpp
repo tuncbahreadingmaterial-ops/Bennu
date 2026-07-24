@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -31,27 +30,28 @@ struct AllocationFailureInjection {
   std::optional<std::size_t> fail_at_reservation_ordinal;
 };
 
+struct EvaluationResourceState {
+  EvaluationResourceState *next;
+  AllocationFailureInjection allocation_failure;
+  std::size_t live_evaluation_bytes;
+  std::size_t work_units;
+  std::size_t reservation_ordinal;
+  ResourceLifetimeObserver lifetime_observer;
+};
+
 struct EvaluationResources {
   ExecutionProfile profile;
   ResourceLimits limits;
-  AllocationFailureInjection allocation_failure;
-  std::shared_ptr<std::size_t> live_evaluation_accounting;
+  EvaluationResourceState *state;
+  HostResourceErrorReason creation_error;
+  AllocationFailureInjection &allocation_failure;
   std::size_t &live_evaluation_bytes;
-  std::size_t work_units;
-  std::size_t reservation_ordinal;
-  ResourceLifetimeObserver lifetime_observer{};
-
-  EvaluationResources(ExecutionProfile profile, ResourceLimits limits,
-                      AllocationFailureInjection allocation_failure,
-                      std::size_t live_evaluation_bytes,
-                      std::size_t work_units,
-                      std::size_t reservation_ordinal);
-  EvaluationResources(const EvaluationResources &other);
-  EvaluationResources(EvaluationResources &&other) noexcept;
+  std::size_t &work_units;
+  std::size_t &reservation_ordinal;
+  ResourceLifetimeObserver &lifetime_observer;
 };
 
-using WorkspaceStorage =
-    std::unique_ptr<std::byte, decltype(&std::free)>;
+using WorkspaceStorage = HostBufferStorage<std::byte>;
 
 struct WorkspaceReservation {
   WorkspaceStorage storage;
@@ -118,6 +118,11 @@ EvaluationResources make_trusted_local_v2_resources(
     AllocationFailureInjection allocation_failure);
 EvaluationResources make_bounded_v2_resources(
     ResourceLimits limits, AllocationFailureInjection allocation_failure);
+EvaluationResources make_evaluation_resources(
+    ExecutionProfile profile, ResourceLimits limits,
+    AllocationFailureInjection allocation_failure,
+    std::size_t live_evaluation_bytes, std::size_t work_units,
+    std::size_t reservation_ordinal);
 std::string_view execution_profile_name(ExecutionProfile profile);
 
 VectorAllocationResult allocate_vector(EvaluationResources &resources,
@@ -146,6 +151,8 @@ WorkChargeResult charge_work(EvaluationResources &resources,
 TupleReservationResult reserve_tuple_table(
     EvaluationResources &resources, std::size_t element_count,
     SourceLocation location, std::string_view producer_name);
+ValueReleaseResult release_tuple_table(
+    EvaluationResources &resources, TupleTableReservation &reservation);
 TupleConstructionResult make_tuple_value(
     EvaluationResources &resources, std::span<Value> elements,
     SourceLocation location, std::string_view producer_name);

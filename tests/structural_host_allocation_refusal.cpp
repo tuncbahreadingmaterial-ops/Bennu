@@ -114,12 +114,13 @@ bool make_large_value(bennu::Value &value) {
   value.tuple.first_child = 0U;
   value.tuple.child_count = large_child_count;
   const std::size_t reservation_bytes = large_child_count * 16U;
-  void *reservation = std::malloc(reservation_bytes);
-  if (reservation == nullptr) {
+  bennu::TupleTableStorage reservation{
+      nullptr, &bennu::release_host_buffer<std::byte>};
+  if (bennu::allocate_host_buffer(reservation, reservation_bytes) !=
+      bennu::HostResourceErrorReason::none) {
     return false;
   }
-  value.tuple.root_reservation.storage.reset(
-      static_cast<std::byte *>(reservation));
+  value.tuple.root_reservation.storage = std::move(reservation);
   value.tuple.root_reservation.element_count = large_child_count;
   value.tuple.root_reservation.canonical_bytes = reservation_bytes;
   return bennu::validate_value(value).ok;
@@ -288,6 +289,131 @@ int tuple_metadata_refusal() {
              : 42;
 }
 
+int resource_creation_refusal() {
+  if (!impose_address_limit(256U * 1024U)) {
+    return 44;
+  }
+  for (std::size_t index = 0U; index < 1024U * 1024U; ++index) {
+    bennu::EvaluationResources resources =
+        bennu::make_trusted_local_v2_resources(
+            bennu::AllocationFailureInjection{std::nullopt});
+    if (resources.creation_error ==
+        bennu::HostResourceErrorReason::allocation_unavailable) {
+      const bennu::WorkChargeResult refused = bennu::charge_work(
+          resources, 1U, bennu::SourceLocation{}, "resource-create-refusal");
+      return !refused.ok &&
+                     refused.error.resource.has_value() &&
+                     refused.error.resource->reason ==
+                         bennu::ResourceErrorReason::allocation_unavailable
+                 ? 0
+                 : 45;
+    }
+  }
+  return 46;
+}
+
+int malformed_pointer_refusal() {
+  bennu::Value forged_vector = bennu::make_int_value(0);
+  forged_vector.container = bennu::ContainerKind::vector;
+  forged_vector.scalar =
+      bennu::ScalarValue{bennu::ScalarType::boolean, false, 0, 0.0};
+  forged_vector.vector.element_type = bennu::ScalarType::integer;
+  forged_vector.vector.integers.reset(
+      reinterpret_cast<std::int64_t *>(
+          static_cast<std::uintptr_t>(0x1000U)));
+  forged_vector.vector.integer_count = 1U;
+  forged_vector.vector.canonical_bytes = sizeof(std::int64_t);
+  if (bennu::validate_value(forged_vector).invariant !=
+      bennu::ValueInvariant::invalid_vector_payload_handle) {
+    return 47;
+  }
+
+  bennu::Value forged_array = bennu::make_int_value(0);
+  forged_array.container = bennu::ContainerKind::tuple;
+  forged_array.scalar =
+      bennu::ScalarValue{bennu::ScalarType::boolean, false, 0, 0.0};
+  forged_array.tuple.nodes.storage.reset(
+      reinterpret_cast<bennu::ValueNode *>(
+          static_cast<std::uintptr_t>(0x2000U)));
+  forged_array.tuple.nodes.size = 1U;
+  forged_array.tuple.nodes.capacity = 1U;
+  return !bennu::validate_value(forged_array).ok ? 0 : 48;
+}
+
+struct NestedCleanupContext {};
+
+bennu::TupleElementExecutionResult execute_nested_cleanup_element(
+    void *, bennu::EvaluationResources &resources,
+    std::size_t element_index) {
+  if (element_index != 0U) {
+    return bennu::TupleElementExecutionResult{
+        true,
+        bennu::make_int_value(static_cast<std::int64_t>(element_index)),
+        bennu::make_error(bennu::ErrorKind::none,
+                          bennu::SourceLocation{})};
+  }
+  bennu::VectorAllocationResult vector = bennu::allocate_vector(
+      resources, bennu::ScalarType::integer, 1U, 0U,
+      bennu::SourceLocation{}, "nested-cleanup-child");
+  if (!vector.ok) {
+    return bennu::TupleElementExecutionResult{
+        false, bennu::make_int_value(0), std::move(vector.error)};
+  }
+  std::array<bennu::Value, 1U> nested_child{{
+      bennu::move_value(vector.value),
+  }};
+  bennu::TupleConstructionResult nested = bennu::make_tuple_value(
+      resources, nested_child, bennu::SourceLocation{},
+      "nested-cleanup-child");
+  if (!nested.ok) {
+    return bennu::TupleElementExecutionResult{
+        false, bennu::make_int_value(0), std::move(nested.error)};
+  }
+  return bennu::TupleElementExecutionResult{
+      true, bennu::move_value(nested.value),
+      bennu::make_error(bennu::ErrorKind::none,
+                        bennu::SourceLocation{})};
+}
+
+int nested_construction_cleanup_refusal() {
+  constexpr std::size_t element_count = 128U * 1024U;
+  bennu::HostArray<bennu::Value> scratch;
+  if (bennu::allocate_host_array(scratch, element_count, std::nullopt) !=
+      bennu::HostResourceErrorReason::none) {
+    return 49;
+  }
+  for (std::size_t index = 0U; index < element_count; ++index) {
+    if (bennu::host_array_push(scratch, bennu::make_int_value(0)) !=
+        bennu::HostResourceErrorReason::none) {
+      return 50;
+    }
+  }
+  bennu::EvaluationResources resources =
+      bennu::make_trusted_local_v2_resources(
+          bennu::AllocationFailureInjection{std::nullopt});
+  if (!impose_address_limit(4U * 1024U * 1024U)) {
+    return 51;
+  }
+  NestedCleanupContext context;
+  const bennu::TupleConstructionResult result =
+      bennu::execute_tuple_construction(
+          resources, bennu::host_array_span(scratch),
+          &execute_nested_cleanup_element, &context,
+          bennu::SourceLocation{}, "real-nested-cleanup");
+  if (result.ok || !result.error.resource.has_value() ||
+      result.error.resource->reason !=
+          bennu::ResourceErrorReason::allocation_unavailable ||
+      resources.live_evaluation_bytes != 0U) {
+    return 52;
+  }
+  for (const bennu::Value &slot : bennu::host_array_span(scratch)) {
+    if (slot.claimed) {
+      return 53;
+    }
+  }
+  return 0;
+}
+
 using RefusalProbe = int (*)();
 
 struct RefusalCase {
@@ -315,8 +441,12 @@ int run_isolated(RefusalProbe probe) {
 
 } // namespace
 
-int main() {
-  constexpr std::array<RefusalCase, 11U> probes{{
+int main(int argument_count, char **arguments) {
+  if (argument_count == 2 &&
+      std::strcmp(arguments[1], "--malformed-pointers") == 0) {
+    return run_isolated(&malformed_pointer_refusal);
+  }
+  constexpr std::array<RefusalCase, 14U> probes{{
       {"type validation", &type_validation_refusal},
       {"type construction", &type_construction_refusal},
       {"type equality", &type_equality_refusal},
@@ -328,6 +458,9 @@ int main() {
       {"value release", &value_release_refusal},
       {"value detach", &value_detach_refusal},
       {"tuple metadata", &tuple_metadata_refusal},
+      {"resource creation", &resource_creation_refusal},
+      {"malformed pointers", &malformed_pointer_refusal},
+      {"nested construction cleanup", &nested_construction_cleanup_refusal},
   }};
   for (const RefusalCase &probe : probes) {
     const int result = run_isolated(probe.probe);

@@ -13,6 +13,8 @@
 
 namespace bennu {
 
+struct EvaluationResourceState;
+
 enum class ScalarType {
   boolean,
   integer,
@@ -60,28 +62,27 @@ struct ScalarValue {
 
 struct VectorValue {
   ScalarType element_type;
-  std::unique_ptr<std::uint8_t, decltype(&std::free)> booleans;
+  HostBufferStorage<std::uint8_t> booleans;
   std::size_t boolean_count;
-  std::unique_ptr<std::int64_t, decltype(&std::free)> integers;
+  HostBufferStorage<std::int64_t> integers;
   std::size_t integer_count;
-  std::unique_ptr<double, decltype(&std::free)> doubles;
+  HostBufferStorage<double> doubles;
   std::size_t double_count;
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
-  std::shared_ptr<std::size_t> accounting_owner{};
+  EvaluationResourceState *accounting_owner{};
   std::optional<std::size_t> allocation_ordinal{};
   ResourceLifetimeObserver lifetime_observer{};
 };
 
-using TupleTableStorage =
-    std::unique_ptr<std::byte, decltype(&std::free)>;
+using TupleTableStorage = HostBufferStorage<std::byte>;
 
 struct TupleTableReservation {
-  TupleTableStorage storage{nullptr, &std::free};
+  TupleTableStorage storage{nullptr, &release_host_buffer<std::byte>};
   std::size_t element_count{0U};
   std::size_t canonical_bytes{0U};
   bool accounting_active{false};
-  std::shared_ptr<std::size_t> accounting_owner{};
+  EvaluationResourceState *accounting_owner{};
   std::optional<std::size_t> allocation_ordinal{};
   ResourceLifetimeObserver lifetime_observer{};
 };

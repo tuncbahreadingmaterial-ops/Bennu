@@ -1799,12 +1799,9 @@ EvaluationResources make_rewrite_resources(
       !creation.limits.max_work_units.has_value()) {
     return make_trusted_local_resources(creation.allocation_failure);
   }
-  return EvaluationResources{creation.profile,
-                             creation.limits,
-                             creation.allocation_failure,
-                             0U,
-                             0U,
-                             0U};
+  return make_evaluation_resources(
+      creation.profile, creation.limits, creation.allocation_failure,
+      0U, 0U, 0U);
 }
 
 SourceLocation rewrite_source_location(RewritePosition position) {
@@ -5137,10 +5134,11 @@ TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
   const RewriteParseResult parsed_literal = parse_rewrite("(1)");
   REQUIRE(parsed_literal.ok);
   REQUIRE(parsed_literal.program.nodes.size() == 1U);
-  EvaluationResources malformed_literal_resources{
-      ExecutionProfile::bounded_v1,
-      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
-      AllocationFailureInjection{std::nullopt}, 0U, 0U, 0U};
+  EvaluationResources malformed_literal_resources =
+      make_evaluation_resources(
+          ExecutionProfile::bounded_v1,
+          ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+          AllocationFailureInjection{std::nullopt}, 0U, 0U, 0U);
   VectorAllocationResult malformed_literal = vector_literal_value(
       malformed_literal_resources, parsed_literal.program,
       parsed_literal.program.nodes[0]);

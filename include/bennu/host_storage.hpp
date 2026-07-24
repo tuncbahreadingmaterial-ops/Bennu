@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -25,9 +26,66 @@ struct HostAllocationFailureInjection {
   std::optional<std::size_t> max_container_elements{};
 };
 
+enum class HostAllocationPurpose {
+  array,
+  buffer,
+};
+
+struct HostAllocationRecord {
+  HostAllocationRecord *next;
+  void *allocation;
+  void *payload;
+  std::size_t byte_count;
+  HostAllocationPurpose purpose;
+  const void *element_type;
+};
+
+inline HostAllocationRecord *host_allocation_records{nullptr};
+inline std::mutex host_allocation_records_mutex{};
+
+template <typename Element>
+inline const std::byte host_element_type_identity{};
+
+inline void register_host_allocation(HostAllocationRecord &record) {
+  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+  record.next = host_allocation_records;
+  host_allocation_records = &record;
+}
+
+inline HostAllocationRecord *find_host_allocation(
+    const void *payload, HostAllocationPurpose purpose,
+    const void *element_type) {
+  for (HostAllocationRecord *record = host_allocation_records;
+       record != nullptr; record = record->next) {
+    if (record->payload == payload && record->purpose == purpose &&
+        record->element_type == element_type) {
+      return record;
+    }
+  }
+  return nullptr;
+}
+
+inline HostAllocationRecord *remove_host_allocation(
+    const void *payload, HostAllocationPurpose purpose,
+    const void *element_type) {
+  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+  HostAllocationRecord **link = &host_allocation_records;
+  while (*link != nullptr) {
+    HostAllocationRecord *record = *link;
+    if (record->payload == payload && record->purpose == purpose &&
+        record->element_type == element_type) {
+      *link = record->next;
+      record->next = nullptr;
+      return record;
+    }
+    link = &record->next;
+  }
+  return nullptr;
+}
+
 template <typename Element>
 struct HostArrayHeader {
-  void *allocation;
+  HostAllocationRecord allocation_record;
   std::size_t constructed;
   std::size_t capacity;
 };
@@ -37,13 +95,17 @@ void release_host_array(Element *elements) {
   if (elements == nullptr) {
     return;
   }
-  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(
-      reinterpret_cast<std::byte *>(elements) -
-      sizeof(HostArrayHeader<Element>));
+  HostAllocationRecord *record = remove_host_allocation(
+      elements, HostAllocationPurpose::array,
+      &host_element_type_identity<Element>);
+  if (record == nullptr) {
+    return;
+  }
+  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(record);
   for (std::size_t index = header->constructed; index > 0U; --index) {
     std::destroy_at(elements + index - 1U);
   }
-  std::free(header->allocation);
+  std::free(record->allocation);
 }
 
 template <typename Element>
@@ -56,6 +118,76 @@ struct HostArray {
   std::size_t size{0U};
   std::size_t capacity{0U};
 };
+
+template <typename Element>
+void release_host_buffer(Element *elements) {
+  if (elements == nullptr) {
+    return;
+  }
+  HostAllocationRecord *record = remove_host_allocation(
+      elements, HostAllocationPurpose::buffer,
+      &host_element_type_identity<Element>);
+  if (record != nullptr) {
+    std::free(record->allocation);
+  }
+}
+
+template <typename Element>
+using HostBufferStorage =
+    std::unique_ptr<Element, decltype(&release_host_buffer<Element>)>;
+
+template <typename Element>
+HostResourceErrorReason allocate_host_buffer(
+    HostBufferStorage<Element> &storage, std::size_t element_count) {
+  if (storage != nullptr) {
+    return HostResourceErrorReason::size_overflow;
+  }
+  if (element_count == 0U) {
+    return HostResourceErrorReason::none;
+  }
+  constexpr std::size_t header_size = sizeof(HostAllocationRecord);
+  constexpr std::size_t alignment =
+      alignof(Element) > alignof(HostAllocationRecord)
+          ? alignof(Element)
+          : alignof(HostAllocationRecord);
+  constexpr std::size_t alignment_slack = alignment - 1U;
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  if (element_count >
+      (maximum - header_size - alignment_slack) / sizeof(Element)) {
+    return HostResourceErrorReason::size_overflow;
+  }
+  const std::size_t byte_count = element_count * sizeof(Element);
+  void *allocation =
+      std::malloc(header_size + alignment_slack + byte_count);
+  if (allocation == nullptr) {
+    return HostResourceErrorReason::allocation_unavailable;
+  }
+  const std::uintptr_t unaligned =
+      reinterpret_cast<std::uintptr_t>(allocation) + header_size;
+  const std::uintptr_t aligned =
+      (unaligned + alignment_slack) &
+      ~static_cast<std::uintptr_t>(alignment_slack);
+  auto *elements = reinterpret_cast<Element *>(aligned);
+  auto *record = new (allocation) HostAllocationRecord{
+      nullptr, allocation, elements, byte_count,
+      HostAllocationPurpose::buffer, &host_element_type_identity<Element>};
+  register_host_allocation(*record);
+  storage.reset(elements);
+  return HostResourceErrorReason::none;
+}
+
+template <typename Element>
+bool host_buffer_valid(const HostBufferStorage<Element> &storage,
+                       std::size_t required_bytes) {
+  if (storage == nullptr) {
+    return required_bytes == 0U;
+  }
+  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+  const HostAllocationRecord *record = find_host_allocation(
+      storage.get(), HostAllocationPurpose::buffer,
+      &host_element_type_identity<Element>);
+  return record != nullptr && required_bytes <= record->byte_count;
+}
 
 inline HostResourceErrorReason
 begin_host_allocation(HostAllocationFailureInjection &failure) {
@@ -128,8 +260,15 @@ allocate_host_array(HostArray<Element> &array, std::size_t capacity,
   auto *elements = reinterpret_cast<Element *>(aligned);
   auto *header = reinterpret_cast<HostArrayHeader<Element> *>(
       reinterpret_cast<std::byte *>(elements) - header_size);
-  std::construct_at(header,
-                    HostArrayHeader<Element>{allocation, 0U, capacity});
+  std::construct_at(
+      header,
+      HostArrayHeader<Element>{
+          HostAllocationRecord{
+              nullptr, allocation, elements, capacity * sizeof(Element),
+              HostAllocationPurpose::array,
+              &host_element_type_identity<Element>},
+          0U, capacity});
+  register_host_allocation(header->allocation_record);
   array.storage.reset(elements);
   array.capacity = capacity;
   return HostResourceErrorReason::none;
@@ -159,9 +298,14 @@ host_array_push(HostArray<Element> &array, Source &&source) {
   if (array.storage == nullptr || array.size >= array.capacity) {
     return HostResourceErrorReason::size_overflow;
   }
-  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(
-      reinterpret_cast<std::byte *>(array.storage.get()) -
-      sizeof(HostArrayHeader<Element>));
+  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+  HostAllocationRecord *record = find_host_allocation(
+      array.storage.get(), HostAllocationPurpose::array,
+      &host_element_type_identity<Element>);
+  if (record == nullptr) {
+    return HostResourceErrorReason::size_overflow;
+  }
+  auto *header = reinterpret_cast<HostArrayHeader<Element> *>(record);
   if (array.capacity != header->capacity ||
       array.size >= header->capacity) {
     return HostResourceErrorReason::size_overflow;
@@ -185,13 +329,21 @@ host_array_fill(HostArray<Element> &array, std::size_t count,
                ? HostResourceErrorReason::none
                : HostResourceErrorReason::size_overflow;
   }
-  const auto *header = reinterpret_cast<const HostArrayHeader<Element> *>(
-      reinterpret_cast<const std::byte *>(array.storage.get()) -
-      sizeof(HostArrayHeader<Element>));
-  if (array.capacity != header->capacity ||
-      array.size > header->capacity ||
-      count > header->capacity - array.size) {
-    return HostResourceErrorReason::size_overflow;
+  {
+    const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+    const HostAllocationRecord *record = find_host_allocation(
+        array.storage.get(), HostAllocationPurpose::array,
+        &host_element_type_identity<Element>);
+    if (record == nullptr) {
+      return HostResourceErrorReason::size_overflow;
+    }
+    const auto *header =
+        reinterpret_cast<const HostArrayHeader<Element> *>(record);
+    if (array.capacity != header->capacity ||
+        array.size > header->capacity ||
+        count > header->capacity - array.size) {
+      return HostResourceErrorReason::size_overflow;
+    }
   }
   for (std::size_t index = 0U; index < count; ++index) {
     const HostResourceErrorReason pushed = host_array_push(array, value);
@@ -207,9 +359,15 @@ bool host_array_metadata_valid(const HostArray<Element> &array) {
   if (array.storage == nullptr) {
     return array.size == 0U && array.capacity == 0U;
   }
-  const auto *header = reinterpret_cast<const HostArrayHeader<Element> *>(
-      reinterpret_cast<const std::byte *>(array.storage.get()) -
-      sizeof(HostArrayHeader<Element>));
+  const std::lock_guard<std::mutex> lock(host_allocation_records_mutex);
+  const HostAllocationRecord *record = find_host_allocation(
+      array.storage.get(), HostAllocationPurpose::array,
+      &host_element_type_identity<Element>);
+  if (record == nullptr) {
+    return false;
+  }
+  const auto *header =
+      reinterpret_cast<const HostArrayHeader<Element> *>(record);
   return array.capacity == header->capacity &&
          array.size <= header->capacity &&
          header->constructed <= header->capacity &&
@@ -227,11 +385,17 @@ bool host_array_has_capacity(const HostArray<Element> &array,
 
 template <typename Element>
 std::span<Element> host_array_span(HostArray<Element> &array) {
+  if (!host_array_metadata_valid(array)) {
+    return {};
+  }
   return std::span<Element>(array.storage.get(), array.size);
 }
 
 template <typename Element>
 std::span<const Element> host_array_span(const HostArray<Element> &array) {
+  if (!host_array_metadata_valid(array)) {
+    return {};
+  }
   return std::span<const Element>(array.storage.get(), array.size);
 }
 

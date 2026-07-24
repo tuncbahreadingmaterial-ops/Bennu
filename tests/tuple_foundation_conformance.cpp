@@ -778,6 +778,35 @@ TEST_CASE("TUP-003-VALUES") {
   (void)cross_kind_payload.integers.release();
   cross_kind_payload.integers.reset(cross_kind_storage);
   CHECK(release_value_reservations(invariant_resources, cross_kind.value).ok);
+
+  Value forged_vector = make_int_value(0);
+  forged_vector.container = ContainerKind::vector;
+  forged_vector.scalar =
+      ScalarValue{ScalarType::boolean, false, 0, 0.0};
+  forged_vector.vector.element_type = ScalarType::integer;
+  forged_vector.vector.integers.reset(
+      reinterpret_cast<std::int64_t *>(static_cast<std::uintptr_t>(0x1000U)));
+  forged_vector.vector.integer_count = 1U;
+  forged_vector.vector.canonical_bytes = sizeof(std::int64_t);
+  const ValueValidationResult forged_vector_validation =
+      validate_value(forged_vector);
+  CHECK_FALSE(forged_vector_validation.ok);
+  CHECK(forged_vector_validation.invariant ==
+        ValueInvariant::invalid_vector_payload_handle);
+
+  Value forged_array = make_int_value(0);
+  forged_array.container = ContainerKind::tuple;
+  forged_array.scalar =
+      ScalarValue{ScalarType::boolean, false, 0, 0.0};
+  forged_array.tuple.nodes.storage.reset(
+      reinterpret_cast<ValueNode *>(static_cast<std::uintptr_t>(0x2000U)));
+  forged_array.tuple.nodes.size = 1U;
+  forged_array.tuple.nodes.capacity = 1U;
+  const ValueValidationResult forged_array_validation =
+      validate_value(forged_array);
+  CHECK_FALSE(forged_array_validation.ok);
+  CHECK(forged_array_validation.invariant ==
+        ValueInvariant::invalid_value_root);
 }
 
 TEST_CASE("TUP-004-MOVE-CLEANUP") {
@@ -1054,6 +1083,22 @@ TEST_CASE("TUP-006-PROFILE-IDENTITY") {
   CHECK(refused.error.profile->value_kind == TypeKind::tuple);
   CHECK(v1_child[0].claimed);
   CHECK(v1.reservation_ordinal == 0U);
+  const TupleReservationResult direct_trusted_v1 =
+      reserve_tuple_table(v1, 1U, tuple_location, "direct-v1-tuple");
+  CHECK_FALSE(direct_trusted_v1.ok);
+  CHECK(direct_trusted_v1.error.kind == ErrorKind::profile_error);
+  CHECK(v1.reservation_ordinal == 0U);
+  CHECK(v1.live_evaluation_bytes == 0U);
+
+  EvaluationResources bounded_v1 = make_bounded_resources(
+      ResourceLimits{1U, std::nullopt, std::nullopt}, no_failure);
+  const TupleReservationResult direct_bounded_v1 =
+      reserve_tuple_table(
+          bounded_v1, 1U, tuple_location, "direct-bounded-v1-tuple");
+  CHECK_FALSE(direct_bounded_v1.ok);
+  CHECK(direct_bounded_v1.error.kind == ErrorKind::profile_error);
+  CHECK(bounded_v1.reservation_ordinal == 0U);
+  CHECK(bounded_v1.live_evaluation_bytes == 0U);
 
   EvaluationResources bounded_without_limits = make_bounded_v2_resources(
       v2_limits(std::nullopt, std::nullopt, std::nullopt, std::nullopt),
@@ -1107,6 +1152,29 @@ TEST_CASE("TUP-006-PROFILE-IDENTITY") {
 }
 
 TEST_CASE("TUP-007-TABLE-CHARGE") {
+  EvaluationResources raw_resources =
+      make_trusted_local_v2_resources(no_failure);
+  TupleReservationResult raw = reserve_tuple_table(
+      raw_resources, 2U, tuple_location, "raw-tuple-table");
+  REQUIRE(raw.ok);
+  CHECK(raw_resources.live_evaluation_bytes == 32U);
+  CHECK(raw_resources.reservation_ordinal == 1U);
+  EvaluationResources unrelated_resources =
+      make_trusted_local_v2_resources(no_failure);
+  const std::byte *raw_storage = raw.reservation.storage.get();
+  const ValueReleaseResult wrong_release =
+      release_tuple_table(unrelated_resources, raw.reservation);
+  CHECK_FALSE(wrong_release.ok);
+  CHECK(wrong_release.error ==
+        ValueReleaseError::resource_context_mismatch);
+  CHECK(raw.reservation.storage.get() == raw_storage);
+  CHECK(raw_resources.live_evaluation_bytes == 32U);
+  CHECK(release_tuple_table(raw_resources, raw.reservation).ok);
+  CHECK(raw_resources.live_evaluation_bytes == 0U);
+  CHECK(raw.reservation.storage == nullptr);
+  CHECK(release_tuple_table(raw_resources, raw.reservation).ok);
+  CHECK(raw_resources.live_evaluation_bytes == 0U);
+
   EvaluationResources exact = make_bounded_v2_resources(
       v2_limits(std::nullopt, 32U, std::nullopt, 32U), no_failure);
   std::array<Value, 2> exact_children{{make_int_value(1), make_int_value(2)}};
@@ -1154,6 +1222,35 @@ TEST_CASE("TUP-007-TABLE-CHARGE") {
 
 TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
   const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  EvaluationResources shared = make_bounded_v2_resources(
+      v2_limits(std::nullopt, std::nullopt, 3U, std::nullopt),
+      AllocationFailureInjection{2U});
+  EvaluationResources copied = shared;
+  EvaluationResources moved = std::move(copied);
+  CHECK(charge_work(shared, 2U, tuple_location, "shared-work").ok);
+  const WorkChargeResult shared_work_refusal =
+      charge_work(moved, 2U, tuple_location, "shared-work");
+  CHECK_FALSE(shared_work_refusal.ok);
+  CHECK(shared.work_units == 2U);
+  CHECK(copied.work_units == 2U);
+  CHECK(moved.work_units == 2U);
+  VectorAllocationResult shared_first = allocate_vector(
+      shared, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
+  VectorAllocationResult shared_second = allocate_vector(
+      copied, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
+  VectorAllocationResult shared_third = allocate_vector(
+      moved, ScalarType::boolean, 1U, 0U, tuple_location, "shared-ordinal");
+  REQUIRE(shared_first.ok);
+  REQUIRE(shared_second.ok);
+  CHECK_FALSE(shared_third.ok);
+  REQUIRE(shared_third.error.resource.has_value());
+  CHECK(shared_third.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{2U});
+  CHECK(shared.reservation_ordinal == 3U);
+  CHECK(copied.reservation_ordinal == 3U);
+  CHECK(moved.reservation_ordinal == 3U);
+  CHECK(release_vector_reservation(moved, shared_first.value).ok);
+  CHECK(release_vector_reservation(shared, shared_second.value).ok);
   EvaluationResources vector_overflow =
       make_trusted_local_v2_resources(no_failure);
   vector_overflow.reservation_ordinal = maximum;
@@ -1316,6 +1413,39 @@ TEST_CASE("TUP-008-ALLOCATION-ORDINAL") {
 }
 
 TEST_CASE("TUP-009-CONSTRUCTION") {
+  EvaluationResources malformed_scratch_resources =
+      make_trusted_local_v2_resources(no_failure);
+  ConstructionProbe malformed_scratch_probe;
+  Value malformed_slot = make_int_value(0);
+  malformed_slot.container = ContainerKind::vector;
+  malformed_slot.scalar =
+      ScalarValue{ScalarType::boolean, false, 0, 0.0};
+  malformed_slot.vector.element_type = ScalarType::integer;
+  malformed_slot.vector.integers.reset(
+      reinterpret_cast<std::int64_t *>(
+          static_cast<std::uintptr_t>(0x3000U)));
+  malformed_slot.vector.integer_count = 1U;
+  malformed_slot.vector.canonical_bytes = sizeof(std::int64_t);
+  std::array<Value, 1> malformed_scratch{{
+      move_value(malformed_slot),
+  }};
+  const std::int64_t *malformed_pointer =
+      malformed_scratch[0].vector.integers.get();
+  const TupleConstructionResult malformed_scratch_result =
+      execute_tuple_construction(
+          malformed_scratch_resources, malformed_scratch,
+          &execute_construction_element, &malformed_scratch_probe,
+          tuple_location, "malformed-construction-scratch");
+  CHECK_FALSE(malformed_scratch_result.ok);
+  CHECK(malformed_scratch_result.invariant ==
+        ValueInvariant::invalid_vector_payload_handle);
+  CHECK(malformed_scratch[0].claimed);
+  CHECK(malformed_scratch[0].vector.integers.get() ==
+        malformed_pointer);
+  CHECK(malformed_scratch_probe.execution_order.empty());
+  CHECK(malformed_scratch_resources.live_evaluation_bytes == 0U);
+  CHECK(malformed_scratch_resources.reservation_ordinal == 0U);
+
   std::vector<ResourceLifetimeEvent> success_events;
   EvaluationResources success_resources =
       make_trusted_local_v2_resources(no_failure);

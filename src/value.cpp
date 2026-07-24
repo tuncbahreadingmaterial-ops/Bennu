@@ -56,11 +56,11 @@ ScalarValue empty_scalar() {
 
 VectorValue empty_vector() {
   return VectorValue{ScalarType::boolean,
-                     {nullptr, &std::free},
+                     {nullptr, &release_host_buffer<std::uint8_t>},
                      0,
-                     {nullptr, &std::free},
+                     {nullptr, &release_host_buffer<std::int64_t>},
                      0,
-                     {nullptr, &std::free},
+                     {nullptr, &release_host_buffer<double>},
                      0};
 }
 
@@ -369,6 +369,10 @@ ValueValidationResult validate_value(
               (vector.booleans.get() == nullptr)) {
         return invalid(ValueInvariant::inactive_vector_payload, node_index);
       }
+      if (!host_buffer_valid(vector.booleans, vector.boolean_count)) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
+      }
       for (std::size_t index = 0U; index < vector.boolean_count; ++index) {
         if (vector.booleans.get()[index] > 1U) {
           return invalid(ValueInvariant::invalid_boolean_element, node_index);
@@ -382,6 +386,15 @@ ValueValidationResult validate_value(
               (vector.integers.get() == nullptr)) {
         return invalid(ValueInvariant::inactive_vector_payload, node_index);
       }
+      if (vector.integer_count >
+              std::numeric_limits<std::size_t>::max() /
+                  sizeof(std::int64_t) ||
+          !host_buffer_valid(
+              vector.integers,
+              vector.integer_count * sizeof(std::int64_t))) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
+      }
       return accounting_valid(vector, vector.integer_count,
                               sizeof(std::int64_t));
     case ScalarType::double_precision:
@@ -390,6 +403,13 @@ ValueValidationResult validate_value(
           (vector.double_count == 0U) !=
               (vector.doubles.get() == nullptr)) {
         return invalid(ValueInvariant::inactive_vector_payload, node_index);
+      }
+      if (vector.double_count >
+              std::numeric_limits<std::size_t>::max() / sizeof(double) ||
+          !host_buffer_valid(vector.doubles,
+                             vector.double_count * sizeof(double))) {
+        return invalid(ValueInvariant::invalid_vector_payload_handle,
+                       node_index);
       }
       for (std::size_t index = 0U; index < vector.double_count; ++index) {
         if (!is_canonical_double(vector.doubles.get()[index])) {
@@ -857,6 +877,10 @@ ValueValidationResult validate_value(
                         node_index);
     }
     const std::size_t expected_bytes = child_count * 16U;
+    if (!host_buffer_valid(reservation.storage, expected_bytes)) {
+      return invalid_at(ValueInvariant::invalid_tuple_reservation_count,
+                        node_index);
+    }
     if (reservation.element_count != child_count ||
         reservation.canonical_bytes != expected_bytes ||
         (expected_bytes == 0U && reservation.storage.get() != nullptr) ||
@@ -1375,8 +1399,10 @@ ValueDestructionResult destroy_value(
   const auto release_vector_accounting = [](VectorValue &vector) {
     const void *storage = vector_storage_address(vector);
     if (vector.accounting_active && vector.accounting_owner != nullptr &&
-        vector.canonical_bytes <= *vector.accounting_owner) {
-      *vector.accounting_owner -= vector.canonical_bytes;
+        vector.canonical_bytes <=
+            vector.accounting_owner->live_evaluation_bytes) {
+      vector.accounting_owner->live_evaluation_bytes -=
+          vector.canonical_bytes;
       observe_lifetime(vector.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::vector_payload,
@@ -1400,8 +1426,10 @@ ValueDestructionResult destroy_value(
     const void *storage = reservation.storage.get();
     if (reservation.accounting_active &&
         reservation.accounting_owner != nullptr &&
-        reservation.canonical_bytes <= *reservation.accounting_owner) {
-      *reservation.accounting_owner -= reservation.canonical_bytes;
+        reservation.canonical_bytes <=
+            reservation.accounting_owner->live_evaluation_bytes) {
+      reservation.accounting_owner->live_evaluation_bytes -=
+          reservation.canonical_bytes;
       observe_lifetime(reservation.lifetime_observer,
                        ResourceLifetimeEventKind::logical_release,
                        ResourceStorageKind::tuple_table,
