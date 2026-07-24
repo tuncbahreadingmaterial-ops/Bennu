@@ -42,7 +42,9 @@ require_text("provenance.py gate" "stable annotated tag gate")
 require_text([=[EVENT_SHA: ${{ github.sha }}]=] "attestation event source identity")
 require_text([=[[ "$commit" != "$EVENT_SHA" ]]]=]
   "production checkout/event SHA equality gate")
-require_text("actions/checkout@11d5960a326750d5838078e36cf38b85af677262" "pinned checkout")
+require_text(
+  "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0"
+  "reviewed Node-24-native checkout pin")
 require_text("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" "pinned upload-artifact")
 require_text("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" "pinned download-artifact")
 require_text("actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661" "pinned GitHub attestation")
