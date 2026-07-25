@@ -147,6 +147,7 @@ int main(void) {
     BennuResources snapshot = {0};
     const size_t allocations_before = bennu_probe_total_allocations;
     const size_t releases_before = bennu_probe_release_count;
+    (void)allocations_before;
     (void)releases_before;
     if (bennu_execute(&snapshot) == 0 || snapshot.live_bytes != 0U ||
         bennu_probe_outstanding_allocations != 0U ||
@@ -185,6 +186,48 @@ bool emit_probe_and_build(
   return built.ok;
 }
 
+bool emit_parameter_probe_and_build(
+    std::string_view source,
+    const bennu::EvaluationConfiguration &configuration, const char *c_path,
+    const char *native_path, const char *compiler,
+    std::string_view failure_assertions, std::string_view argument_text) {
+  const bennu::CEmissionResult emitted =
+      bennu::emit_c_source(source, configuration);
+  if (!emitted.ok) {
+    return false;
+  }
+  std::optional<std::string> probe =
+      generated_failure_probe(emitted.source, failure_assertions);
+  if (!probe.has_value()) {
+    return false;
+  }
+  const std::string marker =
+      "int main(void) {\n"
+      "  size_t iteration = 0U;";
+  const std::size_t marker_position = probe->find(marker);
+  if (marker_position == std::string::npos) {
+    return false;
+  }
+  std::string replacement =
+      "int main(void) {\n"
+      "  char bennu_program_name[] = \"bennu-probe\";\n"
+      "  char bennu_argument_text[] = \"";
+  replacement += argument_text;
+  replacement +=
+      "\";\n"
+      "  char *bennu_arguments[] = {bennu_program_name, "
+      "bennu_argument_text, NULL};\n"
+      "  size_t iteration = 0U;\n"
+      "  if (!bennu_bind_arguments(2, bennu_arguments)) { return 1; }";
+  probe->replace(marker_position, marker.size(), replacement);
+  if (!write_file(c_path, *probe)) {
+    return false;
+  }
+  const bennu::NativeBuildResult built = bennu::build_native(
+      bennu::NativeBuildRequest{*probe, native_path, compiler, ""});
+  return built.ok;
+}
+
 constexpr std::string_view allocation_iota_assertions = R"bennu_assert(
         snapshot.failure != BENNU_FAILURE_ALLOCATION ||
         snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
@@ -210,6 +253,31 @@ constexpr std::string_view allocation_lifted_assertions = R"bennu_assert(
         snapshot.failure_primary_span.begin.line != 1U ||
         snapshot.failure_primary_span.begin.column != 1U ||
         bennu_probe_total_allocations <= allocations_before)bennu_assert";
+
+constexpr std::string_view parameter_profile_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V1 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_VECTOR_BYTES ||
+        snapshot.failure_configured_limit != 8U ||
+        snapshot.failure_usage_before != 0U ||
+        snapshot.failure_refused_charge != 16U ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 16U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.begin.column != 1U ||
+        bennu_probe_total_allocations != allocations_before)bennu_assert";
+
+constexpr std::string_view parameter_allocation_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 16U ||
+        snapshot.failure_primitive_id != BENNU_PRIMITIVE_IOTA ||
+        strcmp(snapshot.failure_admission_point, "iota") != 0 ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.begin.column != 1U)bennu_assert";
 
 constexpr std::string_view allocation_late_assertions = R"bennu_assert(
         snapshot.failure != BENNU_FAILURE_ALLOCATION ||
@@ -897,7 +965,7 @@ int main(int argument_count, char **arguments) {
       std::string_view(arguments[1]) == "--tuple-issue50") {
     return tuple_issue50_mode(argument_count, arguments);
   }
-  if (argument_count != 29) {
+  if (argument_count != 33) {
     return 2;
   }
 
@@ -1013,6 +1081,42 @@ int main(int argument_count, char **arguments) {
       bennu::ResourceLimits{std::size_t{8U}, std::size_t{24U},
                             std::size_t{1U}},
       bennu::AllocationFailureInjection{std::nullopt}};
+  const bennu::EvaluationConfiguration parameter_profile{
+      bennu::ExecutionProfile::bounded_v1,
+      bennu::ResourceLimits{std::size_t{8U}, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  const bennu::EvaluationConfiguration parameter_allocation{
+      bennu::ExecutionProfile::trusted_local_v1,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+      bennu::AllocationFailureInjection{0U}};
+  const std::array<bennu::Value, 1> parameter_values{{
+      bennu::make_int_value(2),
+  }};
+  bennu::ProgramResult parameter_profile_result = bennu::evaluate_source(
+      "parameters[n Int]\niota[n]\n",
+      std::span<const bennu::Value>(parameter_values), parameter_profile);
+  if (parameter_profile_result.ok ||
+      !is_resource_error(parameter_profile_result.error,
+                         bennu::ResourceErrorReason::profile_limit) ||
+      parameter_profile_result.error.resource->usage_before !=
+          std::size_t{0U} ||
+      parameter_profile_result.error.resource->refused_charge !=
+          std::size_t{16U}) {
+    destroy_program(parameter_profile_result);
+    return 68;
+  }
+  bennu::ProgramResult parameter_allocation_result = bennu::evaluate_source(
+      "parameters[n Int]\niota[n]\n",
+      std::span<const bennu::Value>(parameter_values), parameter_allocation);
+  if (parameter_allocation_result.ok ||
+      !is_resource_error(
+          parameter_allocation_result.error,
+          bennu::ResourceErrorReason::allocation_unavailable) ||
+      parameter_allocation_result.error.resource->allocation_ordinal !=
+          std::size_t{0U}) {
+    destroy_program(parameter_allocation_result);
+    return 69;
+  }
   bennu::ProgramResult refused =
       bennu::evaluate_source(profile_source, one_past_profile);
   if (refused.ok || !refused.values.empty() ||
@@ -1250,7 +1354,15 @@ int main(int argument_count, char **arguments) {
                             shape_before_resource_assertions) ||
       !emit_probe_and_build(resource_before_domain_source, fail_third,
                             arguments[27], arguments[28], arguments[1],
-                            resource_before_domain_assertions)) {
+                            resource_before_domain_assertions) ||
+      !emit_parameter_probe_and_build(
+          "parameters[n Int]\niota[n]\n", parameter_profile,
+          arguments[29], arguments[30], arguments[1],
+          parameter_profile_assertions, "2") ||
+      !emit_parameter_probe_and_build(
+          "parameters[n Int]\niota[n]\n", parameter_allocation,
+          arguments[31], arguments[32], arguments[1],
+          parameter_allocation_assertions, "2")) {
     return 27;
   }
   const std::optional<std::string> context_probe = generated_runtime_probe();

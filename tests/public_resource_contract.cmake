@@ -97,6 +97,16 @@ set(live_refusal_emitted
 set(live_refusal_native
   "${work_directory}/profile-live-refusal-native${BENNU_EXECUTABLE_SUFFIX}")
 set(live_refusal_expected "${work_directory}/profile-live-refusal.expected")
+set(parameter_profile_c "${work_directory}/parameter-profile-probe.c")
+set(parameter_profile_emitted
+  "${work_directory}/parameter-profile-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(parameter_profile_native
+  "${work_directory}/parameter-profile-probe-native${BENNU_EXECUTABLE_SUFFIX}")
+set(parameter_allocation_c "${work_directory}/parameter-allocation-probe.c")
+set(parameter_allocation_emitted
+  "${work_directory}/parameter-allocation-probe${BENNU_EXECUTABLE_SUFFIX}")
+set(parameter_allocation_native
+  "${work_directory}/parameter-allocation-probe-native${BENNU_EXECUTABLE_SUFFIX}")
 
 execute_process(
   COMMAND "${BENNU_PUBLIC_RESOURCE_FIXTURE}" "${BENNU_C_COMPILER}"
@@ -116,6 +126,8 @@ execute_process(
           "${size_probe_c}" "${size_probe_native}"
           "${shape_resource_probe_c}" "${shape_resource_probe_native}"
           "${resource_domain_probe_c}" "${resource_domain_probe_native}"
+          "${parameter_profile_c}" "${parameter_profile_native}"
+          "${parameter_allocation_c}" "${parameter_allocation_native}"
   RESULT_VARIABLE fixture_exit OUTPUT_VARIABLE fixture_stdout
   ERROR_VARIABLE fixture_stderr)
 if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
@@ -128,7 +140,7 @@ endif()
 
 foreach(c_file profile refusal iota lifted late context_probe size_probe
                shape_resource_probe resource_domain_probe vector_refusal
-               live_refusal)
+               live_refusal parameter_profile parameter_allocation)
   set(source "${${c_file}_c}")
   set(executable "${${c_file}_emitted}")
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
@@ -302,6 +314,18 @@ check_allocation_failure(resource-before-domain-emitted
 check_allocation_failure(resource-before-domain-native
   "${resource_domain_probe_native}"
   "bennu-source:1:1: ResourceError: add resource request failed: allocation_unavailable\n")
+check_allocation_failure(parameter-profile-emitted
+  "${parameter_profile_emitted}"
+  "bennu-source:2:1: ResourceError: reason=profile_limit profile=bounded-v1 limit=max_vector_bytes configured=8 usage-before=0 refused-charge=16 admission=iota source=19:2:1\n")
+check_allocation_failure(parameter-profile-native
+  "${parameter_profile_native}"
+  "bennu-source:2:1: ResourceError: reason=profile_limit profile=bounded-v1 limit=max_vector_bytes configured=8 usage-before=0 refused-charge=16 admission=iota source=19:2:1\n")
+check_allocation_failure(parameter-allocation-emitted
+  "${parameter_allocation_emitted}"
+  "bennu-source:2:1: ResourceError: iota resource request failed: allocation_unavailable\n")
+check_allocation_failure(parameter-allocation-native
+  "${parameter_allocation_native}"
+  "bennu-source:2:1: ResourceError: iota resource request failed: allocation_unavailable\n")
 foreach(path iota lifted late)
   if(path STREQUAL "iota")
     set(allocation_expected

@@ -808,14 +808,27 @@ TEST_CASE("PARG-011-PROFILES") {
         bennu::ErrorKind::argument_error);
 }
 
-TEST_CASE("Issue 46 explicitly defers parameterized C emission to Issue 48") {
-  bennu::CEmissionResult emitted =
-      bennu::emit_c_source("parameters[n Int]\nn\n");
-  REQUIRE_FALSE(emitted.ok);
-  CHECK(emitted.error.kind == bennu::ErrorKind::syntax_error);
-  REQUIRE(emitted.error.parameter.has_value());
-  CHECK(emitted.error.parameter->reason ==
-        bennu::ParameterErrorReason::unsupported_parameterized_surface);
+TEST_CASE("PARG-012-EMIT-C parameter slots are value independent") {
+  const std::string_view source =
+      "parameters[n Int delta Double enabled Bool]\n"
+      "iota[n]\n"
+      "add[delta n]\n"
+      "not[enabled]\n";
+  bennu::CEmissionResult emitted = bennu::emit_c_source(source);
+  bennu::CEmissionResult repeated = bennu::emit_c_source(source);
+  REQUIRE(emitted.ok);
+  REQUIRE(repeated.ok);
+  CHECK(emitted.source == repeated.source);
+  CHECK(emitted.source.find("int main(int argc, char **argv)") !=
+        std::string::npos);
+  CHECK(emitted.source.find("bennu_bind_arguments(argc, argv)") !=
+        std::string::npos);
+  CHECK(emitted.source.find("bennu_parameters[3]") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_IOTA_INT") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_ADD_DOUBLE") != std::string::npos);
+  CHECK(emitted.source.find("BENNU_IMPL_NOT_BOOL") != std::string::npos);
+  CHECK(emitted.source.find("strtod_l") == std::string::npos);
+  CHECK(emitted.source.find("newlocale") == std::string::npos);
 }
 
 TEST_CASE("PARG-017-REGRESSION") {
