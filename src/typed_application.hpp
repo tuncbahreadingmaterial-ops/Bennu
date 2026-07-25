@@ -9,7 +9,7 @@ PrimitiveApplicationResult apply_typed_primitive(
     PrimitiveApplicationContext &context,
     const PrimitiveDescriptor &descriptor,
     PrimitiveImplementation implementation,
-    std::span<const Value> arguments,
+    std::span<const Value *const> arguments,
     SourceLocation call_location);
 
 } // namespace bennu
