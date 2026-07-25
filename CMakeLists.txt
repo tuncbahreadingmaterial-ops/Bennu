@@ -286,6 +286,15 @@ if(BUILD_TESTING)
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/doctest_topology.cmake"
   )
+  add_test(
+    NAME workflow.validation_entry_points
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation_workflow_contract.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+      "${CMAKE_CURRENT_BINARY_DIR}"
+      "${CMAKE_COMMAND}"
+  )
 
   add_executable(bennu_stdout_tests tests/stdout_test.cpp src/cli_output.cpp)
   target_include_directories(bennu_stdout_tests PRIVATE src)
@@ -637,6 +646,7 @@ if(BUILD_TESTING)
     docs.smoke
     spec.traceability
     stdout.unit
+    workflow.validation_entry_points
   )
   set(bennu_review_validation_tests
     ${bennu_focused_validation_tests}
@@ -660,9 +670,16 @@ if(BUILD_TESTING)
     release.windows_version_resource
     unit.structural_host_allocation_refusal
   )
-  set(bennu_instrumentation_incompatible_tests
+  set(bennu_default_binary_only_tests
     release.linux_compatibility
     release.linux_package
+  )
+  set(bennu_strict_incompatible_tests
+    ${bennu_default_binary_only_tests}
+  )
+  set(bennu_sanitizer_incompatible_tests
+    ${bennu_default_binary_only_tests}
+    unit.structural_host_allocation_refusal
   )
 
   get_property(bennu_registered_tests DIRECTORY PROPERTY TESTS)
@@ -719,11 +736,21 @@ if(BUILD_TESTING)
       list(APPEND bennu_test_labels scope.platform)
     endif()
 
-    list(FIND bennu_instrumentation_incompatible_tests
-      "${bennu_test_name}" bennu_incompatible_test_index)
-    if(bennu_incompatible_test_index EQUAL -1)
-      list(APPEND bennu_test_labels tier.sanitize tier.strict)
-    else()
+    list(FIND bennu_strict_incompatible_tests
+      "${bennu_test_name}" bennu_strict_incompatible_test_index)
+    if(bennu_strict_incompatible_test_index EQUAL -1)
+      list(APPEND bennu_test_labels tier.strict)
+    endif()
+
+    list(FIND bennu_sanitizer_incompatible_tests
+      "${bennu_test_name}" bennu_sanitizer_incompatible_test_index)
+    if(bennu_sanitizer_incompatible_test_index EQUAL -1)
+      list(APPEND bennu_test_labels tier.sanitize)
+    endif()
+
+    list(FIND bennu_default_binary_only_tests
+      "${bennu_test_name}" bennu_default_binary_only_test_index)
+    if(NOT bennu_default_binary_only_test_index EQUAL -1)
       list(APPEND bennu_test_labels capability.default_binary)
     endif()
 

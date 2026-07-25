@@ -1,0 +1,141 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ninja-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release",
+      "inherits": "ninja-base",
+      "binaryDir": "${sourceDir}/build/preset-windows-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "windows-strict",
+      "displayName": "Windows strict/no-exceptions Release",
+      "inherits": "ninja-base",
+      "binaryDir": "${sourceDir}/build/preset-windows-strict",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /W4 /WX /permissive- /EHs-c- /D_HAS_EXCEPTIONS=0 /wd4459",
+        "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS /W4 /WX"
+      }
+    },
+    {
+      "name": "gnu-strict",
+      "displayName": "GNU-compatible strict/no-exceptions Release",
+      "inherits": "ninja-base",
+      "binaryDir": "${sourceDir}/build/preset-gnu-strict",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror -fno-exceptions",
+        "CMAKE_C_FLAGS": "-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror"
+      }
+    },
+    {
+      "name": "linux-sanitize",
+      "displayName": "Linux ASan+UBSan Debug",
+      "inherits": "ninja-base",
+      "binaryDir": "${sourceDir}/build/preset-linux-sanitize",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions",
+        "CMAKE_C_FLAGS": "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release"
+    },
+    {
+      "name": "windows-strict",
+      "configurePreset": "windows-strict"
+    },
+    {
+      "name": "gnu-strict",
+      "configurePreset": "gnu-strict"
+    },
+    {
+      "name": "linux-sanitize",
+      "configurePreset": "linux-sanitize"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-release-full",
+      "configurePreset": "windows-release",
+      "filter": {
+        "include": {
+          "label": "^tier[.]full$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-release-qa",
+      "configurePreset": "windows-release",
+      "filter": {
+        "include": {
+          "label": "^tier[.]qa$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-strict",
+      "configurePreset": "windows-strict",
+      "filter": {
+        "include": {
+          "label": "^tier[.]strict$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "gnu-strict",
+      "configurePreset": "gnu-strict",
+      "filter": {
+        "include": {
+          "label": "^tier[.]strict$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-sanitize",
+      "configurePreset": "linux-sanitize",
+      "filter": {
+        "include": {
+          "label": "^tier[.]sanitize$"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

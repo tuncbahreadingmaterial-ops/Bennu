@@ -1,3 +1,4 @@
 third_party/doctest/LICENSE.txt text eol=lf
 third_party/doctest/doctest/doctest.h text eol=lf
 VERSION text eol=lf
+*.sh text eol=lf
