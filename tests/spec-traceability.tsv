@@ -82,3 +82,7 @@ BENNU-SPEC-0006 sections 4 6.1 6.2 and 7.3 literal types canonical values and pr
 BENNU-SPEC-0006 sections 6.5 7.1 7.2 and 7.3 literal allocation failure cleanup|src/rewrite.cpp|TUP-050-FAULT-TRANSACTION
 BENNU-SPEC-0006 section 8.3 source direct calls preserve one tuple argument|src/rewrite.cpp|TUP-050-DIRECT-PRESERVATION
 BENNU-SPEC-0006 sections 5 6 7 10 and 13 deterministic strict C11 and native tuple agreement|tests/tuple_literal_contract.cmake|TUP-017-STRICT-C-NATIVE
+BENNU-SPEC-0006 sections 8.1 8.2 and 8.4 static one-level prefix expansion and ordering|src/rewrite.cpp|TUP-010-STATIC-SPREAD
+BENNU-SPEC-0006 sections 8.2 and 7.3 borrowed spread execution and transactional release|src/rewrite.cpp|TUP-011-SPREAD-RUNTIME
+BENNU-SPEC-0006 section 9 semantic argument provenance for literal and computed tuple elements|src/rewrite.cpp|TUP-013-PROVENANCE
+BENNU-SPEC-0006 sections 8 through 10 evaluator strict C11 and native prefix-spread agreement|tests/tuple_literal_contract.cmake|TUP-051-STRICT-C-NATIVE

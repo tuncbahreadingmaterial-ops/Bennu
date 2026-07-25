@@ -1,4 +1,5 @@
 # TEST-ID: TUP-017-STRICT-C-NATIVE
+# TEST-ID: TUP-051-STRICT-C-NATIVE
 foreach(required BENNU_EXECUTABLE BENNU_PUBLIC_RESOURCE_FIXTURE
                  BENNU_SOURCE_DIR BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX)
@@ -112,7 +113,8 @@ function(strict_compile_tuple input output label)
   endif()
 endfunction()
 
-set(probe_names tuple-limit fault-vector fault-inner fault-outer multi-root)
+set(probe_names tuple-limit fault-vector fault-inner fault-outer multi-root
+                spread-fault spread-provenance)
 set(probe_arguments)
 foreach(probe IN LISTS probe_names)
   set(probe_c "${work_directory}/${probe}-probe.c")

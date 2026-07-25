@@ -153,6 +153,11 @@ typedef struct BennuResources {
   size_t failure_operand_count;
   BennuSourceSpan failure_primary_span;
   BennuSourceSpan failure_context_span;
+  BennuSourceSpan failure_primitive_span;
+  int failure_has_operand_span;
+  BennuSourceSpan failure_operand_span;
+  size_t failure_semantic_origin_count;
+  BennuSourceSpan failure_semantic_origins[2];
 } BennuResources;
 
 static BennuSourceLocation bennu_source_location(size_t offset, size_t line,
@@ -198,6 +203,30 @@ static void bennu_set_failure(BennuResources *resources,
   if (resources->failure == BENNU_FAILURE_NONE) {
     resources->failure = failure;
   }
+}
+
+static void bennu_prepare_spread_provenance(
+    BennuResources *resources, BennuSourceSpan primitive_span,
+    BennuSourceSpan operand_span, size_t semantic_origin_count,
+    BennuSourceSpan first_origin, BennuSourceSpan second_origin) {
+  if (resources->failure == BENNU_FAILURE_NONE) {
+    resources->failure_primitive_span = primitive_span;
+    resources->failure_has_operand_span = 1;
+    resources->failure_operand_span = operand_span;
+    resources->failure_semantic_origin_count = semantic_origin_count;
+    resources->failure_semantic_origins[0] = first_origin;
+    resources->failure_semantic_origins[1] = second_origin;
+  }
+}
+
+static void bennu_clear_spread_provenance(BennuResources *resources) {
+  BennuSourceSpan empty = {{0U, 0U, 0U}, {0U, 0U, 0U}};
+  resources->failure_primitive_span = empty;
+  resources->failure_has_operand_span = 0;
+  resources->failure_operand_span = empty;
+  resources->failure_semantic_origin_count = 0U;
+  resources->failure_semantic_origins[0] = empty;
+  resources->failure_semantic_origins[1] = empty;
 }
 
 static void bennu_set_resource_failure(
@@ -293,6 +322,27 @@ static int bennu_require_shape(
     resources->failure_context_span = context_span;
   }
   return 0;
+}
+
+static int bennu_require_spread_shape(
+    BennuResources *resources, const char *primitive,
+    BennuPrimitiveId primitive_id, size_t argument_position,
+    size_t expected_count, const BennuValue *argument,
+    BennuSourceSpan primary_span, BennuSourceSpan context_span,
+    BennuSourceSpan primitive_span, BennuSourceSpan operand_span,
+    size_t semantic_origin_count, BennuSourceSpan first_origin,
+    BennuSourceSpan second_origin) {
+  int accepted = 0;
+  bennu_prepare_spread_provenance(
+      resources, primitive_span, operand_span, semantic_origin_count,
+      first_origin, second_origin);
+  accepted = bennu_require_shape(
+      resources, primitive, primitive_id, argument_position, expected_count,
+      argument, primary_span, context_span);
+  if (accepted != 0) {
+    bennu_clear_spread_provenance(resources);
+  }
+  return accepted;
 }
 
 static int bennu_charge_work(
@@ -829,6 +879,27 @@ static int bennu_apply(BennuResources *resources,
   return 1;
 }
 
+static int bennu_apply_spread(
+    BennuResources *resources, BennuImplementation implementation,
+    BennuValue *result, const BennuValue *left, const BennuValue *right,
+    size_t argument_count, const char *admission_point,
+    BennuPrimitiveId primitive_id, BennuSourceSpan primary_span,
+    BennuSourceSpan context_span, BennuSourceSpan primitive_span,
+    BennuSourceSpan operand_span, size_t semantic_origin_count,
+    BennuSourceSpan first_origin, BennuSourceSpan second_origin) {
+  int applied = 0;
+  bennu_prepare_spread_provenance(
+      resources, primitive_span, operand_span, semantic_origin_count,
+      first_origin, second_origin);
+  applied = bennu_apply(
+      resources, implementation, result, left, right, argument_count,
+      admission_point, primitive_id, primary_span, context_span);
+  if (applied != 0) {
+    bennu_clear_spread_provenance(resources);
+  }
+  return applied;
+}
+
 static int bennu_write_text(const char *text) {
   return fputs(text, stdout) == EOF ? 0 : 1;
 }
@@ -1105,6 +1176,7 @@ static int bennu_source_span_valid(BennuSourceSpan span) {
 }
 
 static int bennu_failure_context_valid(const BennuResources *resources) {
+  size_t origin_index = 0U;
   if (resources->failure_admission_point == NULL ||
       resources->failure_source_location.line == 0U ||
       resources->failure_source_location.column == 0U ||
@@ -1117,6 +1189,21 @@ static int bennu_failure_context_valid(const BennuResources *resources) {
       resources->failure_source_location.column !=
           resources->failure_primary_span.begin.column) {
     return 0;
+  }
+  if (resources->failure_has_operand_span != 0) {
+    if (!bennu_source_span_valid(resources->failure_primitive_span) ||
+        !bennu_source_span_valid(resources->failure_operand_span) ||
+        resources->failure_semantic_origin_count > 2U) {
+      return 0;
+    }
+    for (origin_index = 0U;
+         origin_index < resources->failure_semantic_origin_count;
+         ++origin_index) {
+      if (!bennu_source_span_valid(
+              resources->failure_semantic_origins[origin_index])) {
+        return 0;
+      }
+    }
   }
   if (resources->failure == BENNU_FAILURE_PROFILE) {
     return resources->failure_limit != BENNU_LIMIT_NONE &&

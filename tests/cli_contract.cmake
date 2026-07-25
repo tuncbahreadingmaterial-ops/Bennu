@@ -377,7 +377,7 @@ if(run_error_matrix)
     "unknown primitive 'wat'")
   check_run_error(expected_expression "inc " 1 5 "SyntaxError"
     "expected an expression")
-  check_run_error(prefix_tuple_type "inc [5]" 1 5 "TypeError"
+  check_run_error(prefix_tuple_type "inc [true]" 1 6 "TypeError"
     "inc arguments do not match an accepted signature; first unsupported argument is 1")
   check_run_error(trailing_input "true false" 1 6 "SyntaxError"
     "root expression has trailing input")

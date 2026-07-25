@@ -209,6 +209,10 @@ struct Error {
   std::optional<SourceSpan> primary_span{};
   std::optional<SourceSpan> context_span{};
   std::optional<SourceSpan> related_span{};
+  std::optional<SourceSpan> primitive_span{};
+  std::optional<SourceSpan> call_span{};
+  std::optional<SourceSpan> operand_span{};
+  std::vector<SourceSpan> semantic_origins{};
 };
 
 Error make_error(ErrorKind kind, SourceLocation location, std::string message);
