@@ -525,7 +525,7 @@ int main(void) {
       BennuResources snapshot = {0};
       if (bennu_execute(&snapshot) == 0 ||
           snapshot.failure != BENNU_FAILURE_DOMAIN ||
-          snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+          snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
           snapshot.failure_implementation != BENNU_IMPL_ADD_INT ||
           snapshot.failure_primitive_id != BENNU_PRIMITIVE_ADD ||
           snapshot.failure_signature.parameter_count != 2U ||
