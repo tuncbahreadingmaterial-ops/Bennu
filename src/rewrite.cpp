@@ -2148,6 +2148,24 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
+  std::vector<std::uint8_t> seen_roots(program.nodes.size(),
+                                       std::uint8_t{0U});
+  for (const std::size_t root : program.roots) {
+    const bool duplicate =
+        root < seen_roots.size() &&
+        seen_roots[root] != std::uint8_t{0U};
+    if (root >= program.nodes.size() || duplicate) {
+      RewriteEvaluationDiagnostic diagnostic =
+          empty_rewrite_evaluation_diagnostic();
+      diagnostic.stage = RewriteEvaluationStage::primitive_table;
+      diagnostic.error = make_error(
+          ErrorKind::invalid_primitive_table, SourceLocation{1U, 1U, 1U},
+          duplicate ? "typed rewrite lowering contains a repeated root"
+                    : "typed rewrite lowering contains an invalid root");
+      return RewriteLoweringResult{false, {}, std::move(diagnostic)};
+    }
+    seen_roots[root] = std::uint8_t{1U};
+  }
   RewriteLoweringProgram lowering;
   lowering.arguments = program.arguments;
   lowering.roots = program.roots;
@@ -3439,6 +3457,29 @@ void append_call_node(std::string &source, std::size_t node_index,
   }
 }
 
+void append_lowered_rewrite_nodes(std::string &source,
+                                  const RewriteLoweringProgram &lowering) {
+  std::vector<std::size_t> remaining_uses;
+  remaining_uses.reserve(lowering.nodes.size());
+  for (const RewriteLoweringNode &node : lowering.nodes) {
+    remaining_uses.push_back(node.use_count);
+  }
+  for (std::size_t index = 0U; index < lowering.nodes.size(); ++index) {
+    const RewriteLoweringNode &node = lowering.nodes[index];
+    if (node.kind == RewriteNodeKind::scalar_literal) {
+      append_scalar_node(source, index, node);
+    } else if (node.kind == RewriteNodeKind::vector_literal) {
+      append_vector_node(source, index, node);
+    } else {
+      append_call_node(source, index, node, lowering, remaining_uses);
+    }
+    if (node.use_count == 0U && !node.retained_root) {
+      source += "  bennu_release(&bennu_resources, &bennu_values[" +
+                std::to_string(index) + "]);\n";
+    }
+  }
+}
+
 CEmissionResult emit_rewrite_c_source_impl(
     std::string_view source,
     const CBackendConfiguration &configuration) {
@@ -3540,25 +3581,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   }
   generated += "  }\n";
 
-  std::vector<std::size_t> remaining_uses;
-  remaining_uses.reserve(lowering.nodes.size());
-  for (const RewriteLoweringNode &node : lowering.nodes) {
-    remaining_uses.push_back(node.use_count);
-  }
-  for (std::size_t index = 0U; index < lowering.nodes.size(); ++index) {
-    const RewriteLoweringNode &node = lowering.nodes[index];
-    if (node.kind == RewriteNodeKind::scalar_literal) {
-      append_scalar_node(generated, index, node);
-    } else if (node.kind == RewriteNodeKind::vector_literal) {
-      append_vector_node(generated, index, node);
-    } else {
-      append_call_node(generated, index, node, lowering, remaining_uses);
-    }
-    if (node.use_count == 0U && !node.retained_root) {
-      generated += "  bennu_release(&bennu_resources, &bennu_values[" +
-                   std::to_string(index) + "]);\n";
-    }
-  }
+  append_lowered_rewrite_nodes(generated, lowering);
   for (const std::size_t root : lowering.roots) {
     generated += "  if (!bennu_print_value(&bennu_values[" +
                  std::to_string(root) +
@@ -3695,11 +3718,15 @@ bool rewrite_program_invariants_hold(const RewriteProgram &program) {
     }
   }
   std::size_t previous_root_offset = 0U;
+  std::vector<std::uint8_t> seen_roots(program.nodes.size(),
+                                       std::uint8_t{0U});
   for (const std::size_t root : program.roots) {
     if (root >= program.nodes.size() ||
+        seen_roots[root] != std::uint8_t{0U} ||
         program.nodes[root].span.begin.offset < previous_root_offset) {
       return false;
     }
+    seen_roots[root] = std::uint8_t{1U};
     previous_root_offset = program.nodes[root].span.begin.offset;
   }
   return true;
@@ -4801,12 +4828,21 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
     values.push_back(std::move(allocated.value));
     std::vector<std::uint8_t> live{std::uint8_t{1U}};
     std::vector<std::size_t> remaining{2U};
-    REQUIRE(validate_value(values[0]).ok);
-    REQUIRE(complete_rewrite_consumer_attempt(
-        resources, arguments, nodes, remaining, values, live));
-    REQUIRE(validate_value(values[0]).ok);
-    REQUIRE(complete_rewrite_consumer_attempt(
-        resources, arguments, nodes, remaining, values, live));
+    for (std::size_t attempt = 0U; attempt < 2U; ++attempt) {
+      REQUIRE(validate_value(values[0]).ok);
+      const std::array<const Value *, 1> borrowed{{&values[0]}};
+      PrimitiveApplicationContext context{resources, 0U};
+      PrimitiveApplicationResult applied = apply_typed_primitive(
+          context, *find_primitive(PrimitiveId::inc),
+          PrimitiveImplementation::inc_integer, borrowed,
+          SourceLocation{1U, 1U, 1U});
+      REQUIRE(applied.ok);
+      REQUIRE(applied.value.container == ContainerKind::vector);
+      CHECK(applied.value.vector.integer_count == 0U);
+      REQUIRE(complete_rewrite_consumer_attempt(
+          resources, arguments, nodes, remaining, values, live));
+      CHECK(release_value_reservations(resources, applied.value).ok);
+    }
     CHECK(live[0] == std::uint8_t{0U});
     CHECK(resources.live_evaluation_bytes == 0U);
     CHECK(resources.reservation_ordinal == 0U);
@@ -4836,14 +4872,24 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
     const std::size_t live_before_consumers =
         resources.live_evaluation_bytes;
 
-    REQUIRE(validate_value(values[0]).ok);
-    REQUIRE(complete_rewrite_consumer_attempt(
-        resources, arguments, nodes, remaining, values, live));
-    CHECK(resources.live_evaluation_bytes == live_before_consumers);
-    CHECK(probe.logical_releases == 0U);
-    REQUIRE(validate_value(values[0]).ok);
-    REQUIRE(complete_rewrite_consumer_attempt(
-        resources, arguments, nodes, remaining, values, live));
+    for (std::size_t attempt = 0U; attempt < 2U; ++attempt) {
+      REQUIRE(validate_value(values[0]).ok);
+      const std::array<const Value *, 1> borrowed{{&values[0]}};
+      PrimitiveApplicationContext context{resources, 0U};
+      PrimitiveApplicationResult applied = apply_typed_primitive(
+          context, *find_primitive(PrimitiveId::inc),
+          PrimitiveImplementation::inc_integer, borrowed,
+          SourceLocation{1U, 1U, 1U});
+      REQUIRE_FALSE(applied.ok);
+      CHECK(applied.error.kind == ErrorKind::type_mismatch);
+      REQUIRE(validate_value(values[0]).ok);
+      REQUIRE(complete_rewrite_consumer_attempt(
+          resources, arguments, nodes, remaining, values, live));
+      if (attempt == 0U) {
+        CHECK(resources.live_evaluation_bytes == live_before_consumers);
+        CHECK(probe.logical_releases == 0U);
+      }
+    }
     CHECK(live[0] == std::uint8_t{0U});
     CHECK(probe.logical_releases == 2U);
     CHECK(resources.live_evaluation_bytes == 0U);
@@ -4857,6 +4903,9 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
   REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
   REQUIRE(parsed.program.arguments.size() == 2U);
   parsed.program.arguments[1] = parsed.program.arguments[0];
+  parsed.program.argument_spans[1] =
+      parsed.program.nodes[parsed.program.arguments[0]].span;
+  REQUIRE(rewrite_program_invariants_hold(parsed.program));
 
   RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
   REQUIRE(lowered.ok);
@@ -4866,26 +4915,41 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
   CHECK_FALSE(lowered.program.nodes[shared_node].retained_root);
   CHECK(lowered.program.nodes[2].use_count == 0U);
 
-  std::vector<std::size_t> remaining;
-  for (const RewriteLoweringNode &node : lowered.program.nodes) {
-    remaining.push_back(node.use_count);
-  }
-  std::string first_call;
-  append_call_node(first_call, 1U, lowered.program.nodes[1],
-                   lowered.program, remaining);
-  CHECK(first_call.find("bennu_release(&bennu_resources, &bennu_values[0])") ==
+  std::string emitted_nodes;
+  append_lowered_rewrite_nodes(emitted_nodes, lowered.program);
+  const std::string first_apply =
+      "bennu_apply(&bennu_resources, BENNU_IMPL_INC_INT, "
+      "&bennu_values[1]";
+  const std::string second_apply =
+      "bennu_apply(&bennu_resources, BENNU_IMPL_INC_INT, "
+      "&bennu_values[3]";
+  const std::string shared_release =
+      "bennu_release(&bennu_resources, &bennu_values[0])";
+  const std::size_t first_position = emitted_nodes.find(first_apply);
+  const std::size_t second_position = emitted_nodes.find(second_apply);
+  const std::size_t release_position = emitted_nodes.find(shared_release);
+  REQUIRE(first_position != std::string::npos);
+  REQUIRE(second_position != std::string::npos);
+  REQUIRE(release_position != std::string::npos);
+  CHECK(first_position < second_position);
+  CHECK(second_position < release_position);
+  CHECK(emitted_nodes.find(shared_release, release_position + 1U) ==
         std::string::npos);
-  CHECK(remaining[shared_node] == 1U);
+  CHECK(emitted_nodes.find("remaining_uses") == std::string::npos);
+  CHECK(emitted_nodes.find("reference_count") == std::string::npos);
+}
 
-  std::string second_call;
-  append_call_node(second_call, 3U, lowered.program.nodes[3],
-                   lowered.program, remaining);
-  CHECK(second_call.find(
-            "bennu_release(&bennu_resources, &bennu_values[0])") !=
-        std::string::npos);
-  CHECK(remaining[shared_node] == 0U);
-  CHECK(second_call.find("remaining_uses") == std::string::npos);
-  CHECK(second_call.find("reference_count") == std::string::npos);
+TEST_CASE("SHARED-ROOT duplicate owned roots are rejected before either backend") {
+  RewriteParseResult parsed = parse_rewrite("(1 2)");
+  REQUIRE(parsed.ok);
+  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+  REQUIRE(parsed.program.roots.size() == 1U);
+  parsed.program.roots.push_back(parsed.program.roots[0]);
+  CHECK_FALSE(rewrite_program_invariants_hold(parsed.program));
+  const RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  REQUIRE_FALSE(lowered.ok);
+  CHECK(lowered.diagnostic.stage == RewriteEvaluationStage::primitive_table);
+  CHECK(lowered.diagnostic.error.kind == ErrorKind::invalid_primitive_table);
 }
 
 TEST_CASE("SHARED-003 failure cleanup and live-byte boundaries are deterministic") {

@@ -15,6 +15,9 @@
   decrements all of its static argument uses only after shape/application work
   completes; a non-root owner is released when its count reaches zero. Roots
   retain their owner until result transfer or generated-output cleanup.
+  Root indices remain unique because the evaluator's result is a vector of
+  uniquely owned values; a repeated root would require a copy or shared owner,
+  so malformed repeated-root lowering is rejected before either backend.
   Generated C consumes the same counts while emitting code and writes a direct
   `bennu_release` only at a non-root argument's last successful use. Runtime
   values contain no reference count, borrowed result, or shared owner.
@@ -34,9 +37,12 @@
   management, mutation, or runtime reference counting. Bennu's ordered flat
   lowering fixes sharing and last use before execution.
 - **Validation/evidence:** `SHARED-001` covers immutable scalar, vector,
-  empty-vector, and nested tuple owners through final use and observes exact
-  logical release. `SHARED-002` duplicates a flat argument index and proves C
-  release is emitted only after its final call with no runtime use counter.
+  empty-vector, and nested tuple owners through two completed consumer attempts
+  and observes exact logical release. `SHARED-002` duplicates a flat argument
+  index in an invariant-valid program and drives the same whole-node emission
+  helper as production, proving C release is emitted only after its final call
+  with no runtime use counter. `SHARED-ROOT` proves repeated owned roots are
+  rejected before evaluator/backend behavior can diverge.
   `SHARED-003` covers the 47/48-byte live boundary, deterministic allocation
   ordinal 2 failure, retained completed-result cleanup, and exact releases.
   Existing rewrite, typed-lowering, and application focused suites remain
