@@ -116,7 +116,8 @@ if [[ -s "$stdout" || -s "$stderr" ]]; then
   echo "error: extracted Bennu emit-c produced unexpected output" >&2
   exit 1
 fi
-cc -std=c11 -pedantic-errors -Wall -Wextra -Werror "$generated_c" -o "$generated"
+cc -std=c11 -frounding-math -ffp-contract=off -fno-fast-math \
+  -pedantic-errors -Wall -Wextra -Werror "$generated_c" -o "$generated"
 if ! "$generated" >"$stdout" 2>"$stderr"; then
   echo "error: emitted C executable failed" >&2
   exit 1

@@ -202,9 +202,9 @@ try {
     $generatedExecutable = Join-Path $workRoot $(if ($Platform -eq "windows-x64") { "emitted.exe" } else { "emitted" })
     Invoke-Checked -FilePath $bennuPath -Arguments @("emit-c", $sourcePath, "-o", $generatedC) | Out-Null
     if ($Platform -eq "windows-x64") {
-      Invoke-Checked -FilePath "cl.exe" -Arguments @("/nologo", "/std:c11", $generatedC, "/Fe:$generatedExecutable") | Out-Null
+      Invoke-Checked -FilePath "cl.exe" -Arguments @("/nologo", "/std:c11", "/fp:strict", $generatedC, "/Fe:$generatedExecutable") | Out-Null
     } else {
-      Invoke-Checked -FilePath "cc" -Arguments @("-std=c11", $generatedC, "-o", $generatedExecutable) | Out-Null
+      Invoke-Checked -FilePath "cc" -Arguments @("-std=c11", "-frounding-math", "-ffp-contract=off", "-fno-fast-math", $generatedC, "-o", $generatedExecutable) | Out-Null
     }
     Assert-SmokeOutput -Actual @(Invoke-Checked -FilePath $generatedExecutable -Arguments @()) `
       -Journey "emitted C executable" -Expected $expectedOutput
