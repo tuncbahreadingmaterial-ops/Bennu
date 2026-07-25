@@ -152,11 +152,49 @@ std::string_view value_invariant_name(bennu::ValueInvariant invariant) {
     return "unknown_scalar_type";
   case bennu::ValueInvariant::inactive_scalar_field:
     return "inactive_scalar_field";
+  case bennu::ValueInvariant::inactive_vector_payload:
+    return "inactive_vector_payload";
+  case bennu::ValueInvariant::invalid_boolean_element:
+    return "invalid_boolean_element";
   case bennu::ValueInvariant::noncanonical_nan:
     return "noncanonical_nan";
+  case bennu::ValueInvariant::empty_owner:
+    return "empty_owner";
+  case bennu::ValueInvariant::invalid_value_root:
+    return "invalid_value_root";
+  case bennu::ValueInvariant::nonfinal_value_root:
+    return "nonfinal_value_root";
+  case bennu::ValueInvariant::inactive_tuple_field:
+    return "inactive_tuple_field";
+  case bennu::ValueInvariant::invalid_tuple_range:
+    return "invalid_tuple_range";
+  case bennu::ValueInvariant::overlapping_tuple_range:
+    return "overlapping_tuple_range";
+  case bennu::ValueInvariant::invalid_tuple_child_index:
+    return "invalid_tuple_child_index";
+  case bennu::ValueInvariant::non_postorder_tuple_child:
+    return "non_postorder_tuple_child";
+  case bennu::ValueInvariant::aliased_tuple_child:
+    return "aliased_tuple_child";
+  case bennu::ValueInvariant::invalid_vector_payload_handle:
+    return "invalid_vector_payload_handle";
+  case bennu::ValueInvariant::aliased_vector_payload:
+    return "aliased_vector_payload";
+  case bennu::ValueInvariant::orphan_value_node:
+    return "orphan_value_node";
+  case bennu::ValueInvariant::orphan_tuple_edge:
+    return "orphan_tuple_edge";
+  case bennu::ValueInvariant::orphan_vector_payload_handle:
+    return "orphan_vector_payload_handle";
+  case bennu::ValueInvariant::missing_tuple_reservation:
+    return "missing_tuple_reservation";
+  case bennu::ValueInvariant::aliased_tuple_reservation:
+    return "aliased_tuple_reservation";
+  case bennu::ValueInvariant::invalid_tuple_reservation_count:
+    return "invalid_tuple_reservation_count";
+  case bennu::ValueInvariant::orphan_tuple_reservation:
+    return "orphan_tuple_reservation";
   case bennu::ValueInvariant::none:
-  case bennu::ValueInvariant::inactive_vector_payload:
-  case bennu::ValueInvariant::invalid_boolean_element:
     break;
   }
   return "-";

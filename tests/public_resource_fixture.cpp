@@ -1052,7 +1052,8 @@ static int bennu_probe_checked_resource_matrix(void) {
     }
     {
       BennuResources empty_resources = {0};
-      BennuValue empty = {BENNU_VECTOR, BENNU_INT, 0U, 0U, INT64_C(0), 0.0, NULL};
+      BennuValue empty = {BENNU_VECTOR, BENNU_INT, 0U, 0U, INT64_C(0),
+                          0.0,          NULL,      NULL, 0U,         0U};
       BennuValue empty_result = {0};
       empty_resources.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
       if (!bennu_apply(&empty_resources, cases[case_index].implementation,
@@ -1068,7 +1069,8 @@ static int bennu_probe_checked_resource_matrix(void) {
   }
   for (case_index = 3U; case_index < 5U; ++case_index) {
     BennuResources shape = {0};
-    BennuValue argument = {BENNU_VECTOR, BENNU_INT, 3U, 0U, INT64_C(0), 0.0, NULL};
+    BennuValue argument = {BENNU_VECTOR, BENNU_INT, 3U, 0U, INT64_C(0),
+                           0.0,          NULL,      NULL, 0U,         0U};
     shape.profile = BENNU_PROFILE_TRUSTED_LOCAL_V1;
     if (bennu_require_shape(&shape, cases[case_index].name,
                             cases[case_index].primitive_id, 2U, 2U, &argument,

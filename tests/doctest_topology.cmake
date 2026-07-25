@@ -61,6 +61,11 @@ foreach(required_cmake_text IN ITEMS
   require_text("${cmake_text}" "${required_cmake_text}"
     "doctest build topology")
 endforeach()
+require_text("${cmake_text}"
+  "set(bennu_sanitizer_incompatible_tests
+    unit.structural_host_allocation_refusal
+  )"
+  "sanitizer-only structural allocation-refusal exclusion")
 foreach(removed_test_source IN ITEMS
     "tests/evaluator_test.cpp"
     "tests/c_emitter_test.cpp"

@@ -672,6 +672,9 @@ if(BUILD_TESTING)
     release.linux_compatibility
     release.linux_package
   )
+  set(bennu_sanitizer_incompatible_tests
+    unit.structural_host_allocation_refusal
+  )
 
   get_property(bennu_registered_tests DIRECTORY PROPERTY TESTS)
   foreach(bennu_test_name IN LISTS bennu_registered_tests)
@@ -733,7 +736,12 @@ if(BUILD_TESTING)
     list(FIND bennu_instrumentation_incompatible_tests
       "${bennu_test_name}" bennu_incompatible_test_index)
     if(bennu_incompatible_test_index EQUAL -1)
-      list(APPEND bennu_test_labels tier.sanitize tier.strict)
+      list(APPEND bennu_test_labels tier.strict)
+      list(FIND bennu_sanitizer_incompatible_tests
+        "${bennu_test_name}" bennu_sanitizer_incompatible_test_index)
+      if(bennu_sanitizer_incompatible_test_index EQUAL -1)
+        list(APPEND bennu_test_labels tier.sanitize)
+      endif()
     else()
       list(APPEND bennu_test_labels capability.default_binary)
     endif()
