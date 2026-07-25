@@ -1,5 +1,6 @@
 # TEST-ID: TUP-017-STRICT-C-NATIVE
-foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR BENNU_C_COMPILER
+foreach(required BENNU_EXECUTABLE BENNU_PUBLIC_RESOURCE_FIXTURE
+                 BENNU_SOURCE_DIR BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
@@ -85,6 +86,115 @@ if(NOT "${compile_exit}" STREQUAL "0")
     "stderr: [${compile_stderr}]")
 endif()
 
+function(strict_compile_tuple input output label)
+  if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+    file(TO_NATIVE_PATH "${input}" native_input)
+    file(TO_NATIVE_PATH "${output}" native_output)
+    set(script "${work_directory}/${label}-strict-compile.cmd")
+    file(WRITE "${script}"
+         "@call \"${vs_dev_command}\" -arch=x64 -host_arch=x64 >nul\r\n"
+         "@\"${native_c_compiler}\" /nologo /std:c11 /W4 /WX /TC \"${native_input}\" /Fe:\"${native_output}\"\r\n")
+    execute_process(
+      COMMAND cmd.exe /d /c "${script}"
+      WORKING_DIRECTORY "${work_directory}"
+      RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+  else()
+    execute_process(
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+              -pedantic-errors "${input}" -o "${output}"
+      WORKING_DIRECTORY "${work_directory}"
+      RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+  endif()
+  if(NOT "${result}" STREQUAL "0")
+    message(FATAL_ERROR
+      "${label} strict C11 compilation failed\nstdout: [${stdout}]\n"
+      "stderr: [${stderr}]")
+  endif()
+endfunction()
+
+set(probe_names tuple-limit fault-vector fault-inner fault-outer)
+set(probe_arguments)
+foreach(probe IN LISTS probe_names)
+  set(probe_c "${work_directory}/${probe}-probe.c")
+  set(probe_native
+      "${work_directory}/${probe}-native${BENNU_EXECUTABLE_SUFFIX}")
+  list(APPEND probe_arguments "${probe_c}" "${probe_native}")
+endforeach()
+execute_process(
+  COMMAND "${BENNU_PUBLIC_RESOURCE_FIXTURE}" --tuple-issue50
+          "${BENNU_C_COMPILER}" ${probe_arguments}
+  RESULT_VARIABLE probe_fixture_exit OUTPUT_VARIABLE probe_fixture_stdout
+  ERROR_VARIABLE probe_fixture_stderr)
+if(NOT "${probe_fixture_exit}" STREQUAL "0" OR
+   NOT probe_fixture_stdout STREQUAL "" OR
+   NOT probe_fixture_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "tuple resource/fault fixture failed\nexit: ${probe_fixture_exit}\n"
+    "stdout: [${probe_fixture_stdout}]\n"
+    "stderr: [${probe_fixture_stderr}]")
+endif()
+
+foreach(probe IN LISTS probe_names)
+  set(probe_c "${work_directory}/${probe}-probe.c")
+  set(probe_strict
+      "${work_directory}/${probe}-strict${BENNU_EXECUTABLE_SUFFIX}")
+  set(probe_native
+      "${work_directory}/${probe}-native${BENNU_EXECUTABLE_SUFFIX}")
+  strict_compile_tuple("${probe_c}" "${probe_strict}" "${probe}")
+  set(probe_expected_stderr "")
+  foreach(probe_executable IN ITEMS "${probe_strict}" "${probe_native}")
+    execute_process(
+      COMMAND "${probe_executable}"
+      RESULT_VARIABLE probe_exit OUTPUT_VARIABLE probe_stdout
+      ERROR_VARIABLE probe_stderr)
+    string(REPLACE "\r\n" "\n" probe_stderr "${probe_stderr}")
+    if(probe_expected_stderr STREQUAL "")
+      set(probe_expected_stderr "${probe_stderr}")
+    endif()
+    if(NOT "${probe_exit}" STREQUAL "0" OR
+       NOT probe_stdout STREQUAL "" OR probe_stderr STREQUAL "" OR
+       NOT probe_stderr STREQUAL probe_expected_stderr)
+      message(FATAL_ERROR
+        "${probe} generated/native failure parity mismatch for "
+        "${probe_executable}\nexit: ${probe_exit}\n"
+        "stdout: [${probe_stdout}]\nstderr: [${probe_stderr}]")
+    endif()
+  endforeach()
+endforeach()
+
+string(REPEAT "[" 512 deep_open)
+string(REPEAT "]" 512 deep_close)
+set(deep_text "${deep_open}1${deep_close}\n")
+set(deep_source "${work_directory}/deep-tuple.bennu")
+set(deep_c "${work_directory}/deep-tuple.c")
+set(deep_strict
+    "${work_directory}/deep-tuple-strict${BENNU_EXECUTABLE_SUFFIX}")
+set(deep_native
+    "${work_directory}/deep-tuple-native${BENNU_EXECUTABLE_SUFFIX}")
+file(WRITE "${deep_source}" "${deep_text}")
+execute_process(
+  COMMAND "${BENNU_EXECUTABLE}" run "${deep_source}"
+  RESULT_VARIABLE deep_eval_exit OUTPUT_VARIABLE deep_eval_stdout
+  ERROR_VARIABLE deep_eval_stderr)
+string(REPLACE "\r\n" "\n" deep_eval_stdout "${deep_eval_stdout}")
+if(NOT "${deep_eval_exit}" STREQUAL "0" OR
+   NOT deep_eval_stdout STREQUAL deep_text OR NOT deep_eval_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "deep tuple evaluator journey failed\nexit: ${deep_eval_exit}\n"
+    "stdout: [${deep_eval_stdout}]\nstderr: [${deep_eval_stderr}]")
+endif()
+execute_process(
+  COMMAND "${BENNU_EXECUTABLE}" emit-c "${deep_source}" -o "${deep_c}"
+  RESULT_VARIABLE deep_emit_exit OUTPUT_VARIABLE deep_emit_stdout
+  ERROR_VARIABLE deep_emit_stderr)
+if(NOT "${deep_emit_exit}" STREQUAL "0" OR
+   NOT deep_emit_stdout STREQUAL "" OR NOT deep_emit_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "deep tuple emit failed\nexit: ${deep_emit_exit}\n"
+    "stdout: [${deep_emit_stdout}]\nstderr: [${deep_emit_stderr}]")
+endif()
+strict_compile_tuple("${deep_c}" "${deep_strict}" "deep-tuple")
+
 if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
   file(TO_NATIVE_PATH "${BENNU_EXECUTABLE}" native_bennu)
   file(TO_NATIVE_PATH "${source}" native_source)
@@ -111,6 +221,31 @@ if(NOT "${build_exit}" STREQUAL "0" OR NOT build_stdout STREQUAL "" OR
     "stdout: [${build_stdout}]\nstderr: [${build_stderr}]")
 endif()
 
+if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+  file(TO_NATIVE_PATH "${deep_source}" native_deep_source)
+  file(TO_NATIVE_PATH "${deep_native}" native_deep_output)
+  set(deep_native_build_script "${work_directory}/deep-native-build.cmd")
+  file(WRITE "${deep_native_build_script}"
+       "@call \"${vs_dev_command}\" -arch=x64 -host_arch=x64 >nul\r\n"
+       "@\"${native_bennu}\" build \"${native_deep_source}\" -o \"${native_deep_output}\" --cc \"${native_c_compiler}\"\r\n")
+  execute_process(
+    COMMAND cmd.exe /d /c "${deep_native_build_script}"
+    RESULT_VARIABLE deep_build_exit OUTPUT_VARIABLE deep_build_stdout
+    ERROR_VARIABLE deep_build_stderr)
+else()
+  execute_process(
+    COMMAND "${BENNU_EXECUTABLE}" build "${deep_source}" -o "${deep_native}"
+            --cc "${BENNU_C_COMPILER}"
+    RESULT_VARIABLE deep_build_exit OUTPUT_VARIABLE deep_build_stdout
+    ERROR_VARIABLE deep_build_stderr)
+endif()
+if(NOT "${deep_build_exit}" STREQUAL "0" OR
+   NOT deep_build_stdout STREQUAL "" OR NOT deep_build_stderr STREQUAL "")
+  message(FATAL_ERROR
+    "deep tuple native build failed\nexit: ${deep_build_exit}\n"
+    "stdout: [${deep_build_stdout}]\nstderr: [${deep_build_stderr}]")
+endif()
+
 foreach(executable IN ITEMS "${emitted_executable}" "${native_executable}")
   execute_process(
     COMMAND "${executable}"
@@ -123,6 +258,21 @@ foreach(executable IN ITEMS "${emitted_executable}" "${native_executable}")
       "tuple native differential mismatch for ${executable}\n"
       "exit: ${run_exit}\nstdout: [${run_stdout}]\n"
       "stderr: [${run_stderr}]")
+  endif()
+endforeach()
+
+foreach(executable IN ITEMS "${deep_strict}" "${deep_native}")
+  execute_process(
+    COMMAND "${executable}"
+    RESULT_VARIABLE deep_run_exit OUTPUT_VARIABLE deep_run_stdout
+    ERROR_VARIABLE deep_run_stderr)
+  string(REPLACE "\r\n" "\n" deep_run_stdout "${deep_run_stdout}")
+  if(NOT "${deep_run_exit}" STREQUAL "0" OR
+     NOT deep_run_stdout STREQUAL deep_text OR NOT deep_run_stderr STREQUAL "")
+    message(FATAL_ERROR
+      "deep tuple generated/native mismatch for ${executable}\n"
+      "exit: ${deep_run_exit}\nstdout: [${deep_run_stdout}]\n"
+      "stderr: [${deep_run_stderr}]")
   endif()
 endforeach()
 

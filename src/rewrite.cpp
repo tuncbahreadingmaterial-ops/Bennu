@@ -1784,6 +1784,7 @@ struct RewriteEvaluationCreationData {
   ExecutionProfile profile;
   ResourceLimits limits;
   AllocationFailureInjection allocation_failure;
+  ResourceLifetimeObserver lifetime_observer{};
 };
 
 struct CBackendConfiguration {
@@ -1866,15 +1867,39 @@ struct RewriteEvaluationResult {
 
 EvaluationResources make_rewrite_resources(
     const RewriteEvaluationCreationData &creation) {
+  EvaluationResources resources;
   if (creation.profile == ExecutionProfile::trusted_local_v1 &&
       !creation.limits.max_vector_bytes.has_value() &&
       !creation.limits.max_live_evaluation_bytes.has_value() &&
-      !creation.limits.max_work_units.has_value()) {
-    return make_trusted_local_resources(creation.allocation_failure);
+      !creation.limits.max_work_units.has_value() &&
+      !creation.limits.max_tuple_table_bytes.has_value()) {
+    resources = make_trusted_local_resources(creation.allocation_failure);
+  } else {
+    resources = make_evaluation_resources(
+        creation.profile, creation.limits, creation.allocation_failure,
+        0U, 0U, 0U);
   }
-  return make_evaluation_resources(
-      creation.profile, creation.limits, creation.allocation_failure,
-      0U, 0U, 0U);
+  if (creation.lifetime_observer.record != nullptr) {
+    static_cast<void>(set_evaluation_resource_lifetime_observer(
+        resources, creation.lifetime_observer));
+  }
+  return resources;
+}
+
+EvaluationResources invalid_rewrite_resources(
+    const RewriteEvaluationCreationData &creation) {
+  return EvaluationResources{
+      EvaluationResourceOwner{},
+      EvaluationResourceStateHandle{},
+      creation.profile,
+      creation.limits,
+      HostResourceErrorReason::none,
+      creation.allocation_failure,
+      0U,
+      0U,
+      0U,
+      creation.lifetime_observer,
+      0U};
 }
 
 SourceLocation rewrite_source_location(RewritePosition position) {
@@ -2040,12 +2065,19 @@ RewriteEvaluationResult rewrite_evaluation_failure(
 
 std::optional<RewriteSpan>
 first_tuple_span(const RewriteProgram &program) {
+  std::optional<RewriteSpan> earliest;
   for (const RewriteNode &node : program.nodes) {
-    if (node.kind == RewriteNodeKind::tuple_literal) {
-      return node.span;
+    if (node.kind != RewriteNodeKind::tuple_literal) {
+      continue;
+    }
+    if (!earliest.has_value() ||
+        node.span.begin.offset < earliest->begin.offset ||
+        (node.span.begin.offset == earliest->begin.offset &&
+         node.span.end.offset > earliest->end.offset)) {
+      earliest = node.span;
     }
   }
-  return std::nullopt;
+  return earliest;
 }
 
 std::optional<RewriteEvaluationDiagnostic>
@@ -2538,7 +2570,8 @@ VectorAllocationResult vector_literal_value(EvaluationResources &resources,
 
 void release_rewrite_values(EvaluationResources &resources,
                             std::vector<Value> &values) {
-  for (Value &value : values) {
+  for (std::size_t index = values.size(); index != 0U; --index) {
+    Value &value = values[index - 1U];
     if (value.container == ContainerKind::vector) {
       release_vector_reservation(resources, value);
     } else {
@@ -2552,7 +2585,8 @@ void release_rewrite_values(EvaluationResources &resources,
 void release_rewrite_node_values(EvaluationResources &resources,
                                  std::vector<Value> &values,
                                  std::vector<std::uint8_t> &live) {
-  for (std::size_t index = 0U; index < values.size(); ++index) {
+  for (std::size_t end = values.size(); end != 0U; --end) {
+    const std::size_t index = end - 1U;
     if (live[index] == std::uint8_t{0U}) {
       continue;
     }
@@ -2914,9 +2948,70 @@ CBackendConfiguration c_backend_configuration(
       configuration.allocation_failure};
 }
 
+std::optional<Error> validate_rewrite_configuration(
+    ExecutionProfile profile, const ResourceLimits &limits,
+    std::string_view producer_name) {
+  const bool has_configured_limit =
+      limits.max_vector_bytes.has_value() ||
+      limits.max_live_evaluation_bytes.has_value() ||
+      limits.max_work_units.has_value() ||
+      limits.max_tuple_table_bytes.has_value();
+  std::string_view message;
+  switch (profile) {
+  case ExecutionProfile::trusted_local_v1:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v1 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v1:
+    if (has_configured_limit &&
+        !limits.max_tuple_table_bytes.has_value()) {
+      return std::nullopt;
+    }
+    message = limits.max_tuple_table_bytes.has_value()
+                  ? "bounded-v1 does not support max_tuple_table_bytes"
+                  : "bounded-v1 requires at least one configured resource limit";
+    break;
+  case ExecutionProfile::trusted_local_v2:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v2 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v2:
+    if (has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "bounded-v2 requires at least one configured resource limit";
+    break;
+  default:
+    message = "execution profile tag is unknown";
+    break;
+  }
+
+  Error error = make_error(
+      ErrorKind::invalid_execution_profile, SourceLocation{1U, 1U, 1U});
+  error.static_message = message;
+  error.primitive =
+      make_primitive_error_context(producer_name, std::nullopt);
+  return error;
+}
+
 RewriteEvaluationResult evaluate_rewrite_source_impl(
     std::string_view source, const RewriteEvaluationCreationData &creation,
     bool require_single_root, std::span<const Value> parameter_values) {
+  std::optional<Error> configuration_error =
+      validate_rewrite_configuration(
+          creation.profile, creation.limits, "rewrite-evaluator");
+  if (configuration_error.has_value()) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::resource_admission;
+    diagnostic.error = std::move(*configuration_error);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
+  }
   EvaluationResources resources = make_rewrite_resources(creation);
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
@@ -3632,9 +3727,9 @@ void append_call_node(std::string &source, std::size_t node_index,
   source += ", ";
   append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n";
-  for (std::size_t argument = 0U; argument < node.argument_count; ++argument) {
+  for (std::size_t end = node.argument_count; end != 0U; --end) {
     const std::size_t argument_node =
-        program.arguments[node.first_argument + argument];
+        program.arguments[node.first_argument + end - 1U];
     source += "  bennu_release(&bennu_resources, &bennu_values[" +
               std::to_string(argument_node) + "]);\n";
   }
@@ -3643,6 +3738,12 @@ void append_call_node(std::string &source, std::size_t node_index,
 CEmissionResult emit_rewrite_c_source_impl(
     std::string_view source,
     const CBackendConfiguration &configuration) {
+  std::optional<Error> configuration_error =
+      validate_rewrite_configuration(
+          configuration.profile, configuration.limits, "rewrite-emitter");
+  if (configuration_error.has_value()) {
+    return CEmissionResult{false, {}, std::move(*configuration_error)};
+  }
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
@@ -3767,11 +3868,12 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "])) { goto bennu_output_failure; }\n";
   }
   if (!lowering.nodes.empty()) {
-    generated += "  { size_t bennu_index = 0U;\n"
-                 "    for (bennu_index = 0U; bennu_index < ";
+    generated += "  { size_t bennu_index = ";
     append_c_unsigned(generated, lowering.nodes.size());
     generated +=
-        "; ++bennu_index) {\n"
+        ";\n"
+        "    while (bennu_index != 0U) {\n"
+        "      --bennu_index;\n"
         "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
         "    }\n"
         "  }\n";
@@ -3780,10 +3882,11 @@ CEmissionResult emit_rewrite_c_source_impl(
                "  return fflush(stdout) == 0 ? 0 : 1;\n";
   if (!lowering.nodes.empty()) {
     generated += "bennu_failure:\n"
-                 "  { size_t bennu_index = 0U;\n"
-                 "    for (bennu_index = 0U; bennu_index < ";
+                 "  { size_t bennu_index = ";
     append_c_unsigned(generated, lowering.nodes.size());
-    generated += "; ++bennu_index) {\n"
+    generated += ";\n"
+                 "    while (bennu_index != 0U) {\n"
+                 "      --bennu_index;\n"
                  "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
                  "    }\n"
                  "  }\n"
@@ -3792,11 +3895,12 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "  return 1;\n";
     if (!lowering.roots.empty()) {
       generated += "bennu_output_failure:\n"
-                   "  { size_t bennu_index = 0U;\n"
-                   "    for (bennu_index = 0U; bennu_index < ";
+                   "  { size_t bennu_index = ";
       append_c_unsigned(generated, lowering.nodes.size());
       generated +=
-          "; ++bennu_index) {\n"
+          ";\n"
+          "    while (bennu_index != 0U) {\n"
+          "      --bennu_index;\n"
           "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
           "    }\n"
           "  }\n"
@@ -5143,6 +5247,73 @@ TEST_CASE("rewrite evaluator validates every complete execution profile early") 
   }
 }
 
+TEST_CASE("TUP-050 invalid configuration precedes source analysis") {
+  struct PrecedenceCase {
+    RewriteEvaluationCreationData creation;
+    std::string_view expected_message;
+  };
+  const ResourceLimits no_limits{
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  const ResourceLimits tuple_limit{
+      std::nullopt, std::nullopt, std::nullopt, 16U};
+  const std::array<PrecedenceCase, 3> cases{{
+      {{ExecutionProfile::bounded_v2, no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       "bounded-v2 requires at least one configured resource limit"},
+      {{ExecutionProfile::trusted_local_v1, tuple_limit,
+        AllocationFailureInjection{std::nullopt}},
+       "trusted-local-v1 requires every resource limit to be omitted"},
+      {{ExecutionProfile::bounded_v1, tuple_limit,
+        AllocationFailureInjection{std::nullopt}},
+       "bounded-v1 does not support max_tuple_table_bytes"},
+  }};
+  const std::array<std::string_view, 3> sources{{
+      "add[1, 2]",
+      "[[1]]",
+      "bogus[1]",
+  }};
+
+  for (const PrecedenceCase &precedence_case : cases) {
+    for (const std::string_view source : sources) {
+      INFO(precedence_case.expected_message);
+      INFO(source);
+      RewriteEvaluationResult evaluated =
+          evaluate_rewrite_source(source, precedence_case.creation);
+      REQUIRE_FALSE(evaluated.ok);
+      CHECK(evaluated.diagnostic.stage ==
+            RewriteEvaluationStage::resource_admission);
+      CHECK(evaluated.diagnostic.error.kind ==
+            ErrorKind::invalid_execution_profile);
+      CHECK(evaluated.diagnostic.error.static_message ==
+            precedence_case.expected_message);
+      REQUIRE(evaluated.diagnostic.error.primitive.has_value());
+      CHECK(evaluated.diagnostic.error.primitive->name ==
+            "rewrite-evaluator");
+      CHECK(evaluated.resources.owner.token == 0U);
+      CHECK(evaluated.resources.reservation_ordinal == 0U);
+      CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+
+      const CBackendConfiguration emitter_configuration{
+          precedence_case.creation.profile,
+          precedence_case.creation.limits,
+          AllocationFailureInjection{std::nullopt},
+          AllocationFailureInjection{std::nullopt}};
+      CEmissionResult emitted =
+          emit_rewrite_c_source_impl(source, emitter_configuration);
+      REQUIRE_FALSE(emitted.ok);
+      CHECK(emitted.source.empty());
+      CHECK(emitted.error.kind == ErrorKind::invalid_execution_profile);
+      CHECK(emitted.error.static_message ==
+            precedence_case.expected_message);
+      REQUIRE(emitted.error.primitive.has_value());
+      CHECK(emitted.error.primitive->name == "rewrite-emitter");
+      CHECK(emitted.error.location.offset == 1U);
+      CHECK(emitted.error.location.line == 1U);
+      CHECK(emitted.error.location.column == 1U);
+    }
+  }
+}
+
 TEST_CASE("rewrite evaluator constructs accounted typed vector literals") {
   const RewriteEvaluationCreationData creation{
       ExecutionProfile::trusted_local_v1,
@@ -5475,6 +5646,103 @@ TEST_CASE("rewrite evaluator refuses resources before latent scalar domain work"
 }
 
 TEST_CASE("TUP-001-GRAMMAR") {
+  const RewriteParseResult comprehensive = parse_rewrite(
+      "parameters[n Int]\n"
+      "[]\n"
+      "[n]\n"
+      "[1 2.5 true [n]]\n"
+      "[\n"
+      "  n\n"
+      "]\n"
+      "add[]\n"
+      "[]");
+  REQUIRE(comprehensive.ok);
+  CHECK(rewrite_flat_snapshot(comprehensive.program) ==
+        R"snapshot(roots=[0,2,8,10,11,12];nodes=[{kind=tuple_literal,span=[19:2:1,21:2:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[23:3:2,24:3:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[22:3:1,25:3:4),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0},{kind=scalar_literal,span=[27:4:2,28:4:3),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[29:4:4,32:4:7),element_type=double_precision,boolean=0,integer=0,double_precision=bits:4004000000000000,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[33:4:8,37:4:12),element_type=boolean,boolean=1,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[39:4:14,40:4:15),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[38:4:13,41:4:16),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=1,element_count=1,first_element_span=1,call_index=0},{kind=tuple_literal,span=[26:4:1,42:4:17),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=2,element_count=4,first_element_span=2,call_index=0},{kind=parameter_reference,span=[47:6:3,48:6:4),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[43:5:1,50:7:2),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=6,element_count=1,first_element_span=6,call_index=0},{kind=primitive_call,span=[51:8:1,56:8:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[57:9:1,59:9:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=7,element_count=0,first_element_span=7,call_index=0}];arguments=[];argument_spans=[];calls=[{syntax=bracketed,name=add,name_span=[51:8:1,54:8:4),opening_delimiter_span=[54:8:4,55:8:5),closing_delimiter_span=[55:8:5,56:8:6),prefix_separator_span=[55:8:5,55:8:5),span=[51:8:1,56:8:6),first_argument=0,argument_count=0,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[1,6,3,4,5,7,9];tuple_element_spans=[[23:3:2,24:3:3),[39:4:14,40:4:15),[27:4:2,28:4:3),[29:4:4,32:4:7),[33:4:8,37:4:12),[38:4:13,41:4:16),[47:6:3,48:6:4)])snapshot");
+
+  const std::array<std::string_view, 4> lowering_sources{{
+      "[]",
+      "[1]",
+      "[\n 1\n [2.5 true]\n]",
+      "parameters[n Int]\n[n]",
+  }};
+  const std::array<std::string_view, 4> lowering_snapshots{{
+      "roots=[0];arguments=[];nodes=["
+      "0:tuple_literal/boolean/tuple(0)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-3]",
+      "roots=[1];arguments=[];nodes=["
+      "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=2-3,"
+      "1:tuple_literal/boolean/tuple(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-4]",
+      "roots=[4];arguments=[];nodes=["
+      "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=4-5,"
+      "1:scalar_literal/double_precision/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=8-11,"
+      "2:scalar_literal/boolean/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=12-16,"
+      "3:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=7-17,"
+      "4:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-19]",
+      "roots=[1];arguments=[];nodes=["
+      "0:parameter_reference/integer/scalar(1)/impl=0/parameter=0/"
+      "arguments=0+0/shape_check=0/span=20-21,"
+      "1:tuple_literal/boolean/tuple(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=19-22]",
+  }};
+  for (std::size_t index = 0U; index < lowering_sources.size(); ++index) {
+    const std::string_view source = lowering_sources[index];
+    RewriteParseResult lowering_parse = parse_rewrite(source);
+    REQUIRE(lowering_parse.ok);
+    REQUIRE(resolve_rewrite_primitives(lowering_parse.program).ok);
+    RewriteLoweringResult lowering_result =
+        lower_rewrite_program(lowering_parse.program);
+    REQUIRE(lowering_result.ok);
+    INFO(source);
+    CHECK(rewrite_lowering_snapshot(lowering_result.program) ==
+          lowering_snapshots[index]);
+  }
+
+  const RewriteParseResult invalid = parse_rewrite("[1, 2]");
+  REQUIRE_FALSE(invalid.ok);
+  CHECK(invalid.diagnostic.error == RewriteParseError::invalid_byte);
+  CHECK(span_is(invalid.diagnostic.primary, 3U, 1U, 3U, 4U, 1U, 4U));
+  CHECK(span_is(invalid.diagnostic.context, 1U, 1U, 1U, 7U, 1U, 7U));
+  CHECK(span_is(invalid.diagnostic.related, 1U, 1U, 1U, 2U, 1U, 2U));
+
+  const RewriteParseResult missing_separator =
+      parse_rewrite("[1[2]]");
+  REQUIRE_FALSE(missing_separator.ok);
+  CHECK(missing_separator.diagnostic.error ==
+        RewriteParseError::missing_separator);
+  CHECK(span_is(missing_separator.diagnostic.primary, 3U, 1U, 3U, 4U, 1U,
+                4U));
+  CHECK(span_is(missing_separator.diagnostic.context, 1U, 1U, 1U, 7U, 1U,
+                7U));
+  CHECK(span_is(missing_separator.diagnostic.related, 1U, 1U, 1U, 2U, 1U,
+                2U));
+
+  const RewriteParseResult missing_delimiter = parse_rewrite("[1");
+  REQUIRE_FALSE(missing_delimiter.ok);
+  CHECK(missing_delimiter.diagnostic.error ==
+        RewriteParseError::missing_delimiter);
+  CHECK(span_is(missing_delimiter.diagnostic.primary, 3U, 1U, 3U, 3U, 1U,
+                3U));
+  CHECK(span_is(missing_delimiter.diagnostic.context, 1U, 1U, 1U, 3U, 1U,
+                3U));
+  CHECK(span_is(missing_delimiter.diagnostic.related, 1U, 1U, 1U, 2U, 1U,
+                2U));
+
+  const RewriteParseResult mismatched = parse_rewrite("[1)");
+  REQUIRE_FALSE(mismatched.ok);
+  CHECK(mismatched.diagnostic.error ==
+        RewriteParseError::mismatched_delimiter);
+  CHECK(span_is(mismatched.diagnostic.primary, 3U, 1U, 3U, 4U, 1U, 4U));
+  CHECK(span_is(mismatched.diagnostic.context, 1U, 1U, 1U, 4U, 1U, 4U));
+  CHECK(span_is(mismatched.diagnostic.related, 1U, 1U, 1U, 2U, 1U, 2U));
+
   const RewriteParseResult parsed =
       parse_rewrite("[[1 2] add[3 4]]");
   REQUIRE(parsed.ok);
@@ -5510,6 +5778,22 @@ TEST_CASE("TUP-001-GRAMMAR") {
                       .structural_type);
   REQUIRE(formatted.ok);
   CHECK(formatted.formatted == "Tuple<Tuple<Int, Int>, Int>");
+  CHECK(rewrite_lowering_snapshot(lowered.program) ==
+        "roots=[6];arguments=[3,4];nodes=["
+        "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=3-4,"
+        "1:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=5-6,"
+        "2:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=2-7,"
+        "3:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=12-13,"
+        "4:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=14-15,"
+        "5:primitive_call/integer/scalar(1)/impl=3/parameter=-/"
+        "arguments=0+2/shape_check=0/span=8-16,"
+        "6:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=1-17]");
 }
 
 TEST_CASE("TUP-050-EVALUATOR-FORMAT-PROFILE") {
@@ -5565,8 +5849,29 @@ TEST_CASE("TUP-050-EVALUATOR-FORMAT-PROFILE") {
   REQUIRE(profile.diagnostic.error.profile.has_value());
   CHECK(profile.diagnostic.error.profile->reason ==
         ProfileErrorReason::unsupported_value_kind);
-  CHECK(profile.diagnostic.primary.begin.offset == 5U);
+  CHECK(span_is(profile.diagnostic.primary, 5U, 1U, 5U, 8U, 1U, 8U));
   CHECK(profile.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult nested_profile =
+      evaluate_rewrite_source("[[1]]", v1);
+  REQUIRE_FALSE(nested_profile.ok);
+  CHECK(span_is(nested_profile.diagnostic.primary, 1U, 1U, 1U, 6U, 1U,
+                6U));
+  CHECK(span_is(nested_profile.diagnostic.context, 1U, 1U, 1U, 6U, 1U,
+                6U));
+  CHECK(span_is(nested_profile.diagnostic.related, 1U, 1U, 1U, 6U, 1U,
+                6U));
+
+  CEmissionResult nested_emission =
+      emit_rewrite_c_source_impl("[[1]]", c_backend_configuration(
+                                               EvaluationConfiguration{
+                                                   v1.profile, v1.limits,
+                                                   v1.allocation_failure}));
+  REQUIRE_FALSE(nested_emission.ok);
+  CHECK(nested_emission.error.kind == ErrorKind::profile_error);
+  CHECK(nested_emission.error.location.offset == 1U);
+  CHECK(nested_emission.error.location.line == 1U);
+  CHECK(nested_emission.error.location.column == 1U);
 }
 
 TEST_CASE("TUP-050-FAULT-TRANSACTION") {
@@ -5587,6 +5892,66 @@ TEST_CASE("TUP-050-FAULT-TRANSACTION") {
     CHECK(failed.resources.live_evaluation_bytes == 0U);
     CHECK(failed.values.empty());
     CHECK(failed.formatted.empty());
+  }
+
+  const auto record_event = [](void *context, ResourceLifetimeEvent event) {
+    auto &events =
+        *static_cast<std::vector<ResourceLifetimeEvent> *>(context);
+    events.push_back(event);
+  };
+  std::vector<ResourceLifetimeEvent> success_events;
+  const RewriteEvaluationCreationData success_creation{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt},
+      ResourceLifetimeObserver{&success_events, record_event}};
+  RewriteEvaluationResult released =
+      evaluate_rewrite_source("[(1) (2)]\n[(3)]", success_creation);
+  REQUIRE(released.ok);
+  REQUIRE(success_events.size() == 5U);
+  release_rewrite_evaluation_result(released);
+  REQUIRE(success_events.size() == 15U);
+  const std::array<std::size_t, 5> success_release_order{
+      {3U, 4U, 1U, 0U, 2U}};
+  for (std::size_t index = 0U; index < success_release_order.size();
+       ++index) {
+    const ResourceLifetimeEvent &logical =
+        success_events[5U + index * 2U];
+    const ResourceLifetimeEvent &physical =
+        success_events[6U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{success_release_order[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
+  }
+
+  std::vector<ResourceLifetimeEvent> failure_events;
+  const RewriteEvaluationCreationData outer_failure_creation{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{4U},
+      ResourceLifetimeObserver{&failure_events, record_event}};
+  RewriteEvaluationResult outer_failure = evaluate_rewrite_source(
+      "[(1)]\n[(2) [3]]", outer_failure_creation);
+  REQUIRE_FALSE(outer_failure.ok);
+  CHECK(outer_failure.resources.live_evaluation_bytes == 0U);
+  REQUIRE(failure_events.size() == 12U);
+  const std::array<std::size_t, 4> failure_release_order{
+      {3U, 2U, 0U, 1U}};
+  for (std::size_t index = 0U; index < failure_release_order.size();
+       ++index) {
+    const ResourceLifetimeEvent &logical =
+        failure_events[4U + index * 2U];
+    const ResourceLifetimeEvent &physical =
+        failure_events[5U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{failure_release_order[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
   }
 }
 
