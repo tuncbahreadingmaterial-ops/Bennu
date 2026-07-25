@@ -2694,6 +2694,18 @@ bool rewrite_lowering_invariants_hold(
        ++node_index) {
     const RewriteLoweringNode &node = lowering.nodes[node_index];
     const RewriteNode &source_node = program.nodes[node_index];
+    bool borrow = false;
+    switch (node.operation) {
+    case RewriteLoweringOperation::source_node:
+    case RewriteLoweringOperation::prepared_value:
+      break;
+    case RewriteLoweringOperation::immutable_borrow:
+    case RewriteLoweringOperation::immutable_borrow_failure:
+      borrow = true;
+      break;
+    default:
+      return false;
+    }
     if (node.kind != source_node.kind ||
         !spans_equal(node.source_span, source_node.span) ||
         node.source_location.offset != node.primary_span.begin.offset ||
@@ -2709,10 +2721,6 @@ bool rewrite_lowering_invariants_hold(
                 source_node.double_precision)) {
       return false;
     }
-    const bool borrow =
-        node.operation == RewriteLoweringOperation::immutable_borrow ||
-        node.operation ==
-            RewriteLoweringOperation::immutable_borrow_failure;
     if (borrow && source_node.kind != RewriteNodeKind::primitive_call) {
       return false;
     }
@@ -2957,11 +2965,17 @@ bool rewrite_lowering_invariants_hold(
     } else if (*call.primitive != PrimitiveId::inc ||
                node.implementation !=
                    PrimitiveImplementation::inc_integer ||
-               call.argument_count != 1U) {
+               call.argument_count != 1U ||
+               node.cardinality != RewriteCardinality::scalar ||
+               node.element_type != ScalarType::integer ||
+               node.element_count != 1U ||
+               node.runtime_shape_check) {
       return false;
     }
     const TypeArena expected_type =
-        implementation_result_container == ContainerKind::scalar
+        borrow
+            ? make_scalar_type(ScalarType::integer)
+            : implementation_result_container == ContainerKind::scalar
             ? make_scalar_type(node.element_type)
             : make_vector_type(node.element_type);
     if (node.cardinality == RewriteCardinality::tuple ||
@@ -4995,6 +5009,16 @@ struct PreparedSharedRewriteFixture {
   RewriteLoweringProgram lowering;
 };
 
+void configure_prepared_immutable_borrow(
+    RewriteLoweringNode &node, RewriteLoweringOperation operation) {
+  node.operation = operation;
+  node.cardinality = RewriteCardinality::scalar;
+  node.element_type = ScalarType::integer;
+  node.element_count = 1U;
+  node.runtime_shape_check = false;
+  node.structural_type = make_scalar_type(ScalarType::integer);
+}
+
 PreparedSharedRewriteFixture make_prepared_shared_fixture(
     std::string_view source) {
   RewriteParseResult parsed = parse_rewrite(source);
@@ -5104,12 +5128,14 @@ PreparedSharedRewriteFixture make_prepared_shared_tuple_fixture(
 
   lowered.program.arguments = parsed.program.arguments;
   lowered.program.roots = parsed.program.roots;
-  lowered.program.nodes[first_consumer].operation =
-      RewriteLoweringOperation::immutable_borrow;
-  lowered.program.nodes[second_consumer].operation =
+  configure_prepared_immutable_borrow(
+      lowered.program.nodes[first_consumer],
+      RewriteLoweringOperation::immutable_borrow);
+  configure_prepared_immutable_borrow(
+      lowered.program.nodes[second_consumer],
       fail_second_consumer
           ? RewriteLoweringOperation::immutable_borrow_failure
-          : RewriteLoweringOperation::immutable_borrow;
+          : RewriteLoweringOperation::immutable_borrow);
   PreparedSharedRewriteFixture fixture{
       std::move(parsed.program), std::move(lowered.program)};
   recompute_prepared_liveness(fixture);
@@ -6313,10 +6339,12 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
         make_prepared_shared_vector_fixture();
     fixture.lowering.nodes[0U].operation =
         RewriteLoweringOperation::prepared_value;
-    fixture.lowering.nodes[1U].operation =
-        RewriteLoweringOperation::immutable_borrow;
-    fixture.lowering.nodes[3U].operation =
-        RewriteLoweringOperation::immutable_borrow;
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[1U],
+        RewriteLoweringOperation::immutable_borrow);
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[3U],
+        RewriteLoweringOperation::immutable_borrow);
     REQUIRE(rewrite_lowering_invariants_hold(
         fixture.program, fixture.lowering));
 
@@ -6383,10 +6411,12 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
         make_prepared_shared_vector_fixture();
     fixture.lowering.nodes[0U].operation =
         RewriteLoweringOperation::prepared_value;
-    fixture.lowering.nodes[1U].operation =
-        RewriteLoweringOperation::immutable_borrow;
-    fixture.lowering.nodes[3U].operation =
-        RewriteLoweringOperation::immutable_borrow;
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[1U],
+        RewriteLoweringOperation::immutable_borrow);
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[3U],
+        RewriteLoweringOperation::immutable_borrow);
     EvaluationResources resources =
         make_trusted_local_v2_resources({std::nullopt});
     SharedLivenessProbe probe{0U, {}};
@@ -6433,10 +6463,12 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
         make_prepared_shared_vector_fixture();
     fixture.lowering.nodes[0U].operation =
         RewriteLoweringOperation::prepared_value;
-    fixture.lowering.nodes[1U].operation =
-        RewriteLoweringOperation::immutable_borrow;
-    fixture.lowering.nodes[3U].operation =
-        RewriteLoweringOperation::immutable_borrow;
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[1U],
+        RewriteLoweringOperation::immutable_borrow);
+    configure_prepared_immutable_borrow(
+        fixture.lowering.nodes[3U],
+        RewriteLoweringOperation::immutable_borrow);
     --fixture.lowering.nodes[0U].use_count;
     REQUIRE_FALSE(rewrite_lowering_invariants_hold(
         fixture.program, fixture.lowering));
@@ -6474,13 +6506,14 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
   }
 
   SUBCASE("prepared node and call structure is rejected before ownership moves") {
-    for (std::size_t mutation = 0U; mutation < 18U; ++mutation) {
+    for (std::size_t mutation = 0U; mutation < 23U; ++mutation) {
       PreparedSharedRewriteFixture fixture =
           make_prepared_shared_vector_fixture();
       fixture.lowering.nodes[0U].operation =
           RewriteLoweringOperation::prepared_value;
-      fixture.lowering.nodes[3U].operation =
-          RewriteLoweringOperation::immutable_borrow;
+      configure_prepared_immutable_borrow(
+          fixture.lowering.nodes[3U],
+          RewriteLoweringOperation::immutable_borrow);
       if (mutation == 0U) {
         fixture.lowering.nodes[1U].kind =
             RewriteNodeKind::vector_literal;
@@ -6523,8 +6556,21 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
             ScalarType::boolean;
       } else if (mutation == 16U) {
         ++fixture.lowering.nodes[1U].element_count;
-      } else {
+      } else if (mutation == 17U) {
         fixture.lowering.nodes[1U].runtime_shape_check = true;
+      } else if (mutation == 18U) {
+        fixture.lowering.nodes[3U].cardinality =
+            RewriteCardinality::static_vector;
+      } else if (mutation == 19U) {
+        ++fixture.lowering.nodes[3U].element_count;
+      } else if (mutation == 20U) {
+        fixture.lowering.nodes[3U].runtime_shape_check = true;
+      } else if (mutation == 21U) {
+        fixture.lowering.nodes[3U].element_type =
+            ScalarType::boolean;
+      } else {
+        fixture.lowering.nodes[3U].operation =
+            static_cast<RewriteLoweringOperation>(255);
       }
       INFO(mutation);
       REQUIRE_FALSE(rewrite_lowering_invariants_hold(
