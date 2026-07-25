@@ -2644,18 +2644,69 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
 bool rewrite_lowering_invariants_hold(
     const RewriteProgram &program,
     const RewriteLoweringProgram &lowering) {
+  const auto positions_equal = [](RewritePosition left,
+                                  RewritePosition right) {
+    return left.offset == right.offset && left.line == right.line &&
+           left.column == right.column;
+  };
+  const auto spans_equal = [&positions_equal](RewriteSpan left,
+                                               RewriteSpan right) {
+    return positions_equal(left.begin, right.begin) &&
+           positions_equal(left.end, right.end);
+  };
+  const auto doubles_equal = [](std::span<const double> left,
+                                std::span<const double> right) {
+    if (left.size() != right.size()) {
+      return false;
+    }
+    for (std::size_t index = 0U; index < left.size(); ++index) {
+      if (std::bit_cast<std::uint64_t>(left[index]) !=
+          std::bit_cast<std::uint64_t>(right[index])) {
+        return false;
+      }
+    }
+    return true;
+  };
   if (lowering.nodes.size() != program.nodes.size() ||
       lowering.arguments != program.arguments ||
       lowering.roots != program.roots ||
-      lowering.tuple_elements != program.tuple_elements) {
+      lowering.boolean_elements != program.boolean_elements ||
+      lowering.integer_elements != program.integer_elements ||
+      !doubles_equal(lowering.double_elements, program.double_elements) ||
+      lowering.tuple_elements != program.tuple_elements ||
+      lowering.tuple_element_spans.size() !=
+          program.tuple_element_spans.size() ||
+      program.arguments.size() != program.argument_spans.size()) {
     return false;
   }
+  for (std::size_t index = 0U;
+       index < lowering.tuple_element_spans.size(); ++index) {
+    if (!spans_equal(lowering.tuple_element_spans[index],
+                     program.tuple_element_spans[index])) {
+      return false;
+    }
+  }
+
+  std::vector<std::uint8_t> seen_calls(program.calls.size(),
+                                       std::uint8_t{0U});
   std::vector<std::size_t> expected_uses(lowering.nodes.size(), 0U);
   for (std::size_t node_index = 0U; node_index < lowering.nodes.size();
        ++node_index) {
     const RewriteLoweringNode &node = lowering.nodes[node_index];
     const RewriteNode &source_node = program.nodes[node_index];
-    if (node.kind != source_node.kind) {
+    if (node.kind != source_node.kind ||
+        !spans_equal(node.source_span, source_node.span) ||
+        node.source_location.offset != node.primary_span.begin.offset ||
+        node.source_location.line != node.primary_span.begin.line ||
+        node.source_location.column != node.primary_span.begin.column ||
+        !spans_equal(node.declaration_name_span,
+                     source_node.declaration_name_span) ||
+        node.first_element != source_node.first_element ||
+        node.boolean != source_node.boolean ||
+        node.integer != source_node.integer ||
+        std::bit_cast<std::uint64_t>(node.double_precision) !=
+            std::bit_cast<std::uint64_t>(
+                source_node.double_precision)) {
       return false;
     }
     const bool borrow =
@@ -2665,12 +2716,26 @@ bool rewrite_lowering_invariants_hold(
     if (borrow && source_node.kind != RewriteNodeKind::primitive_call) {
       return false;
     }
+    if (source_node.kind == RewriteNodeKind::unresolved_name) {
+      return false;
+    }
     if (source_node.kind == RewriteNodeKind::tuple_literal) {
-      if (source_node.first_element > lowering.tuple_elements.size() ||
+      if (node.cardinality != RewriteCardinality::tuple ||
+          node.element_type != source_node.element_type ||
+          node.element_count != source_node.element_count ||
+          node.first_argument != 0U || node.argument_count != 0U ||
+          node.primitive_id.has_value() ||
+          node.implementation != PrimitiveImplementation::none ||
+          node.runtime_shape_check ||
+          !spans_equal(node.primary_span, source_node.span) ||
+          node.admission_point != std::string_view{} ||
+          source_node.first_element > lowering.tuple_elements.size() ||
           source_node.element_count >
               lowering.tuple_elements.size() - source_node.first_element) {
         return false;
       }
+      std::vector<TypeArena> element_types;
+      element_types.reserve(source_node.element_count);
       for (std::size_t position = 0U;
            position < source_node.element_count; ++position) {
         const std::size_t element =
@@ -2678,35 +2743,235 @@ bool rewrite_lowering_invariants_hold(
         if (element >= node_index || element >= lowering.nodes.size()) {
           return false;
         }
+        TypeConstructionResult element_type =
+            clone_type(lowering.nodes[element].structural_type);
+        if (!element_type.ok) {
+          return false;
+        }
+        element_types.push_back(std::move(element_type.type));
         ++expected_uses[element];
       }
-      continue;
-    }
-    if (source_node.kind != RewriteNodeKind::primitive_call) {
-      if (node.first_argument != 0U || node.argument_count != 0U) {
+      TypeConstructionResult expected_type =
+          make_tuple_type(element_types);
+      if (!expected_type.ok ||
+          !structural_type_equal(node.structural_type,
+                                 expected_type.type)) {
         return false;
       }
       continue;
     }
-    if (source_node.call_index >= program.calls.size()) {
+    if (source_node.kind != RewriteNodeKind::primitive_call) {
+      const bool vector =
+          source_node.kind == RewriteNodeKind::vector_literal;
+      const bool parameter =
+          source_node.kind == RewriteNodeKind::parameter_reference;
+      if (node.element_type != source_node.element_type ||
+          node.element_count != (vector ? source_node.element_count : 1U) ||
+          node.cardinality !=
+              (vector ? RewriteCardinality::static_vector
+                      : RewriteCardinality::scalar) ||
+          node.first_argument != 0U || node.argument_count != 0U ||
+          node.primitive_id.has_value() ||
+          node.implementation != PrimitiveImplementation::none ||
+          node.runtime_shape_check ||
+          !spans_equal(node.primary_span, source_node.span) ||
+          node.parameter_index !=
+              (parameter ? source_node.first_element : 0U) ||
+          node.admission_point !=
+              (vector ? std::string_view{"vector-literal"}
+                      : std::string_view{})) {
+        return false;
+      }
+      if (vector) {
+        const std::size_t payload_size =
+            source_node.element_type == ScalarType::boolean
+                ? program.boolean_elements.size()
+                : source_node.element_type == ScalarType::integer
+                      ? program.integer_elements.size()
+                      : program.double_elements.size();
+        if (source_node.first_element > payload_size ||
+            source_node.element_count >
+                payload_size - source_node.first_element ||
+            source_node.first_element_span >
+                program.vector_element_spans.size() ||
+            source_node.element_count >
+                program.vector_element_spans.size() -
+                    source_node.first_element_span) {
+          return false;
+        }
+      }
+      if (parameter &&
+          (source_node.first_element >=
+               program.parameter_header.declarations.size() ||
+           program.parameter_header.declarations[source_node.first_element]
+                   .type != source_node.element_type ||
+           !spans_equal(
+               program.parameter_header
+                   .declarations[source_node.first_element]
+                   .name_span,
+               source_node.declaration_name_span))) {
+        return false;
+      }
+      const TypeArena expected_type =
+          vector ? make_vector_type(source_node.element_type)
+                 : make_scalar_type(source_node.element_type);
+      if (!structural_type_equal(node.structural_type, expected_type)) {
+        return false;
+      }
+      continue;
+    }
+    if (source_node.call_index >= program.calls.size() ||
+        seen_calls[source_node.call_index] != std::uint8_t{0U}) {
       return false;
     }
+    seen_calls[source_node.call_index] = std::uint8_t{1U};
     const RewriteCall &call = program.calls[source_node.call_index];
     if (call.first_argument > program.arguments.size() ||
         call.argument_count >
             program.arguments.size() - call.first_argument ||
         node.first_argument != call.first_argument ||
-        node.argument_count != call.argument_count) {
+        node.argument_count != call.argument_count ||
+        !spans_equal(source_node.span, call.span) ||
+        !spans_equal(node.primary_span, call.name_span) ||
+        !call.primitive.has_value() ||
+        node.primitive_id != call.primitive) {
+      return false;
+    }
+    const PrimitiveDescriptor *descriptor =
+        find_primitive(*call.primitive);
+    if (descriptor == nullptr ||
+        node.admission_point != descriptor->name ||
+        node.implementation == PrimitiveImplementation::none) {
+      return false;
+    }
+    bool implementation_matches = false;
+    ContainerKind implementation_result_container =
+        ContainerKind::scalar;
+    for (std::size_t signature_index = 0U;
+         signature_index < descriptor->signature_count;
+         ++signature_index) {
+      const PrimitiveSignature &signature =
+          descriptor->signatures[signature_index];
+      if (signature.parameter_count == call.argument_count &&
+          signature.implementation == node.implementation &&
+          signature.result.element == node.element_type) {
+        implementation_matches = true;
+        implementation_result_container =
+            signature.result.container;
+        break;
+      }
+    }
+    if (!implementation_matches) {
       return false;
     }
     for (std::size_t position = 0U; position < node.argument_count;
          ++position) {
       const std::size_t argument =
           lowering.arguments[node.first_argument + position];
-      if (argument >= node_index || argument >= lowering.nodes.size()) {
+      if (argument >= node_index || argument >= lowering.nodes.size() ||
+          !spans_equal(
+              program.argument_spans[node.first_argument + position],
+              program.nodes[argument].span)) {
         return false;
       }
       ++expected_uses[argument];
+    }
+    if (!borrow) {
+      bool signature_accepts = false;
+      for (std::size_t signature_index = 0U;
+           signature_index < descriptor->signature_count;
+           ++signature_index) {
+        const PrimitiveSignature &signature =
+            descriptor->signatures[signature_index];
+        bool accepts =
+            signature.parameter_count == call.argument_count &&
+            signature.implementation == node.implementation;
+        for (std::size_t position = 0U;
+             accepts && position < call.argument_count; ++position) {
+          accepts = lowering_type_accepts(
+              *descriptor, signature, position,
+              lowering.nodes[
+                  lowering.arguments[call.first_argument + position]]);
+        }
+        if (accepts) {
+          signature_accepts = true;
+          break;
+        }
+      }
+      if (!signature_accepts) {
+        return false;
+      }
+      RewriteCardinality expected_cardinality =
+          RewriteCardinality::scalar;
+      std::size_t expected_element_count = 1U;
+      bool expected_runtime_shape_check = false;
+      if (node.implementation ==
+          PrimitiveImplementation::iota_integer) {
+        expected_cardinality = RewriteCardinality::dynamic_vector;
+        expected_element_count = 0U;
+      } else {
+        std::optional<std::size_t> known_length;
+        bool has_dynamic = false;
+        std::size_t vector_count = 0U;
+        for (std::size_t position = 0U;
+             position < call.argument_count; ++position) {
+          const RewriteLoweringNode &argument =
+              lowering.nodes[
+                  lowering.arguments[call.first_argument + position]];
+          if (argument.cardinality == RewriteCardinality::scalar) {
+            continue;
+          }
+          if (argument.cardinality == RewriteCardinality::tuple) {
+            return false;
+          }
+          ++vector_count;
+          if (argument.cardinality ==
+              RewriteCardinality::dynamic_vector) {
+            has_dynamic = true;
+          } else if (!known_length.has_value()) {
+            known_length = argument.element_count;
+          } else if (*known_length != argument.element_count) {
+            return false;
+          }
+        }
+        expected_runtime_shape_check =
+            vector_count > 1U && has_dynamic;
+        if (vector_count == 0U) {
+          expected_cardinality = RewriteCardinality::scalar;
+          expected_element_count = 1U;
+        } else if (has_dynamic) {
+          expected_cardinality =
+              RewriteCardinality::dynamic_vector;
+          expected_element_count = known_length.value_or(0U);
+        } else {
+          expected_cardinality =
+              RewriteCardinality::static_vector;
+          expected_element_count = *known_length;
+        }
+      }
+      if (node.cardinality != expected_cardinality ||
+          node.element_count != expected_element_count ||
+          node.runtime_shape_check != expected_runtime_shape_check) {
+        return false;
+      }
+    } else if (*call.primitive != PrimitiveId::inc ||
+               node.implementation !=
+                   PrimitiveImplementation::inc_integer ||
+               call.argument_count != 1U) {
+      return false;
+    }
+    const TypeArena expected_type =
+        implementation_result_container == ContainerKind::scalar
+            ? make_scalar_type(node.element_type)
+            : make_vector_type(node.element_type);
+    if (node.cardinality == RewriteCardinality::tuple ||
+        !structural_type_equal(node.structural_type, expected_type)) {
+      return false;
+    }
+  }
+  for (const std::uint8_t seen : seen_calls) {
+    if (seen == std::uint8_t{0U}) {
+      return false;
     }
   }
   std::vector<std::uint8_t> roots(lowering.nodes.size(),
@@ -2849,7 +3114,19 @@ bool complete_rewrite_consumer_attempt(
   }
   for (const std::size_t argument_node : arguments) {
     --remaining_uses[argument_node];
-    if (remaining_uses[argument_node] == 0U &&
+  }
+  for (std::size_t end = arguments.size(); end != 0U; --end) {
+    const std::size_t position = end - 1U;
+    const std::size_t argument_node = arguments[position];
+    bool later_occurrence = false;
+    for (std::size_t later = position + 1U; later < arguments.size();
+         ++later) {
+      if (arguments[later] == argument_node) {
+        later_occurrence = true;
+        break;
+      }
+    }
+    if (!later_occurrence && remaining_uses[argument_node] == 0U &&
         !nodes[argument_node].retained_root) {
       release_rewrite_node_value(resources, values, live, argument_node);
     }
@@ -4165,7 +4442,21 @@ void complete_lowered_consumer_emission(
     const std::size_t argument_node =
         program.arguments[node.first_argument + position];
     --remaining_uses[argument_node];
-    if (remaining_uses[argument_node] == 0U &&
+  }
+  for (std::size_t end = node.argument_count; end != 0U; --end) {
+    const std::size_t position = end - 1U;
+    const std::size_t argument_node =
+        program.arguments[node.first_argument + position];
+    bool later_occurrence = false;
+    for (std::size_t later = position + 1U;
+         later < node.argument_count; ++later) {
+      if (program.arguments[node.first_argument + later] ==
+          argument_node) {
+        later_occurrence = true;
+        break;
+      }
+    }
+    if (!later_occurrence && remaining_uses[argument_node] == 0U &&
         !program.nodes[argument_node].retained_root) {
       final_use_releases.push_back(argument_node);
     }
@@ -4847,8 +5138,9 @@ void record_shared_release_order(void *context,
       *event.allocation_ordinal);
 }
 
-std::string make_shared_failure_native_probe(
-    std::string_view generated, std::string_view expected_failure,
+std::string make_shared_native_release_probe(
+    std::string_view generated,
+    std::optional<std::string_view> expected_failure,
     std::span<const std::size_t> expected_release_order) {
   std::string probe =
       "#include <stddef.h>\n"
@@ -4903,8 +5195,10 @@ std::string make_shared_failure_native_probe(
       "int main(void) {\n"
       "  BennuResources snapshot = {0};\n"
       "  size_t index = 0U;\n"
-      "  if (bennu_execute(&snapshot) == 0 || snapshot.failure != ";
-  probe += expected_failure;
+      "  if (bennu_execute(&snapshot) ";
+  probe += expected_failure.has_value() ? "== 0" : "!= 0";
+  probe += " || snapshot.failure != ";
+  probe += expected_failure.value_or("BENNU_FAILURE_NONE");
   probe +=
       " || snapshot.live_bytes != 0U || bennu_probe_live_count != 0U ||\n"
       "      bennu_probe_invalid_free != 0 || bennu_probe_release_count != ";
@@ -6180,13 +6474,11 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
   }
 
   SUBCASE("prepared node and call structure is rejected before ownership moves") {
-    for (std::size_t mutation = 0U; mutation < 4U; ++mutation) {
+    for (std::size_t mutation = 0U; mutation < 18U; ++mutation) {
       PreparedSharedRewriteFixture fixture =
           make_prepared_shared_vector_fixture();
       fixture.lowering.nodes[0U].operation =
           RewriteLoweringOperation::prepared_value;
-      fixture.lowering.nodes[1U].operation =
-          RewriteLoweringOperation::immutable_borrow;
       fixture.lowering.nodes[3U].operation =
           RewriteLoweringOperation::immutable_borrow;
       if (mutation == 0U) {
@@ -6196,24 +6488,64 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
         ++fixture.lowering.nodes[1U].first_argument;
       } else if (mutation == 2U) {
         --fixture.lowering.nodes[1U].argument_count;
-      } else {
+      } else if (mutation == 3U) {
         fixture.program.calls[0U].first_argument =
             fixture.program.arguments.size() + 1U;
         fixture.lowering.nodes[1U].first_argument =
             fixture.program.calls[0U].first_argument;
+      } else if (mutation == 4U) {
+        fixture.lowering.nodes[0U].element_type =
+            ScalarType::double_precision;
+      } else if (mutation == 5U) {
+        --fixture.lowering.nodes[0U].element_count;
+      } else if (mutation == 6U) {
+        ++fixture.lowering.nodes[0U].first_element;
+      } else if (mutation == 7U) {
+        ++fixture.lowering.integer_elements[0U];
+      } else if (mutation == 8U) {
+        ++fixture.lowering.nodes[2U].integer;
+      } else if (mutation == 9U) {
+        --fixture.program.nodes[0U].element_count;
+      } else if (mutation == 10U) {
+        fixture.program.calls[0U].primitive = PrimitiveId::add;
+      } else if (mutation == 11U) {
+        fixture.lowering.nodes[1U].primitive_id = PrimitiveId::add;
+      } else if (mutation == 12U) {
+        fixture.lowering.nodes[1U].implementation =
+            PrimitiveImplementation::add_integer;
+      } else if (mutation == 13U) {
+        fixture.lowering.nodes[1U].primary_span =
+            fixture.program.nodes[1U].span;
+      } else if (mutation == 14U) {
+        fixture.lowering.boolean_elements.push_back(std::uint8_t{1U});
+      } else if (mutation == 15U) {
+        fixture.lowering.nodes[1U].element_type =
+            ScalarType::boolean;
+      } else if (mutation == 16U) {
+        ++fixture.lowering.nodes[1U].element_count;
+      } else {
+        fixture.lowering.nodes[1U].runtime_shape_check = true;
       }
+      INFO(mutation);
       REQUIRE_FALSE(rewrite_lowering_invariants_hold(
           fixture.program, fixture.lowering));
 
       EvaluationResources resources =
           make_trusted_local_v2_resources({std::nullopt});
+      const std::array<std::int64_t, 2> owner_elements{{9, 10}};
+      VectorAllocationResult owner = copy_int_vector(
+          resources, owner_elements, SourceLocation{1U, 1U, 1U},
+          "invalid-prepared-structure-owner");
+      REQUIRE(owner.ok);
+      const void *const owner_storage =
+          owner.value.vector.integers.get();
       PreparedRewriteValues prepared{{}, {}, std::nullopt, 0U};
       for (std::size_t index = 0U;
            index < fixture.lowering.nodes.size(); ++index) {
         prepared.values.push_back(make_int_value(0));
         prepared.present.push_back(std::uint8_t{0U});
       }
-      prepared.values[0U] = make_int_value(9);
+      prepared.values[0U] = move_value(owner.value);
       prepared.present[0U] = std::uint8_t{1U};
       RewriteEvaluationResult evaluated =
           evaluate_prepared_rewrite_program(
@@ -6229,8 +6561,14 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
             ErrorKind::invalid_primitive_table);
       CHECK(prepared.present[0U] == std::uint8_t{1U});
       REQUIRE(validate_value(prepared.values[0U]).ok);
-      destroy_value(prepared.values[0U]);
+      CHECK(prepared.values[0U].vector.integers.get() ==
+            owner_storage);
+      CHECK(resources.live_evaluation_bytes == 16U);
+      CHECK(release_value_reservations(
+                resources, prepared.values[0U])
+                .ok);
       release_rewrite_evaluation_result(evaluated);
+      release_evaluation_resources(resources);
 
       const CEmissionResult emitted = emit_prepared_rewrite_c_source(
           fixture.program, fixture.lowering,
@@ -6241,7 +6579,10 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
               AllocationFailureInjection{std::nullopt},
               AllocationFailureInjection{std::nullopt}});
       REQUIRE_FALSE(emitted.ok);
+      CHECK(emitted.source.empty());
       CHECK(emitted.error.kind == ErrorKind::invalid_primitive_table);
+      CHECK(emitted.error.message.find("flat-program invariants") !=
+            std::string::npos);
     }
   }
 }
@@ -6435,6 +6776,190 @@ TEST_CASE("SHARED-KINDS scalar and empty-vector sharing reaches both production 
   }
 }
 
+TEST_CASE("SHARED-ORDER distinct final uses release in reverse argument order") {
+  const auto make_fixture = [](std::string_view source) {
+    RewriteParseResult parsed = parse_rewrite(source);
+    (void)resolve_rewrite_primitives(parsed.program);
+    RewriteLoweringResult lowered =
+        lower_rewrite_program(parsed.program);
+    return PreparedSharedRewriteFixture{
+        std::move(parsed.program), std::move(lowered.program)};
+  };
+  const CBackendConfiguration c_configuration{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+
+  SUBCASE("successful evaluator and generated C release right then left") {
+    PreparedSharedRewriteFixture fixture =
+        make_fixture("add[(1 2) (3 4)]");
+    REQUIRE(rewrite_program_invariants_hold(fixture.program));
+    REQUIRE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+    SharedReleaseOrderProbe evaluator_probe{{}};
+    EvaluationResources evaluator_resources =
+        make_trusted_local_resources({std::nullopt});
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        evaluator_resources,
+        ResourceLifetimeObserver{
+            &evaluator_probe, &record_shared_release_order}));
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v1,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            nullptr, &evaluator_resources);
+    REQUIRE(evaluated.ok);
+    REQUIRE(evaluated.formatted.size() == 1U);
+    CHECK(evaluated.formatted[0] == "(4 6)");
+    CHECK(evaluator_probe.logical_release_ordinals ==
+          std::vector<std::size_t>{1U, 0U});
+    release_rewrite_evaluation_result(evaluated);
+    CHECK(evaluator_probe.logical_release_ordinals ==
+          std::vector<std::size_t>{1U, 0U, 2U});
+
+    const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+        fixture.program, fixture.lowering, c_configuration);
+    REQUIRE(emitted.ok);
+    const std::string apply =
+        "if (!bennu_apply(&bennu_resources, BENNU_IMPL_ADD_INT";
+    const std::string release_right =
+        "bennu_release(&bennu_resources, &bennu_values[1])";
+    const std::string release_left =
+        "bennu_release(&bennu_resources, &bennu_values[0])";
+    const std::size_t apply_position = emitted.source.find(apply);
+    const std::size_t failure_right =
+        emitted.source.find(release_right, apply_position);
+    const std::size_t failure_left =
+        emitted.source.find(release_left, apply_position);
+    const std::size_t failure_goto =
+        emitted.source.find("goto bennu_failure", apply_position);
+    const std::size_t success_right =
+        emitted.source.find(release_right, failure_goto);
+    const std::size_t success_left =
+        emitted.source.find(release_left, failure_goto);
+    REQUIRE(apply_position != std::string::npos);
+    REQUIRE(failure_right != std::string::npos);
+    REQUIRE(failure_left != std::string::npos);
+    REQUIRE(failure_goto != std::string::npos);
+    REQUIRE(success_right != std::string::npos);
+    REQUIRE(success_left != std::string::npos);
+    CHECK(apply_position < failure_right);
+    CHECK(failure_right < failure_left);
+    CHECK(failure_left < failure_goto);
+    CHECK(failure_goto < success_right);
+    CHECK(success_right < success_left);
+
+    const char *const output_directory =
+        std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
+    if (output_directory != nullptr) {
+      const std::array<std::size_t, 3> release_order{{1U, 0U, 2U}};
+      const std::string probe = make_shared_native_release_probe(
+          emitted.source, std::nullopt, release_order);
+      const std::string path =
+          std::string(output_directory) + "/reverse-success.c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(probe.data(),
+                   static_cast<std::streamsize>(probe.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
+
+  SUBCASE("real primitive failure releases result then right then left") {
+    PreparedSharedRewriteFixture fixture = make_fixture(
+        "add[(9223372036854775807 1) (1 2)]");
+    REQUIRE(rewrite_program_invariants_hold(fixture.program));
+    REQUIRE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+    SharedReleaseOrderProbe evaluator_probe{{}};
+    EvaluationResources evaluator_resources =
+        make_trusted_local_resources({std::nullopt});
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        evaluator_resources,
+        ResourceLifetimeObserver{
+            &evaluator_probe, &record_shared_release_order}));
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v1,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            nullptr, &evaluator_resources);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.error.kind == ErrorKind::domain_error);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluator_probe.logical_release_ordinals ==
+          std::vector<std::size_t>{2U, 1U, 0U});
+    release_rewrite_evaluation_result(evaluated);
+
+    const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+        fixture.program, fixture.lowering, c_configuration);
+    REQUIRE(emitted.ok);
+    const char *const output_directory =
+        std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
+    if (output_directory != nullptr) {
+      const std::array<std::size_t, 3> release_order{{2U, 1U, 0U}};
+      const std::string probe = make_shared_native_release_probe(
+          emitted.source,
+          std::optional<std::string_view>{"BENNU_FAILURE_DOMAIN"},
+          release_order);
+      const std::string path =
+          std::string(output_directory) + "/reverse-domain-failure.c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(probe.data(),
+                   static_cast<std::streamsize>(probe.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
+
+  SUBCASE("repeated final-use argument releases exactly once") {
+    RewriteParseResult parsed = parse_rewrite("1");
+    REQUIRE(parsed.ok);
+    REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+    RewriteLoweringResult lowered =
+        lower_rewrite_program(parsed.program);
+    REQUIRE(lowered.ok);
+    lowered.program.nodes[0U].use_count = 2U;
+    lowered.program.nodes[0U].retained_root = false;
+    const std::array<std::size_t, 2> duplicate_arguments{{0U, 0U}};
+    std::vector<std::size_t> remaining_uses{2U};
+    EvaluationResources resources =
+        make_trusted_local_resources({std::nullopt});
+    SharedReleaseOrderProbe probe{{}};
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        resources,
+        ResourceLifetimeObserver{&probe, &record_shared_release_order}));
+    const std::array<std::int64_t, 2> elements{{1, 2}};
+    VectorAllocationResult vector = copy_int_vector(
+        resources, elements, SourceLocation{1U, 1U, 1U},
+        "duplicate-final-use");
+    REQUIRE(vector.ok);
+    std::vector<Value> values;
+    values.push_back(std::move(vector.value));
+    std::vector<std::uint8_t> live{std::uint8_t{1U}};
+    REQUIRE(complete_rewrite_consumer_attempt(
+        resources, duplicate_arguments, lowered.program.nodes,
+        remaining_uses, values, live));
+    CHECK(remaining_uses[0U] == 0U);
+    CHECK(live[0U] == std::uint8_t{0U});
+    CHECK(probe.logical_release_ordinals ==
+          std::vector<std::size_t>{0U});
+    CHECK(resources.live_evaluation_bytes == 0U);
+    release_evaluation_resources(resources);
+  }
+}
+
 TEST_CASE("SHARED-FAILURE production C completes final uses before cleanup") {
   struct FailureCase {
     std::string_view name;
@@ -6451,7 +6976,7 @@ TEST_CASE("SHARED-FAILURE production C completes final uses before cleanup") {
        false},
       {"production-shape-failure",
        &make_prepared_shared_shape_failure_fixture,
-       ErrorKind::shape_mismatch, "BENNU_FAILURE_SHAPE", {3U, 2U, 0U, 1U},
+       ErrorKind::shape_mismatch, "BENNU_FAILURE_SHAPE", {3U, 0U, 2U, 1U},
        true},
   }};
   for (const FailureCase &failure_case : cases) {
@@ -6526,8 +7051,9 @@ TEST_CASE("SHARED-FAILURE production C completes final uses before cleanup") {
     const char *const output_directory =
         std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
     if (output_directory != nullptr) {
-      const std::string probe = make_shared_failure_native_probe(
-          emitted.source, failure_case.c_failure,
+      const std::string probe = make_shared_native_release_probe(
+          emitted.source,
+          std::optional<std::string_view>{failure_case.c_failure},
           failure_case.release_order);
       const std::string path =
           std::string(output_directory) + "/" +
