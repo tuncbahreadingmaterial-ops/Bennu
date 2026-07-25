@@ -8,8 +8,8 @@ endforeach()
 file(READ "${BENNU_SOURCE_DIR}/README.md" readme)
 file(READ "${BENNU_SOURCE_DIR}/VERSION" product_version)
 string(REGEX REPLACE "\n$" "" product_version "${product_version}")
-  foreach(required_text IN ITEMS
-      "inc" "add" "equals" "not" "iota"
+foreach(required_text IN ITEMS
+    "inc" "add" "equals" "not" "iota"
     "examples/rewrite.bennu" "trusted-local-v2" "Tuple literals"
     "run example.bennu --" "bennu_argument_error"
     "Deliberate differences from Anka"

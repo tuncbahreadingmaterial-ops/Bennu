@@ -9372,6 +9372,7 @@ RunnerEvaluationResult evaluate_runner_source(
   std::vector<std::string> formatted = std::move(evaluated.formatted);
   evaluated.values.clear();
   evaluated.formatted.clear();
+  release_evaluation_resources(evaluated.resources);
   return RunnerEvaluationResult{
       true, std::move(values), std::move(formatted),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
