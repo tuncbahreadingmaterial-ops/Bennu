@@ -37,12 +37,12 @@ not broadcast. Exact overloads win; the only implicit conversion is
 canonical, including `true`/`false`, visible `.0` for integral-valued Doubles,
 `-0.0`, `inf`, `-inf`, `nan`, parenthesized vectors, and bracketed tuples.
 Every complete program is evaluated before runner output is published. Numeric
-predicates use the
-same overload resolution: all-`Int` arguments stay exact, while mixed
-`Int`/`Double` arguments compare after `Int -> Double` conversion. Both signed
-zeros are neither positive nor negative and are equal for ordering; NaN is
-unordered, so both strict ordering predicates and both sign predicates return
-`false` when the relevant operand is NaN. Infinities use ordinary IEEE ordering.
+predicates use the same overload resolution: all-`Int` arguments stay exact,
+while mixed `Int`/`Double` arguments compare after `Int -> Double` conversion.
+Both signed zeros are neither positive nor negative and are equal for ordering;
+NaN is unordered, so both strict ordering predicates and both sign predicates
+return `false` when the relevant operand is NaN. Infinities use ordinary IEEE
+ordering.
 
 The CLI defaults to the `trusted-local-v2` execution profile with
 `max_vector_bytes`, `max_live_evaluation_bytes`, `max_work_units`, and

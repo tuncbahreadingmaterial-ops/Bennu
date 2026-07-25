@@ -31,7 +31,7 @@ std::string issue54_evaluate(std::string_view source) {
     return "<formatting-error>";
   }
   destroy_value(result.value);
-  return formatted.formatted;
+  return std::string(formatted.formatted);
 }
 
 } // namespace
@@ -597,7 +597,7 @@ TEST_CASE("ISSUE54-RESOURCES preserve shared preflight charging and cleanup sema
   REQUIRE(empty.ok);
   const ValueFormattingResult empty_formatted = format_value(empty.value);
   REQUIRE(empty_formatted.ok);
-  CHECK(empty_formatted.formatted == "()");
+  CHECK(std::string(empty_formatted.formatted) == "()");
   destroy_value(empty.value);
 
   const EvaluationConfiguration live_refusal{
