@@ -9,8 +9,9 @@
   made a repeated argument index invalid even though primitive application is
   immutable and does not retain its arguments.
 - **Decision:** Lowering records one deterministic use count on every node,
-  including root retention, while keeping the existing contiguous node and
-  argument-index arenas. Typed application receives a bounded span of immutable
+  including tuple-element ownership edges and root retention, while keeping the
+  existing contiguous node and argument-index arenas. Typed application
+  receives a bounded span of immutable
   pointers into the evaluator's owned node-value arena. A consumer attempt
   decrements all of its static argument uses only after shape/application work
   completes; a non-root owner is released when its count reaches zero. Roots
@@ -27,6 +28,11 @@
   Generated C consumes the same counts while emitting code and writes a direct
   `bennu_release` only at a non-root argument's last successful use. Runtime
   values contain no reference count, borrowed result, or shared owner.
+  After Issue #50 supplied the generated-C tuple representation, prepared
+  immutable-borrow consumers use that same representation directly: tuple
+  construction moves its uniquely owned children once, later consumers borrow
+  the complete tuple without copying, and the tuple recursively releases its
+  vector children and table immediately after the final non-root borrow.
 - **Alternatives considered:** Move or clone one payload per consumer; introduce
   reference-counted values; retain all intermediates to program completion; or
   have the runtime search future calls for aliases. Moving invalidates later
@@ -59,10 +65,17 @@
   call-range, first-argument, argument-count, and use-count mismatches, checking
   evaluator and emitter rejection while the prepared owner remains intact.
   Generated C from `SHARED-002` compiles under strict C11 and runs natively with
-  the same successful output.
-- **Current tuple C dependency:** Issue #49 supplies direct `Value` tuple
-  ownership, but the generated-C `BennuValue` still has only scalar and vector
-  representations. Prepared tuple emission therefore returns an explicit
-  profile error naming Issue #50 rather than claiming cross-backend tuple
-  parity. Completing the issue's generated-C tuple criterion requires #50's
-  tuple runtime/lowering work; #52 does not duplicate that concurrent change.
+  the same successful output. `SHARED-TUPLE` integrates Issue #50's tuple
+  parser, lowering, evaluator, and C runtime with the #52 prepared graph: two
+  vector payloads and one tuple table are constructed exactly once, borrowed by
+  two ordered consumers, and released after the final borrow. Evaluator and
+  strict-C11/native cases cover the 63/64-byte live boundary, allocation
+  ordinals 0, 1, and 2, profile-before-injection precedence, a deterministic
+  second-consumer failure, retained-root deferral, invalid prepared ownership,
+  zero-live cleanup, and reverse child cleanup (second vector, first vector,
+  then tuple table).
+- **Integrated tuple C result:** Issue #50 is now present on `main`, so there is
+  no remaining tuple-emission dependency. Bennu deliberately keeps the
+  immutable-borrow operation in typed lowering rather than adopting Anka-style
+  dynamic alias ownership: the emitted C contains neither a reference count nor
+  a deep copy, and its release sites remain statically fixed.

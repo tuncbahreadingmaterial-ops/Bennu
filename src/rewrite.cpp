@@ -1821,6 +1821,7 @@ enum class RewriteLoweringOperation {
   source_node,
   prepared_value,
   immutable_borrow,
+  immutable_borrow_failure,
 };
 
 struct RewriteLoweringNode {
@@ -2645,7 +2646,8 @@ bool rewrite_lowering_invariants_hold(
     const RewriteLoweringProgram &lowering) {
   if (lowering.nodes.size() != program.nodes.size() ||
       lowering.arguments != program.arguments ||
-      lowering.roots != program.roots) {
+      lowering.roots != program.roots ||
+      lowering.tuple_elements != program.tuple_elements) {
     return false;
   }
   std::vector<std::size_t> expected_uses(lowering.nodes.size(), 0U);
@@ -2654,6 +2656,13 @@ bool rewrite_lowering_invariants_hold(
     const RewriteLoweringNode &node = lowering.nodes[node_index];
     const RewriteNode &source_node = program.nodes[node_index];
     if (node.kind != source_node.kind) {
+      return false;
+    }
+    const bool borrow =
+        node.operation == RewriteLoweringOperation::immutable_borrow ||
+        node.operation ==
+            RewriteLoweringOperation::immutable_borrow_failure;
+    if (borrow && source_node.kind != RewriteNodeKind::primitive_call) {
       return false;
     }
     if (source_node.kind == RewriteNodeKind::tuple_literal) {
@@ -3638,7 +3647,9 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         make_error(ErrorKind::invalid_primitive_table,
                    lowered_node.source_location)};
     if (lowered_node.operation ==
-        RewriteLoweringOperation::immutable_borrow) {
+            RewriteLoweringOperation::immutable_borrow ||
+        lowered_node.operation ==
+            RewriteLoweringOperation::immutable_borrow_failure) {
       bool valid_arguments = true;
       for (const Value *argument : arguments) {
         if (!validate_value(*argument).ok) {
@@ -3651,9 +3662,11 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
               ? 0U
               : prepared_values->borrow_consumer_ordinal++;
       const bool injected =
-          prepared_values != nullptr &&
-          prepared_values->fail_at_borrow_consumer.has_value() &&
-          ordinal == *prepared_values->fail_at_borrow_consumer;
+          lowered_node.operation ==
+              RewriteLoweringOperation::immutable_borrow_failure ||
+          (prepared_values != nullptr &&
+           prepared_values->fail_at_borrow_consumer.has_value() &&
+           ordinal == *prepared_values->fail_at_borrow_consumer);
       if (valid_arguments && !injected) {
         applied = PrimitiveApplicationResult{
             true, make_int_value(static_cast<std::int64_t>(arguments.size())),
@@ -4011,7 +4024,8 @@ void append_vector_node(std::string &source, std::size_t node_index,
 
 void append_tuple_node(std::string &source, std::size_t node_index,
                        const RewriteLoweringNode &node,
-                       const RewriteLoweringProgram &program) {
+                       const RewriteLoweringProgram &program,
+                       std::vector<std::size_t> &remaining_uses) {
   source += "  {\n";
   if (node.element_count != 0U) {
     source += "    BennuValue *bennu_tuple_elements_" +
@@ -4040,6 +4054,12 @@ void append_tuple_node(std::string &source, std::size_t node_index,
   append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n"
             "  }\n";
+  for (std::size_t element_index = 0U;
+       element_index < node.element_count; ++element_index) {
+    const std::size_t child =
+        program.tuple_elements[node.first_element + element_index];
+    --remaining_uses[child];
+  }
 }
 
 void append_shape_requirement(
@@ -4143,6 +4163,63 @@ void append_call_node(std::string &source, std::size_t node_index,
   }
 }
 
+void append_immutable_borrow_node(
+    std::string &source, std::size_t node_index,
+    const RewriteLoweringNode &node,
+    const RewriteLoweringProgram &program,
+    std::vector<std::size_t> &remaining_uses) {
+  for (std::size_t position = 0U; position < node.argument_count;
+       ++position) {
+    const std::size_t argument =
+        program.arguments[node.first_argument + position];
+    source += "  if (!bennu_value_valid(&bennu_values[" +
+              std::to_string(argument) +
+              "])) { bennu_set_failure(&bennu_resources, "
+              "BENNU_FAILURE_INTERNAL); goto bennu_failure; }\n";
+  }
+  if (node.operation ==
+      RewriteLoweringOperation::immutable_borrow_failure) {
+    source +=
+        "  {\n"
+        "    BennuScalar bennu_failure_left = {BENNU_INT, 0U, "
+        "INT64_MAX, 0.0};\n"
+        "    BennuScalar bennu_failure_right = {BENNU_INT, 0U, 0, "
+        "0.0};\n"
+        "    BennuScalarSignature bennu_failure_signature = "
+        "{1U, {BENNU_INT, BENNU_INT}, BENNU_INT};\n"
+        "    bennu_set_failure(&bennu_resources, BENNU_FAILURE_DOMAIN);\n"
+        "    bennu_set_domain_context(&bennu_resources, BENNU_IMPL_INC_INT, "
+        "bennu_failure_left, bennu_failure_right, 0, 0U, \"";
+    source += node.admission_point;
+    source += "\", BENNU_PRIMITIVE_INC, bennu_failure_signature, 1U, ";
+    append_source_span(source, node.primary_span);
+    source += ", ";
+    append_source_span(source, node.source_span);
+    source +=
+        ");\n"
+        "  }\n";
+  } else {
+    source += "  bennu_values[" + std::to_string(node_index) +
+              "] = bennu_scalar_int(";
+    append_c_unsigned(source, node.argument_count);
+    source += ");\n";
+  }
+  for (std::size_t end = node.argument_count; end != 0U; --end) {
+    const std::size_t argument_node =
+        program.arguments[node.first_argument + end - 1U];
+    --remaining_uses[argument_node];
+    if (remaining_uses[argument_node] == 0U &&
+        !program.nodes[argument_node].retained_root) {
+      source += "  bennu_release(&bennu_resources, &bennu_values[" +
+                std::to_string(argument_node) + "]);\n";
+    }
+  }
+  if (node.operation ==
+      RewriteLoweringOperation::immutable_borrow_failure) {
+    source += "  goto bennu_failure;\n";
+  }
+}
+
 void append_lowered_rewrite_nodes(std::string &source,
                                   const RewriteLoweringProgram &lowering) {
   std::vector<std::size_t> remaining_uses;
@@ -4157,7 +4234,13 @@ void append_lowered_rewrite_nodes(std::string &source,
     } else if (node.kind == RewriteNodeKind::vector_literal) {
       append_vector_node(source, index, node);
     } else if (node.kind == RewriteNodeKind::tuple_literal) {
-      append_tuple_node(source, index, node, lowering);
+      append_tuple_node(source, index, node, lowering, remaining_uses);
+    } else if (
+        node.operation == RewriteLoweringOperation::immutable_borrow ||
+        node.operation ==
+            RewriteLoweringOperation::immutable_borrow_failure) {
+      append_immutable_borrow_node(
+          source, index, node, lowering, remaining_uses);
     } else {
       append_call_node(source, index, node, lowering, remaining_uses);
     }
@@ -4295,14 +4378,13 @@ CEmissionResult emit_rewrite_c_source_impl(
   }
   const RewriteLoweringProgram &lowering = lowered.program;
   for (const RewriteLoweringNode &node : lowering.nodes) {
-    if (node.operation != RewriteLoweringOperation::source_node) {
+    if (node.operation == RewriteLoweringOperation::prepared_value) {
       release_evaluation_resources(validation_resources);
       return CEmissionResult{
           false, {},
           make_error(
-              ErrorKind::profile_error, node.source_location,
-              "prepared tuple values require Issue #50 generated-C tuple "
-              "runtime support")};
+              ErrorKind::invalid_primitive_table, node.source_location,
+              "prepared owned values cannot be embedded in generated C")};
     }
   }
 
@@ -4562,6 +4644,54 @@ PreparedSharedRewriteFixture make_prepared_shared_vector_fixture() {
   parsed.program.argument_spans[1U] =
       parsed.program.nodes[parsed.program.arguments[0U]].span;
   RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  return PreparedSharedRewriteFixture{
+      std::move(parsed.program), std::move(lowered.program)};
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_tuple_fixture(
+    bool fail_second_consumer) {
+  RewriteParseResult parsed =
+      parse_rewrite("[(1 2) (3 4)]\ninc[0]\ninc[0]");
+  (void)resolve_rewrite_primitives(parsed.program);
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+
+  const std::size_t tuple_node = parsed.program.roots[0U];
+  const std::size_t first_consumer = parsed.program.roots[1U];
+  const std::size_t second_consumer = parsed.program.roots[2U];
+  const RewriteCall &first_call =
+      parsed.program.calls[parsed.program.nodes[first_consumer].call_index];
+  const RewriteCall &second_call =
+      parsed.program.calls[parsed.program.nodes[second_consumer].call_index];
+  parsed.program.arguments[first_call.first_argument] = tuple_node;
+  parsed.program.arguments[second_call.first_argument] = tuple_node;
+  parsed.program.argument_spans[first_call.first_argument] =
+      parsed.program.nodes[tuple_node].span;
+  parsed.program.argument_spans[second_call.first_argument] =
+      parsed.program.nodes[tuple_node].span;
+  parsed.program.roots = {first_consumer, second_consumer};
+
+  lowered.program.arguments = parsed.program.arguments;
+  lowered.program.roots = parsed.program.roots;
+  lowered.program.nodes[first_consumer].operation =
+      RewriteLoweringOperation::immutable_borrow;
+  lowered.program.nodes[second_consumer].operation =
+      fail_second_consumer
+          ? RewriteLoweringOperation::immutable_borrow_failure
+          : RewriteLoweringOperation::immutable_borrow;
+  for (RewriteLoweringNode &node : lowered.program.nodes) {
+    node.use_count = 0U;
+    node.retained_root = false;
+  }
+  for (const std::size_t element : lowered.program.tuple_elements) {
+    ++lowered.program.nodes[element].use_count;
+  }
+  for (const std::size_t argument : lowered.program.arguments) {
+    ++lowered.program.nodes[argument].use_count;
+  }
+  for (const std::size_t root : lowered.program.roots) {
+    ++lowered.program.nodes[root].use_count;
+    lowered.program.nodes[root].retained_root = true;
+  }
   return PreparedSharedRewriteFixture{
       std::move(parsed.program), std::move(lowered.program)};
 }
@@ -5722,8 +5852,8 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
             AllocationFailureInjection{std::nullopt},
             AllocationFailureInjection{std::nullopt}});
     REQUIRE_FALSE(unavailable.ok);
-    CHECK(unavailable.error.kind == ErrorKind::profile_error);
-    CHECK(unavailable.error.message.find("Issue #50") !=
+    CHECK(unavailable.error.kind == ErrorKind::invalid_primitive_table);
+    CHECK(unavailable.error.message.find("cannot be embedded") !=
           std::string::npos);
   }
 
@@ -5977,6 +6107,235 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
       REQUIRE(output.good());
       output.write(emitted.source.data(),
                    static_cast<std::streamsize>(emitted.source.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
+}
+
+TEST_CASE("SHARED-TUPLE prepared tuple sharing is evaluator and C equivalent") {
+  const RewriteEvaluationCreationData exact_creation{
+      ExecutionProfile::bounded_v2,
+      ResourceLimits{std::nullopt, std::size_t{64U}, std::nullopt,
+                     std::size_t{32U}},
+      AllocationFailureInjection{std::nullopt}};
+  PreparedSharedRewriteFixture success =
+      make_prepared_shared_tuple_fixture(false);
+  REQUIRE(rewrite_program_invariants_hold(success.program));
+  REQUIRE(rewrite_lowering_invariants_hold(
+      success.program, success.lowering));
+  const std::size_t tuple_node = success.program.tuple_elements.size();
+  REQUIRE(tuple_node < success.lowering.nodes.size());
+  CHECK(success.lowering.nodes[tuple_node].use_count == 2U);
+  CHECK_FALSE(success.lowering.nodes[tuple_node].retained_root);
+
+  SharedLivenessProbe success_probe{0U, {}};
+  EvaluationResources success_resources =
+      make_evaluation_resources(
+          exact_creation.profile, exact_creation.limits,
+          exact_creation.allocation_failure, 0U, 0U, 0U);
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      success_resources,
+      ResourceLifetimeObserver{
+          &success_probe, &record_shared_liveness_event}));
+  RewriteEvaluationResult evaluated =
+      evaluate_prepared_rewrite_program(
+          success.program, success.lowering, exact_creation, nullptr,
+          &success_resources);
+  REQUIRE(evaluated.ok);
+  REQUIRE(evaluated.formatted.size() == 2U);
+  CHECK(evaluated.formatted[0] == "1");
+  CHECK(evaluated.formatted[1] == "1");
+  CHECK(evaluated.scalar_kernel_invocations == 0U);
+  CHECK(evaluated.resources.reservation_ordinal == 3U);
+  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(success_probe.logical_releases == 3U);
+  release_rewrite_evaluation_result(evaluated);
+
+  CEmissionResult emitted = emit_prepared_rewrite_c_source(
+      success.program, success.lowering,
+      CBackendConfiguration{
+          exact_creation.profile, exact_creation.limits,
+          AllocationFailureInjection{std::nullopt},
+          AllocationFailureInjection{std::nullopt}});
+  REQUIRE(emitted.ok);
+  const std::string first_borrow =
+      "bennu_values[4] = bennu_scalar_int(1U)";
+  const std::string second_borrow =
+      "bennu_values[6] = bennu_scalar_int(1U)";
+  const std::string tuple_release =
+      "bennu_release(&bennu_resources, &bennu_values[2])";
+  const std::size_t first_borrow_position =
+      emitted.source.find(first_borrow);
+  const std::size_t second_borrow_position =
+      emitted.source.find(second_borrow);
+  const std::size_t tuple_release_position =
+      emitted.source.find(tuple_release);
+  REQUIRE(first_borrow_position != std::string::npos);
+  REQUIRE(second_borrow_position != std::string::npos);
+  REQUIRE(tuple_release_position != std::string::npos);
+  CHECK(first_borrow_position < second_borrow_position);
+  CHECK(second_borrow_position < tuple_release_position);
+  CHECK(emitted.source.find(
+            tuple_release, tuple_release_position + 1U) ==
+        std::string::npos);
+  CHECK(emitted.source.find("reference_count") == std::string::npos);
+
+  SUBCASE("later consumer failure releases the shared tuple and prior root") {
+    PreparedSharedRewriteFixture failure =
+        make_prepared_shared_tuple_fixture(true);
+    SharedLivenessProbe failure_probe{0U, {}};
+    EvaluationResources failure_resources =
+        make_evaluation_resources(
+            exact_creation.profile, exact_creation.limits,
+            exact_creation.allocation_failure, 0U, 0U, 0U);
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        failure_resources,
+        ResourceLifetimeObserver{
+            &failure_probe, &record_shared_liveness_event}));
+    RewriteEvaluationResult failed =
+        evaluate_prepared_rewrite_program(
+            failure.program, failure.lowering, exact_creation, nullptr,
+            &failure_resources);
+    REQUIRE_FALSE(failed.ok);
+    CHECK(failed.diagnostic.error.kind == ErrorKind::domain_error);
+    CHECK(failed.scalar_kernel_invocations == 0U);
+    CHECK(failed.resources.reservation_ordinal == 3U);
+    CHECK(failed.resources.live_evaluation_bytes == 0U);
+    CHECK(failure_probe.logical_releases == 3U);
+    release_rewrite_evaluation_result(failed);
+  }
+
+  SUBCASE("live-byte and allocation precedence is deterministic") {
+    struct FailureCase {
+      std::size_t live_limit;
+      std::optional<std::size_t> failure_ordinal;
+      ResourceErrorReason reason;
+      std::size_t reservation_ordinal;
+    };
+    const std::array<FailureCase, 5> cases{{
+        {63U, std::nullopt, ResourceErrorReason::profile_limit, 2U},
+        {64U, std::size_t{0U},
+         ResourceErrorReason::allocation_unavailable, 1U},
+        {64U, std::size_t{1U},
+         ResourceErrorReason::allocation_unavailable, 2U},
+        {64U, std::size_t{2U},
+         ResourceErrorReason::allocation_unavailable, 3U},
+        {63U, std::size_t{2U},
+         ResourceErrorReason::profile_limit, 2U},
+    }};
+    for (const FailureCase &failure_case : cases) {
+      RewriteEvaluationCreationData creation{
+          ExecutionProfile::bounded_v2,
+          ResourceLimits{
+              std::nullopt, failure_case.live_limit, std::nullopt,
+              std::size_t{32U}},
+          AllocationFailureInjection{failure_case.failure_ordinal}};
+      RewriteEvaluationResult failed =
+          evaluate_prepared_rewrite_program(
+              success.program, success.lowering, creation, nullptr,
+              nullptr);
+      INFO(failure_case.live_limit);
+      INFO(failure_case.failure_ordinal);
+      REQUIRE_FALSE(failed.ok);
+      CHECK(failed.diagnostic.error.kind == ErrorKind::resource_error);
+      REQUIRE(failed.diagnostic.error.resource.has_value());
+      CHECK(failed.diagnostic.error.resource->reason ==
+            failure_case.reason);
+      CHECK(failed.resources.reservation_ordinal ==
+            failure_case.reservation_ordinal);
+      CHECK(failed.resources.live_evaluation_bytes == 0U);
+      CHECK(failed.values.empty());
+      release_rewrite_evaluation_result(failed);
+    }
+  }
+
+  SUBCASE("root retention defers tuple release to result cleanup") {
+    PreparedSharedRewriteFixture retained =
+        make_prepared_shared_tuple_fixture(false);
+    retained.program.roots.insert(
+        retained.program.roots.begin(), tuple_node);
+    retained.lowering.roots = retained.program.roots;
+    ++retained.lowering.nodes[tuple_node].use_count;
+    retained.lowering.nodes[tuple_node].retained_root = true;
+    REQUIRE(rewrite_lowering_invariants_hold(
+        retained.program, retained.lowering));
+    RewriteEvaluationResult retained_result =
+        evaluate_prepared_rewrite_program(
+            retained.program, retained.lowering, exact_creation, nullptr,
+            nullptr);
+    REQUIRE(retained_result.ok);
+    REQUIRE(retained_result.formatted.size() == 3U);
+    CHECK(retained_result.formatted[0] == "[(1 2) (3 4)]");
+    CHECK(retained_result.formatted[1] == "1");
+    CHECK(retained_result.formatted[2] == "1");
+    CHECK(retained_result.resources.live_evaluation_bytes == 64U);
+    release_rewrite_evaluation_result(retained_result);
+  }
+
+  SUBCASE("invalid prepared ownership is rejected before allocation") {
+    PreparedSharedRewriteFixture invalid =
+        make_prepared_shared_tuple_fixture(false);
+    --invalid.lowering.nodes[tuple_node].use_count;
+    REQUIRE_FALSE(rewrite_lowering_invariants_hold(
+        invalid.program, invalid.lowering));
+    RewriteEvaluationResult rejected =
+        evaluate_prepared_rewrite_program(
+            invalid.program, invalid.lowering, exact_creation, nullptr,
+            nullptr);
+    REQUIRE_FALSE(rejected.ok);
+    CHECK(rejected.diagnostic.error.kind ==
+          ErrorKind::invalid_primitive_table);
+    CHECK(rejected.resources.reservation_ordinal == 0U);
+    CHECK(rejected.resources.live_evaluation_bytes == 0U);
+    CEmissionResult rejected_c = emit_prepared_rewrite_c_source(
+        invalid.program, invalid.lowering,
+        CBackendConfiguration{
+            exact_creation.profile, exact_creation.limits,
+            AllocationFailureInjection{std::nullopt},
+            AllocationFailureInjection{std::nullopt}});
+    CHECK_FALSE(rejected_c.ok);
+    CHECK(rejected_c.error.kind == ErrorKind::invalid_primitive_table);
+  }
+
+  const char *const output_directory =
+      std::getenv("BENNU_SHARED_TUPLE_C_DIR");
+  if (output_directory != nullptr) {
+    struct NativeCase {
+      std::string_view name;
+      bool fail_second_consumer;
+      std::size_t live_limit;
+      std::optional<std::size_t> failure_ordinal;
+    };
+    const std::array<NativeCase, 5> native_cases{{
+        {"tuple-success", false, 64U, std::nullopt},
+        {"tuple-consumer-failure", true, 64U, std::nullopt},
+        {"tuple-boundary", false, 63U, std::nullopt},
+        {"tuple-allocation", false, 64U, std::size_t{2U}},
+        {"tuple-precedence", false, 63U, std::size_t{2U}},
+    }};
+    for (const NativeCase &native_case : native_cases) {
+      PreparedSharedRewriteFixture fixture =
+          make_prepared_shared_tuple_fixture(
+              native_case.fail_second_consumer);
+      CEmissionResult native = emit_prepared_rewrite_c_source(
+          fixture.program, fixture.lowering,
+          CBackendConfiguration{
+              ExecutionProfile::bounded_v2,
+              ResourceLimits{
+                  std::nullopt, native_case.live_limit, std::nullopt,
+                  std::size_t{32U}},
+              AllocationFailureInjection{std::nullopt},
+              AllocationFailureInjection{
+                  native_case.failure_ordinal}});
+      REQUIRE(native.ok);
+      const std::string path =
+          std::string(output_directory) + "/" +
+          std::string(native_case.name) + ".c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(native.source.data(),
+                   static_cast<std::streamsize>(native.source.size()));
       output.close();
       CHECK(output.good());
     }
