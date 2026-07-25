@@ -32,6 +32,62 @@ List the configured topology and labels with:
 ctest --test-dir build --show-only=json-v1
 ```
 
+## Checked-in entry points
+
+`CMakePresets.json` owns the Release, strict, and sanitizer configuration flags.
+Use the platform entry points below instead of copying flags or reconstructing
+compiler environments in an ad hoc shell.
+
+On Windows, run the complete configure/build/test flow from PowerShell:
+
+```powershell
+pwsh -File tools/validation/Invoke-BennuWindowsValidation.ps1 `
+  -Preset windows-release -Tier full
+pwsh -File tools/validation/Invoke-BennuWindowsValidation.ps1 `
+  -Preset windows-strict -Tier strict
+```
+
+The script locates Visual Studio with `vswhere`, imports `VsDevCmd.bat` into the
+current PowerShell environment, verifies the compiler/SDK/CMake/Ninja tools,
+and launches CTest from PowerShell so Unicode and long-path tests do not pass
+through a legacy command-prompt code page. Use `-Tier focused`, `review`, or
+`qa` with `-Preset windows-release` when that ladder phase is required.
+
+On WSL2 Ubuntu x86_64, install only the small bootstrap prerequisites once:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential git python3 ca-certificates curl tar
+```
+
+Then use the repository sanitizer entry point:
+
+```sh
+bash tools/validation/run-wsl-sanitize.sh
+```
+
+It does not use `sudo` or mutate WSL packages. The bootstrap downloads pinned
+CMake 3.30.5 and Ninja 1.12.1 archives, verifies their checked-in SHA-256
+values, and reuses them from `${XDG_CACHE_HOME:-$HOME/.cache}`. The sanitizer
+build and logs also live in that persistent cache rather than `/tmp`.
+
+For any long labeled selection, use the cross-platform logged runner:
+
+```sh
+python3 tools/validation/run_ctest.py \
+  --ctest "$(command -v ctest)" \
+  --build-dir build \
+  --label '^tier[.]review$' \
+  --log build/validation-logs/tier-review.log
+```
+
+The runner streams output, flushes a durable log, and enables CTest failover
+mode. If an interrupted CTest leaves
+`Testing/Temporary/CTestCheckpoint.txt`, rerun the same command to continue
+from that checkpoint. Interruptions that occur before CTest records failover
+state restart the selection while preserving the prior log.
+
 ## 1. Focused
 
 Run this tier during implementation and fixes:
@@ -90,19 +146,46 @@ An unfiltered CTest invocation remains equivalent and is used by Main CI:
 ctest --test-dir build --output-on-failure
 ```
 
+The corresponding checked-in Windows commands are:
+
+```powershell
+cmake --preset windows-release
+cmake --build --preset windows-release
+ctest --preset windows-release-full -F
+```
+
+Use `Invoke-BennuWindowsValidation.ps1` for normal agent work because it also
+establishes and verifies the Visual Studio environment.
+
 ## 4. Strict
 
 Use a separate build directory and the platform's strict warnings,
 conversions, warnings-as-errors, and no-exceptions flags. On GNU-compatible
-toolchains:
+toolchains, the checked-in preset is authoritative:
 
 ```sh
-cmake -S . -B build-strict -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror -fno-exceptions" \
-  -DCMAKE_C_FLAGS="-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror"
-cmake --build build-strict
-ctest --test-dir build-strict -L "^tier[.]strict$" --output-on-failure
+cmake --preset gnu-strict
+cmake --build --preset gnu-strict
+ctest --preset gnu-strict -F
 ```
+
+On Windows, the preset records the repository-supported MSVC warnings,
+warnings-as-errors, conformance, no-exceptions, CRT, and name-hiding policy:
+
+```powershell
+pwsh -File tools/validation/Invoke-BennuWindowsValidation.ps1 `
+  -Preset windows-strict -Tier strict
+```
+
+For a checkout mounted into WSL from Windows, use the WSL entry point:
+
+```sh
+bash tools/validation/run-wsl-strict.sh
+```
+
+It overrides the preset build directory into the persistent Linux cache.
+Keeping the build and test fixtures off DrvFS is required for permission
+contracts such as `cli.run_unreadable_file`.
 
 The label excludes only tests whose contract requires the default binary's
 exact dynamic-dependency set.
@@ -112,18 +195,24 @@ exact dynamic-dependency set.
 Use a separate Debug build on a GNU- or Clang-compatible toolchain:
 
 ```sh
-cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-exceptions" \
-  -DCMAKE_C_FLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" \
-  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-cmake --build build-sanitize
+cmake --preset linux-sanitize
+cmake --build --preset linux-sanitize
 ASAN_OPTIONS="detect_leaks=1:halt_on_error=1" \
 UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
-ctest --test-dir build-sanitize -L "^tier[.]sanitize$" --output-on-failure
+ctest --preset linux-sanitize -F
 ```
 
 Platform sanitizer availability and environment syntax vary. Record the exact
 compiler, flags, environment, exclusions, and results.
+
+`unit.structural_host_allocation_refusal` deliberately constrains `RLIMIT_AS`
+and is excluded from `tier.sanitize` because that contract conflicts with
+ASan's address-space reservation. It remains required by ordinary Release,
+`tier.qa`, `tier.review`, and `tier.strict`. The Linux dynamic-dependency and
+package probes remain excluded from both instrumented configurations.
+
+On WSL, prefer `tools/validation/run-wsl-sanitize.sh`; it applies the same preset
+with persistent, pinned tools and the logged CTest runner.
 
 ## 6. Isolated QA
 
@@ -140,6 +229,13 @@ Run the complete QA selection with:
 
 ```sh
 ctest --test-dir build-qa -L "^tier[.]qa$" --output-on-failure
+```
+
+On Windows, the isolated worktree should run:
+
+```powershell
+pwsh -File tools/validation/Invoke-BennuWindowsValidation.ps1 `
+  -Preset windows-release -Tier qa
 ```
 
 `tier.qa` contains every test registered on the current host. It is a label,

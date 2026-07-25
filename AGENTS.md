@@ -32,6 +32,18 @@ commands and label taxonomy are documented in `doc/validation-ladder.md`.
 5. Report the exact build directory, configuration, commands, selected labels,
    and results so later agents do not repeat equivalent validation without a
    concrete reason.
+6. Use the checked-in validation entry points instead of reconstructing host
+   setup ad hoc:
+   - on Windows, use `tools/validation/Invoke-BennuWindowsValidation.ps1` so
+     MSVC, SDK, Unicode process launch, presets, and logs share one environment;
+   - for WSL sanitizer QA, use
+     `tools/validation/run-wsl-sanitize.sh`, which bootstraps pinned user-local
+     CMake/Ninja tools without `sudo` or system package mutation; and
+   - for WSL strict validation, use `tools/validation/run-wsl-strict.sh` so
+     permission-sensitive fixtures run on the Linux filesystem instead of
+     DrvFS; and
+   - run long CTest selections through `tools/validation/run_ctest.py` so output
+     is durable and an interrupted run can resume from CTest failover state.
 
 # Issue workflow
 
