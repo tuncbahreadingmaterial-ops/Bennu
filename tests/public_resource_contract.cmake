@@ -161,13 +161,13 @@ file(READ "${lifted_c}" lifted_source)
 file(READ "${late_c}" late_source)
 file(READ "${vector_refusal_c}" vector_refusal_source)
 file(READ "${live_refusal_c}" live_refusal_source)
-if(NOT profile_source MATCHES "1, 1, 1, 8U, 24U, 2U" OR
-   NOT refusal_source MATCHES "1, 1, 1, 8U, 24U, 1U" OR
-   NOT vector_refusal_source MATCHES "1, 1, 1, 8U, 64U, 64U" OR
-   NOT live_refusal_source MATCHES "1, 1, 1, 8U, 8U, 2U" OR
-   NOT iota_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 0U" OR
-   NOT lifted_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U" OR
-   NOT late_source MATCHES "0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U")
+if(NOT profile_source MATCHES "1, 1, 1, 0, 8U, 24U, 2U, 0U" OR
+   NOT refusal_source MATCHES "1, 1, 1, 0, 8U, 24U, 1U, 0U" OR
+   NOT vector_refusal_source MATCHES "1, 1, 1, 0, 8U, 64U, 64U, 0U" OR
+   NOT live_refusal_source MATCHES "1, 1, 1, 0, 8U, 8U, 2U, 0U" OR
+   NOT iota_source MATCHES "0, 0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 1, 0U" OR
+   NOT lifted_source MATCHES "0, 0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U" OR
+   NOT late_source MATCHES "0, 0, 0, 0, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 1, 1U")
   message(FATAL_ERROR
     "PUBLIC-RESOURCE-MATRIX generated configuration bytes are incomplete")
 endif()

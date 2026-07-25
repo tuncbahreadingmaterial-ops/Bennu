@@ -197,7 +197,7 @@ TEST_CASE("CUTOVER-07 explicit bounded profile agrees across public evaluator an
   const bennu::CEmissionResult emitted =
       bennu::emit_c_source("inc[inc[(1)]]", exact);
   REQUIRE(emitted.ok);
-  CHECK(emitted.source.find("1, 1, 1, 8U, 16U, 2U") !=
+  CHECK(emitted.source.find("1, 1, 1, 0, 8U, 16U, 2U, 0U") !=
         std::string::npos);
 
   const bennu::EvaluationConfiguration one_past{

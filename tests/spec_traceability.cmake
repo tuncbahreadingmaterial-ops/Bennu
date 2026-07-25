@@ -30,10 +30,13 @@ foreach(expected_row IN LISTS BENNU_REQUIRED_TUP_TRACEABILITY_ROWS)
     message(FATAL_ERROR
       "required traceability source is not registered: ${expected_source}")
   endif()
-  if(expected_source STREQUAL "tests/tuple_foundation_conformance.cpp")
+  if(expected_source STREQUAL "tests/tuple_foundation_conformance.cpp" OR
+     expected_source STREQUAL "src/rewrite.cpp")
     set(expected_test "unit.doctest")
   elseif(expected_source STREQUAL "tests/public_resource_contract.cmake")
     set(expected_test "public.api_resource_matrix")
+  elseif(expected_source STREQUAL "tests/tuple_literal_contract.cmake")
+    set(expected_test "tuple.literal_strict_c_native")
   else()
     message(FATAL_ERROR
       "required tuple source has no CTest topology rule: ${expected_source}")

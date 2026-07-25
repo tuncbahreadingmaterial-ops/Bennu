@@ -1,6 +1,7 @@
 #include "bennu/c_emitter.hpp"
 #include "bennu/native_builder.hpp"
 
+#include <array>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -97,11 +98,17 @@ static void bennu_probe_free(void *data);
 
 static size_t bennu_probe_outstanding_allocations = 0U;
 static size_t bennu_probe_total_allocations = 0U;
+static void *bennu_probe_allocations[64] = {0};
+static size_t bennu_probe_release_order[64] = {0U};
+static size_t bennu_probe_release_count = 0U;
 static int bennu_probe_invalid_free = 0;
 
 static void *bennu_probe_malloc(size_t size) {
   void *data = malloc(size);
   if (data != NULL) {
+    if (bennu_probe_total_allocations < 64U) {
+      bennu_probe_allocations[bennu_probe_total_allocations] = data;
+    }
     bennu_probe_outstanding_allocations += 1U;
     bennu_probe_total_allocations += 1U;
   }
@@ -110,6 +117,21 @@ static void *bennu_probe_malloc(size_t size) {
 
 static void bennu_probe_free(void *data) {
   if (data != NULL) {
+    size_t allocation =
+        bennu_probe_total_allocations < 64U
+            ? bennu_probe_total_allocations
+            : 64U;
+    while (allocation != 0U) {
+      --allocation;
+      if (bennu_probe_allocations[allocation] == data) {
+        if (bennu_probe_release_count < 64U) {
+          bennu_probe_release_order[bennu_probe_release_count] = allocation;
+        }
+        bennu_probe_allocations[allocation] = NULL;
+        bennu_probe_release_count += 1U;
+        break;
+      }
+    }
     if (bennu_probe_outstanding_allocations == 0U) {
       bennu_probe_invalid_free = 1;
     } else {
@@ -124,6 +146,8 @@ int main(void) {
   for (iteration = 0U; iteration < 2U; ++iteration) {
     BennuResources snapshot = {0};
     const size_t allocations_before = bennu_probe_total_allocations;
+    const size_t releases_before = bennu_probe_release_count;
+    (void)releases_before;
     if (bennu_execute(&snapshot) == 0 || snapshot.live_bytes != 0U ||
         bennu_probe_outstanding_allocations != 0U ||
         bennu_probe_invalid_free != 0 ||
@@ -525,7 +549,7 @@ int main(void) {
       BennuResources snapshot = {0};
       if (bennu_execute(&snapshot) == 0 ||
           snapshot.failure != BENNU_FAILURE_DOMAIN ||
-          snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V1 ||
+          snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
           snapshot.failure_implementation != BENNU_IMPL_ADD_INT ||
           snapshot.failure_primitive_id != BENNU_PRIMITIVE_ADD ||
           snapshot.failure_signature.parameter_count != 2U ||
@@ -612,9 +636,191 @@ std::string refusal_evidence(const bennu::Error &error) {
          std::to_string(error.location.column) + "\n";
 }
 
+constexpr std::string_view tuple_limit_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V2 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES ||
+        snapshot.failure_configured_limit != 16U ||
+        snapshot.failure_usage_before != 0U ||
+        snapshot.failure_refused_charge != 32U ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 32U ||
+        strcmp(snapshot.failure_admission_point, "tuple-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 1U ||
+        snapshot.failure_primary_span.end.offset != 6U ||
+        snapshot.reservation_ordinal != 0U ||
+        bennu_probe_total_allocations != allocations_before ||
+        bennu_probe_release_count != releases_before)bennu_assert";
+
+constexpr std::string_view tuple_fault_vector_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 16U ||
+        strcmp(snapshot.failure_admission_point, "vector-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 2U ||
+        snapshot.failure_primary_span.end.offset != 7U ||
+        snapshot.reservation_ordinal != 1U ||
+        bennu_probe_total_allocations != allocations_before ||
+        bennu_probe_release_count != releases_before)bennu_assert";
+
+constexpr std::string_view tuple_fault_inner_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
+        snapshot.failure_requested_elements != 1U ||
+        snapshot.failure_requested_bytes != 16U ||
+        strcmp(snapshot.failure_admission_point, "tuple-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 8U ||
+        snapshot.failure_primary_span.end.offset != 11U ||
+        snapshot.reservation_ordinal != 2U ||
+        bennu_probe_total_allocations != allocations_before + 1U ||
+        bennu_probe_release_count != releases_before + 1U ||
+        bennu_probe_release_order[releases_before] != allocations_before)bennu_assert";
+
+constexpr std::string_view tuple_fault_outer_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 32U ||
+        strcmp(snapshot.failure_admission_point, "tuple-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 1U ||
+        snapshot.failure_primary_span.end.offset != 12U ||
+        snapshot.reservation_ordinal != 3U ||
+        bennu_probe_total_allocations != allocations_before + 2U ||
+        bennu_probe_release_count != releases_before + 2U ||
+        bennu_probe_release_order[releases_before] != allocations_before + 1U ||
+        bennu_probe_release_order[releases_before + 1U] != allocations_before)bennu_assert";
+
+constexpr std::string_view tuple_multi_root_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V2 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES ||
+        snapshot.failure_configured_limit != 16U ||
+        snapshot.failure_usage_before != 0U ||
+        snapshot.failure_refused_charge != 32U ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 32U ||
+        strcmp(snapshot.failure_admission_point, "tuple-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 5U ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.end.offset != 10U ||
+        snapshot.reservation_ordinal != 1U ||
+        bennu_probe_total_allocations != allocations_before + 1U ||
+        bennu_probe_release_count != releases_before + 1U ||
+        bennu_probe_release_order[releases_before] != allocations_before)bennu_assert";
+
+bool tuple_error_matches(
+    const bennu::ProgramResult &result, bennu::ResourceErrorReason reason,
+    std::size_t elements, std::size_t bytes, std::string_view admission,
+    std::size_t offset) {
+  return !result.ok && result.values.empty() &&
+         is_resource_error(result.error, reason) &&
+         result.error.resource->requested_elements == elements &&
+         result.error.resource->requested_bytes == bytes &&
+         result.error.primitive.has_value() &&
+         result.error.primitive->name == admission &&
+         result.error.location.offset == offset;
+}
+
+int tuple_issue50_mode(int argument_count, char **arguments) {
+  if (argument_count != 13) {
+    return 60;
+  }
+  constexpr std::string_view source = "[(1 2) [3]]\n";
+  const bennu::EvaluationConfiguration tuple_limit{
+      bennu::ExecutionProfile::bounded_v2,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                            std::size_t{16U}},
+      bennu::AllocationFailureInjection{std::nullopt}};
+  bennu::ProgramResult limited = bennu::evaluate_source("[1 2]\n", tuple_limit);
+  if (!tuple_error_matches(
+          limited, bennu::ResourceErrorReason::profile_limit, 2U, 32U,
+          "tuple-literal", 1U) ||
+      limited.error.resource->limit_kind !=
+          bennu::ResourceLimitKind::max_tuple_table_bytes ||
+      limited.error.resource->configured_limit != std::size_t{16U} ||
+      limited.error.resource->usage_before != std::size_t{0U} ||
+      limited.error.resource->refused_charge != std::size_t{32U} ||
+      limited.error.resource->profile != "bounded-v2") {
+    destroy_program(limited);
+    return 61;
+  }
+  bennu::ProgramResult multi_root =
+      bennu::evaluate_source("[1]\n[2 3]\n", tuple_limit);
+  if (!tuple_error_matches(
+          multi_root, bennu::ResourceErrorReason::profile_limit, 2U, 32U,
+          "tuple-literal", 5U) ||
+      multi_root.error.location.line != 2U ||
+      multi_root.error.location.column != 1U) {
+    destroy_program(multi_root);
+    return 65;
+  }
+
+  const std::array<std::size_t, 3> elements{{2U, 1U, 2U}};
+  const std::array<std::size_t, 3> bytes{{16U, 16U, 32U}};
+  const std::array<std::size_t, 3> offsets{{2U, 8U, 1U}};
+  const std::array<std::string_view, 3> admissions{{
+      "vector-literal", "tuple-literal", "tuple-literal"}};
+  for (std::size_t ordinal = 0U; ordinal < 3U; ++ordinal) {
+    const bennu::EvaluationConfiguration failure{
+        bennu::ExecutionProfile::trusted_local_v2,
+        bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt},
+        bennu::AllocationFailureInjection{ordinal}};
+    bennu::ProgramResult failed = bennu::evaluate_source(source, failure);
+    if (!tuple_error_matches(
+            failed, bennu::ResourceErrorReason::allocation_unavailable,
+            elements[ordinal], bytes[ordinal], admissions[ordinal],
+            offsets[ordinal]) ||
+        failed.error.resource->allocation_ordinal != ordinal) {
+      destroy_program(failed);
+      return static_cast<int>(62U + ordinal);
+    }
+  }
+
+  const std::array<bennu::EvaluationConfiguration, 5> configurations{{
+      tuple_limit,
+      {bennu::ExecutionProfile::trusted_local_v2,
+       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt},
+       bennu::AllocationFailureInjection{0U}},
+      {bennu::ExecutionProfile::trusted_local_v2,
+       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt},
+       bennu::AllocationFailureInjection{1U}},
+      {bennu::ExecutionProfile::trusted_local_v2,
+       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt},
+       bennu::AllocationFailureInjection{2U}},
+      tuple_limit,
+  }};
+  const std::array<std::string_view, 5> sources{{
+      "[1 2]\n", source, source, source, "[1]\n[2 3]\n"}};
+  const std::array<std::string_view, 5> assertions{{
+      tuple_limit_assertions,
+      tuple_fault_vector_assertions,
+      tuple_fault_inner_assertions,
+      tuple_fault_outer_assertions,
+      tuple_multi_root_assertions,
+  }};
+  for (std::size_t index = 0U; index < configurations.size(); ++index) {
+    const std::size_t path = 3U + index * 2U;
+    if (!emit_probe_and_build(
+            sources[index], configurations[index], arguments[path],
+            arguments[path + 1U], arguments[2], assertions[index])) {
+      return static_cast<int>(70U + index);
+    }
+  }
+  return 0;
+}
+
 } // namespace
 
 int main(int argument_count, char **arguments) {
+  if (argument_count >= 2 &&
+      std::string_view(arguments[1]) == "--tuple-issue50") {
+    return tuple_issue50_mode(argument_count, arguments);
+  }
   if (argument_count != 29) {
     return 2;
   }
