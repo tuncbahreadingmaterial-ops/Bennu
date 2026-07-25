@@ -1799,12 +1799,9 @@ EvaluationResources make_rewrite_resources(
       !creation.limits.max_work_units.has_value()) {
     return make_trusted_local_resources(creation.allocation_failure);
   }
-  return EvaluationResources{creation.profile,
-                             creation.limits,
-                             creation.allocation_failure,
-                             0U,
-                             0U,
-                             0U};
+  return make_evaluation_resources(
+      creation.profile, creation.limits, creation.allocation_failure,
+      0U, 0U, 0U);
 }
 
 SourceLocation rewrite_source_location(RewritePosition position) {
@@ -1988,8 +1985,8 @@ Error lowering_primitive_error(ErrorKind kind,
                                const PrimitiveDescriptor &descriptor,
                                SourceLocation location) {
   Error error = make_error(kind, location);
-  error.primitive = PrimitiveErrorContext{
-      std::string(descriptor.name), std::optional<PrimitiveId>{descriptor.id}};
+  error.primitive = make_primitive_error_context(
+      descriptor.name, std::optional<PrimitiveId>{descriptor.id});
   return error;
 }
 
@@ -2036,7 +2033,9 @@ Error lowering_type_error(const RewriteProgram &program,
     const RewriteLoweringNode &argument =
         lowering.nodes[program.arguments[call.first_argument + index]];
     context.actual_arguments.push_back(
-        ErrorValueType{lowering_container(argument), argument.element_type});
+        lowering_container(argument) == ContainerKind::scalar
+            ? make_scalar_type(argument.element_type)
+            : make_vector_type(argument.element_type));
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -2051,12 +2050,15 @@ Error lowering_type_error(const RewriteProgram &program,
     accepted.parameters.reserve(signature.parameter_count);
     for (std::size_t parameter_index = 0U;
          parameter_index < signature.parameter_count; ++parameter_index) {
-      accepted.parameters.push_back(ErrorValueType{
-          signature.parameters[parameter_index].container,
-          signature.parameters[parameter_index].element});
+      accepted.parameters.push_back(
+          signature.parameters[parameter_index].container ==
+                  ContainerKind::scalar
+              ? make_scalar_type(signature.parameters[parameter_index].element)
+              : make_vector_type(signature.parameters[parameter_index].element));
     }
-    accepted.result = ErrorValueType{signature.result.container,
-                                     signature.result.element};
+    accepted.result = signature.result.container == ContainerKind::scalar
+                          ? make_scalar_type(signature.result.element)
+                          : make_vector_type(signature.result.element);
     context.accepted_signatures.push_back(std::move(accepted));
     candidates.push_back(&signature);
   }
@@ -2464,7 +2466,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
       diagnostic.formatting_error = result.error;
       return false;
     }
-    formatted.push_back(std::move(result.formatted));
+    formatted.push_back(std::string(result.formatted));
   }
   return true;
 }
@@ -2472,6 +2474,7 @@ bool format_rewrite_root_values(const RewriteProgram &program,
 void release_rewrite_evaluation_result(RewriteEvaluationResult &result) {
   release_rewrite_values(result.resources, result.values);
   result.formatted.clear();
+  release_evaluation_resources(result.resources);
 }
 
 std::string_view resource_reason_name(ResourceErrorReason reason) {
@@ -2557,7 +2560,9 @@ ErrorKind parse_error_kind(RewriteParseError error) {
 
 std::string semantic_error_message(const Error &error) {
   const std::string primitive =
-      error.primitive.has_value() ? error.primitive->name : "evaluation";
+      error.primitive.has_value()
+          ? std::string(error.primitive->name)
+          : std::string("evaluation");
   if (error.kind == ErrorKind::arity_error && error.arity.has_value()) {
     std::string message = primitive + " received " +
                           std::to_string(error.arity->supplied) +
@@ -2611,16 +2616,17 @@ std::string semantic_error_message(const Error &error) {
 }
 
 Error public_error_from_diagnostic(
-    std::string_view source, const RewriteEvaluationDiagnostic &diagnostic) {
+    std::string_view source, RewriteEvaluationDiagnostic &diagnostic) {
   if (diagnostic.error.kind != ErrorKind::none) {
-    Error error = diagnostic.error;
+    Error error = std::move(diagnostic.error);
     if (error.kind == ErrorKind::unknown_name &&
         !error.primitive.has_value()) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message = "unknown primitive '" + name + "'";
     }
-    if (error.message.empty()) {
+    if (error.message.empty() && error.static_message.empty()) {
       error.message = semantic_error_message(error);
     }
     if (!error.primary_span.has_value()) {
@@ -2665,7 +2671,8 @@ Error public_error_from_diagnostic(
         parse_error_message(parse_error));
     if (parse_error == RewriteParseError::unknown_primitive) {
       const std::string name = source_at_span(source, diagnostic.primary);
-      error.primitive = PrimitiveErrorContext{name, std::nullopt};
+      error.primitive =
+          make_primitive_error_context(name, std::nullopt);
       error.message += " '" + name + "'";
     }
     error.primary_span = rewrite_source_span(diagnostic.primary);
@@ -3395,6 +3402,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   WorkChargeResult resource_validation = charge_work(
       validation_resources, 0U, SourceLocation{1U, 1U, 1U}, "rewrite-emitter");
   if (!resource_validation.ok) {
+    release_evaluation_resources(validation_resources);
     return CEmissionResult{false, {}, std::move(resource_validation.error)};
   }
   const RewriteLoweringProgram &lowering = lowered.program;
@@ -3485,6 +3493,7 @@ CEmissionResult emit_rewrite_c_source_impl(
                "int main(void) {\n"
                "  return bennu_execute(NULL);\n"
                "}\n";
+  release_evaluation_resources(validation_resources);
   return CEmissionResult{
       true, std::move(generated),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
@@ -3627,8 +3636,9 @@ struct RewriteEvaluatorErrorFixture {
   std::optional<std::size_t> element_index;
 };
 
-bool error_value_type_equal(ErrorValueType left, ErrorValueType right) {
-  return left.container == right.container && left.element == right.element;
+bool error_value_type_equal(const ErrorValueType &left,
+                            const ErrorValueType &right) {
+  return structural_type_equal(left, right);
 }
 
 bool scalar_value_equal(const ScalarValue &left, const ScalarValue &right) {
@@ -4819,7 +4829,7 @@ TEST_CASE("rewrite evaluator constructs accounted typed vector literals") {
   CHECK(evaluated.resources.live_evaluation_bytes == 34U);
   CHECK(evaluated.resources.reservation_ordinal == 3U);
   release_rewrite_evaluation_result(evaluated);
-  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator applies nested primitives through shared semantics") {
@@ -4852,7 +4862,7 @@ TEST_CASE("rewrite evaluator applies nested primitives through shared semantics"
   CHECK(evaluated.resources.work_units == 16U);
   CHECK(evaluated.resources.live_evaluation_bytes == 54U);
   release_rewrite_evaluation_result(evaluated);
-  CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+  CHECK(evaluated.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator locates structured runtime diagnostics from spans") {
@@ -5043,7 +5053,7 @@ TEST_CASE("rewrite evaluator enforces cumulative work and live-byte lifetimes") 
   CHECK(released.resources.live_evaluation_bytes == 8U);
   CHECK(released.resources.reservation_ordinal == 3U);
   release_rewrite_evaluation_result(released);
-  CHECK(released.resources.live_evaluation_bytes == 0U);
+  CHECK(released.resources.owner.token == 0U);
 
   const RewriteEvaluationCreationData live_one_past_creation{
       ExecutionProfile::bounded_v1,
@@ -5127,10 +5137,11 @@ TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
   const RewriteParseResult parsed_literal = parse_rewrite("(1)");
   REQUIRE(parsed_literal.ok);
   REQUIRE(parsed_literal.program.nodes.size() == 1U);
-  EvaluationResources malformed_literal_resources{
-      ExecutionProfile::bounded_v1,
-      ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
-      AllocationFailureInjection{std::nullopt}, 0U, 0U, 0U};
+  EvaluationResources malformed_literal_resources =
+      make_evaluation_resources(
+          ExecutionProfile::bounded_v1,
+          ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
+          AllocationFailureInjection{std::nullopt}, 0U, 0U, 0U);
   VectorAllocationResult malformed_literal = vector_literal_value(
       malformed_literal_resources, parsed_literal.program,
       parsed_literal.program.nodes[0]);
@@ -5151,7 +5162,7 @@ TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
   REQUIRE(vector_exact.ok);
   CHECK(vector_exact.resources.live_evaluation_bytes == 16U);
   release_rewrite_evaluation_result(vector_exact);
-  CHECK(vector_exact.resources.live_evaluation_bytes == 0U);
+  CHECK(vector_exact.resources.owner.token == 0U);
 
   RewriteEvaluationResult vector_one_past =
       evaluate_rewrite_source("(1 2 3)", vector_exact_creation);
@@ -5244,7 +5255,7 @@ TEST_CASE("rewrite evaluator matches the tracked Section 15 and 16 corpus") {
       CHECK(evaluated.scalar_kernel_invocations == 0U);
     }
     release_rewrite_evaluation_result(evaluated);
-    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluated.resources.owner.token == 0U);
   }
 
   for (const RewriteEvaluatorErrorFixture &fixture :
@@ -5326,7 +5337,7 @@ TEST_CASE("rewrite evaluation matches direct primitive values and errors") {
   destroy_value(direct_nested.value);
   CHECK(nested_resources.live_evaluation_bytes == 0U);
   release_rewrite_evaluation_result(parsed_nested);
-  CHECK(parsed_nested.resources.live_evaluation_bytes == 0U);
+  CHECK(parsed_nested.resources.owner.token == 0U);
 
   RewriteEvaluationResult parsed_arity =
       evaluate_rewrite_source("add[1]", creation);
@@ -5471,7 +5482,7 @@ TEST_CASE("rewrite evaluation matches direct primitive values and errors") {
   destroy_value(direct_allocation.value);
   CHECK(allocation_resources.live_evaluation_bytes == 0U);
   release_rewrite_evaluation_result(parsed_allocation);
-  CHECK(parsed_allocation.resources.live_evaluation_bytes == 0U);
+  CHECK(parsed_allocation.resources.owner.token == 0U);
 }
 
 TEST_CASE("rewrite evaluator executes deep programs without recursive evaluation") {
@@ -5555,6 +5566,7 @@ ValueResult evaluate_expression(
   Value value = std::move(evaluated.values.front());
   evaluated.values.clear();
   evaluated.formatted.clear();
+  release_evaluation_resources(evaluated.resources);
   return ValueResult{
       true, std::move(value),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
@@ -5593,6 +5605,7 @@ ProgramResult evaluate_source(
   std::vector<Value> values = std::move(evaluated.values);
   evaluated.values.clear();
   evaluated.formatted.clear();
+  release_evaluation_resources(evaluated.resources);
   return ProgramResult{
       true, std::move(values),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};

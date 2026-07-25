@@ -57,6 +57,10 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
     return "ShapeMismatch";
   case bennu::ErrorKind::invalid_execution_profile:
     return "InvalidExecutionProfile";
+  case bennu::ErrorKind::profile_error:
+    return "ProfileError";
+  case bennu::ErrorKind::invalid_value:
+    return "ValueError";
   case bennu::ErrorKind::invalid_primitive_table:
     return "InvalidPrimitiveTable";
   case bennu::ErrorKind::resource_error:
@@ -70,9 +74,12 @@ std::string_view error_kind_name(bennu::ErrorKind kind) {
 }
 
 void write_diagnostic(std::string_view source_name, const bennu::Error &error) {
+  const std::string_view message =
+      error.message.empty() ? error.static_message
+                            : std::string_view(error.message);
   std::cerr << source_name << ':' << error.location.line << ':'
             << error.location.column << ": " << error_kind_name(error.kind)
-            << ": " << error.message << '\n';
+            << ": " << message << '\n';
 }
 
 int report_stdout_failure() {
