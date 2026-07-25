@@ -691,6 +691,24 @@ constexpr std::string_view tuple_fault_outer_assertions = R"bennu_assert(
         bennu_probe_release_order[releases_before] != allocations_before + 1U ||
         bennu_probe_release_order[releases_before + 1U] != allocations_before)bennu_assert";
 
+constexpr std::string_view tuple_multi_root_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_PROFILE ||
+        snapshot.profile != BENNU_PROFILE_BOUNDED_V2 ||
+        snapshot.failure_limit != BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES ||
+        snapshot.failure_configured_limit != 16U ||
+        snapshot.failure_usage_before != 0U ||
+        snapshot.failure_refused_charge != 32U ||
+        snapshot.failure_requested_elements != 2U ||
+        snapshot.failure_requested_bytes != 32U ||
+        strcmp(snapshot.failure_admission_point, "tuple-literal") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 5U ||
+        snapshot.failure_primary_span.begin.line != 2U ||
+        snapshot.failure_primary_span.end.offset != 10U ||
+        snapshot.reservation_ordinal != 1U ||
+        bennu_probe_total_allocations != allocations_before + 1U ||
+        bennu_probe_release_count != releases_before + 1U ||
+        bennu_probe_release_order[releases_before] != allocations_before)bennu_assert";
+
 bool tuple_error_matches(
     const bennu::ProgramResult &result, bennu::ResourceErrorReason reason,
     std::size_t elements, std::size_t bytes, std::string_view admission,
@@ -705,7 +723,7 @@ bool tuple_error_matches(
 }
 
 int tuple_issue50_mode(int argument_count, char **arguments) {
-  if (argument_count != 11) {
+  if (argument_count != 13) {
     return 60;
   }
   constexpr std::string_view source = "[(1 2) [3]]\n";
@@ -726,6 +744,16 @@ int tuple_issue50_mode(int argument_count, char **arguments) {
       limited.error.resource->profile != "bounded-v2") {
     destroy_program(limited);
     return 61;
+  }
+  bennu::ProgramResult multi_root =
+      bennu::evaluate_source("[1]\n[2 3]\n", tuple_limit);
+  if (!tuple_error_matches(
+          multi_root, bennu::ResourceErrorReason::profile_limit, 2U, 32U,
+          "tuple-literal", 5U) ||
+      multi_root.error.location.line != 2U ||
+      multi_root.error.location.column != 1U) {
+    destroy_program(multi_root);
+    return 65;
   }
 
   const std::array<std::size_t, 3> elements{{2U, 1U, 2U}};
@@ -750,7 +778,7 @@ int tuple_issue50_mode(int argument_count, char **arguments) {
     }
   }
 
-  const std::array<bennu::EvaluationConfiguration, 4> configurations{{
+  const std::array<bennu::EvaluationConfiguration, 5> configurations{{
       tuple_limit,
       {bennu::ExecutionProfile::trusted_local_v2,
        bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
@@ -764,14 +792,16 @@ int tuple_issue50_mode(int argument_count, char **arguments) {
        bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
                              std::nullopt},
        bennu::AllocationFailureInjection{2U}},
+      tuple_limit,
   }};
-  const std::array<std::string_view, 4> sources{{
-      "[1 2]\n", source, source, source}};
-  const std::array<std::string_view, 4> assertions{{
+  const std::array<std::string_view, 5> sources{{
+      "[1 2]\n", source, source, source, "[1]\n[2 3]\n"}};
+  const std::array<std::string_view, 5> assertions{{
       tuple_limit_assertions,
       tuple_fault_vector_assertions,
       tuple_fault_inner_assertions,
       tuple_fault_outer_assertions,
+      tuple_multi_root_assertions,
   }};
   for (std::size_t index = 0U; index < configurations.size(); ++index) {
     const std::size_t path = 3U + index * 2U;

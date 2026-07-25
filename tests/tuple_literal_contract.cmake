@@ -112,7 +112,7 @@ function(strict_compile_tuple input output label)
   endif()
 endfunction()
 
-set(probe_names tuple-limit fault-vector fault-inner fault-outer)
+set(probe_names tuple-limit fault-vector fault-inner fault-outer multi-root)
 set(probe_arguments)
 foreach(probe IN LISTS probe_names)
   set(probe_c "${work_directory}/${probe}-probe.c")
@@ -120,11 +120,29 @@ foreach(probe IN LISTS probe_names)
       "${work_directory}/${probe}-native${BENNU_EXECUTABLE_SUFFIX}")
   list(APPEND probe_arguments "${probe_c}" "${probe_native}")
 endforeach()
-execute_process(
-  COMMAND "${BENNU_PUBLIC_RESOURCE_FIXTURE}" --tuple-issue50
-          "${BENNU_C_COMPILER}" ${probe_arguments}
-  RESULT_VARIABLE probe_fixture_exit OUTPUT_VARIABLE probe_fixture_stdout
-  ERROR_VARIABLE probe_fixture_stderr)
+if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
+  file(TO_NATIVE_PATH "${BENNU_PUBLIC_RESOURCE_FIXTURE}" native_fixture)
+  set(probe_fixture_script "${work_directory}/tuple-probe-fixture.cmd")
+  set(probe_fixture_command
+      "@\"${native_fixture}\" --tuple-issue50 \"${native_c_compiler}\"")
+  foreach(probe_argument IN LISTS probe_arguments)
+    file(TO_NATIVE_PATH "${probe_argument}" native_probe_argument)
+    string(APPEND probe_fixture_command " \"${native_probe_argument}\"")
+  endforeach()
+  file(WRITE "${probe_fixture_script}"
+       "@call \"${vs_dev_command}\" -arch=x64 -host_arch=x64 >nul\r\n"
+       "${probe_fixture_command}\r\n")
+  execute_process(
+    COMMAND cmd.exe /d /c "${probe_fixture_script}"
+    RESULT_VARIABLE probe_fixture_exit OUTPUT_VARIABLE probe_fixture_stdout
+    ERROR_VARIABLE probe_fixture_stderr)
+else()
+  execute_process(
+    COMMAND "${BENNU_PUBLIC_RESOURCE_FIXTURE}" --tuple-issue50
+            "${BENNU_C_COMPILER}" ${probe_arguments}
+    RESULT_VARIABLE probe_fixture_exit OUTPUT_VARIABLE probe_fixture_stdout
+    ERROR_VARIABLE probe_fixture_stderr)
+endif()
 if(NOT "${probe_fixture_exit}" STREQUAL "0" OR
    NOT probe_fixture_stdout STREQUAL "" OR
    NOT probe_fixture_stderr STREQUAL "")

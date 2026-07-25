@@ -5660,6 +5660,47 @@ TEST_CASE("TUP-001-GRAMMAR") {
   CHECK(rewrite_flat_snapshot(comprehensive.program) ==
         R"snapshot(roots=[0,2,8,10,11,12];nodes=[{kind=tuple_literal,span=[19:2:1,21:2:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[23:3:2,24:3:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[22:3:1,25:3:4),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0},{kind=scalar_literal,span=[27:4:2,28:4:3),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[29:4:4,32:4:7),element_type=double_precision,boolean=0,integer=0,double_precision=bits:4004000000000000,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[33:4:8,37:4:12),element_type=boolean,boolean=1,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[39:4:14,40:4:15),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[38:4:13,41:4:16),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=1,element_count=1,first_element_span=1,call_index=0},{kind=tuple_literal,span=[26:4:1,42:4:17),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=2,element_count=4,first_element_span=2,call_index=0},{kind=parameter_reference,span=[47:6:3,48:6:4),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[43:5:1,50:7:2),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=6,element_count=1,first_element_span=6,call_index=0},{kind=primitive_call,span=[51:8:1,56:8:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[57:9:1,59:9:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=7,element_count=0,first_element_span=7,call_index=0}];arguments=[];argument_spans=[];calls=[{syntax=bracketed,name=add,name_span=[51:8:1,54:8:4),opening_delimiter_span=[54:8:4,55:8:5),closing_delimiter_span=[55:8:5,56:8:6),prefix_separator_span=[55:8:5,55:8:5),span=[51:8:1,56:8:6),first_argument=0,argument_count=0,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[1,6,3,4,5,7,9];tuple_element_spans=[[23:3:2,24:3:3),[39:4:14,40:4:15),[27:4:2,28:4:3),[29:4:4,32:4:7),[33:4:8,37:4:12),[38:4:13,41:4:16),[47:6:3,48:6:4)])snapshot");
 
+  const std::array<std::string_view, 8> exact_sources{{
+      "add[1 2]",
+      "add [1 2]",
+      "add []",
+      "parameters[x Int]\n[x x]",
+      "parameters[x Int]\n[inc x]",
+      "parameters[x Int]\n[x inc x]",
+      "unknown [1 2]",
+      " \r\nparameters[\r\n x Int\r\n]\r\n[\r\n x\r\n]\r\n",
+  }};
+  const std::array<std::string_view, 8> exact_snapshots{{
+      R"snapshot(roots=[2];nodes=[{kind=scalar_literal,span=[5:1:5,6:1:6),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[7:1:7,8:1:8),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,9:1:9),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[0,1];argument_spans=[[5:1:5,6:1:6),[7:1:7,8:1:8)];calls=[{syntax=bracketed,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,5:1:5),closing_delimiter_span=[8:1:8,9:1:9),prefix_separator_span=[5:1:5,5:1:5),span=[1:1:1,9:1:9),first_argument=0,argument_count=2,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=scalar_literal,span=[6:1:6,7:1:7),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[8:1:8,9:1:9),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[5:1:5,10:1:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,10:1:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[2];argument_spans=[[5:1:5,10:1:10)];calls=[{syntax=prefix,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,4:1:4),closing_delimiter_span=[5:1:5,5:1:5),prefix_separator_span=[4:1:4,5:1:5),span=[1:1:1,10:1:10),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[6:1:6,7:1:7),[8:1:8,9:1:9)])snapshot",
+      R"snapshot(roots=[1];nodes=[{kind=tuple_literal,span=[5:1:5,7:1:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,7:1:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[0];argument_spans=[[5:1:5,7:1:7)];calls=[{syntax=prefix,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,4:1:4),closing_delimiter_span=[5:1:5,5:1:5),prefix_separator_span=[4:1:4,5:1:5),span=[1:1:1,7:1:7),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot",
+      R"snapshot(roots=[2];nodes=[{kind=parameter_reference,span=[20:2:2,21:2:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[22:2:4,23:2:5),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,24:2:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[20:2:2,21:2:3),[22:2:4,23:2:5)])snapshot",
+      R"snapshot(roots=[2];nodes=[{kind=parameter_reference,span=[24:2:6,25:2:7),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[20:2:2,25:2:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,26:2:8),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0}];arguments=[0];argument_spans=[[24:2:6,25:2:7)];calls=[{syntax=prefix,name=inc,name_span=[20:2:2,23:2:5),opening_delimiter_span=[23:2:5,23:2:5),closing_delimiter_span=[24:2:6,24:2:6),prefix_separator_span=[23:2:5,24:2:6),span=[20:2:2,25:2:7),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[1];tuple_element_spans=[[20:2:2,25:2:7)])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=parameter_reference,span=[20:2:2,21:2:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[26:2:8,27:2:9),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[22:2:4,27:2:9),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,28:2:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0}];arguments=[1];argument_spans=[[26:2:8,27:2:9)];calls=[{syntax=prefix,name=inc,name_span=[22:2:4,25:2:7),opening_delimiter_span=[25:2:7,25:2:7),closing_delimiter_span=[26:2:8,26:2:8),prefix_separator_span=[25:2:7,26:2:8),span=[22:2:4,27:2:9),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,2];tuple_element_spans=[[20:2:2,21:2:3),[22:2:4,27:2:9)])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=scalar_literal,span=[10:1:10,11:1:11),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[12:1:12,13:1:13),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[9:1:9,14:1:14),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,14:1:14),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[2];argument_spans=[[9:1:9,14:1:14)];calls=[{syntax=prefix,name=unknown,name_span=[1:1:1,8:1:8),opening_delimiter_span=[8:1:8,8:1:8),closing_delimiter_span=[9:1:9,9:1:9),prefix_separator_span=[8:1:8,9:1:9),span=[1:1:1,14:1:14),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[10:1:10,11:1:11),[12:1:12,13:1:13)])snapshot",
+      R"snapshot(roots=[1];nodes=[{kind=parameter_reference,span=[32:6:2,33:6:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[28:5:1,36:7:2),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0];tuple_element_spans=[[32:6:2,33:6:3)])snapshot",
+  }};
+  for (std::size_t index = 0U; index < exact_sources.size(); ++index) {
+    const std::string_view source = exact_sources[index];
+    const RewriteParseResult exact = parse_rewrite(source);
+    REQUIRE(exact.ok);
+    INFO(source);
+    CHECK(rewrite_flat_snapshot(exact.program) == exact_snapshots[index]);
+  }
+  RewriteParseResult unknown_prefix = parse_rewrite("unknown [1 2]");
+  REQUIRE(unknown_prefix.ok);
+  const RewriteResolutionResult unknown_resolution =
+      resolve_rewrite_primitives(unknown_prefix.program);
+  REQUIRE_FALSE(unknown_resolution.ok);
+  CHECK(unknown_resolution.diagnostic.error ==
+        RewriteParseError::unknown_primitive);
+  CHECK(span_is(unknown_resolution.diagnostic.primary, 1U, 1U, 1U, 8U, 1U,
+                8U));
+  CHECK(span_is(unknown_resolution.diagnostic.context, 1U, 1U, 1U, 14U, 1U,
+                14U));
+  CHECK(span_is(unknown_resolution.diagnostic.related, 1U, 1U, 1U, 8U, 1U,
+                8U));
+
   const std::array<std::string_view, 4> lowering_sources{{
       "[]",
       "[1]",
@@ -5982,6 +6023,41 @@ TEST_CASE("TUP-050-DIRECT-PRESERVATION") {
   REQUIRE(arity.diagnostic.error.arity.has_value());
   CHECK(arity.diagnostic.error.arity->supplied == 1U);
   CHECK(arity.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult adjacent =
+      evaluate_rewrite_source("add[1 2]", trusted_v2);
+  REQUIRE(adjacent.ok);
+  REQUIRE(adjacent.formatted.size() == 1U);
+  CHECK(adjacent.formatted[0] == "3");
+  release_rewrite_evaluation_result(adjacent);
+
+  for (const std::string_view source :
+       std::array<std::string_view, 2>{{"add [1 2]", "add []"}}) {
+    RewriteEvaluationResult prefix =
+        evaluate_rewrite_source(source, trusted_v2);
+    REQUIRE_FALSE(prefix.ok);
+    CHECK(prefix.diagnostic.error.kind == ErrorKind::arity_error);
+    REQUIRE(prefix.diagnostic.error.arity.has_value());
+    CHECK(prefix.diagnostic.error.arity->supplied == 1U);
+    CHECK(prefix.scalar_kernel_invocations == 0U);
+  }
+
+  const std::array<Value, 1> arguments{{make_int_value(4)}};
+  const std::array<std::string_view, 3> parameter_sources{{
+      "parameters[x Int]\n[x x]",
+      "parameters[x Int]\n[inc x]",
+      "parameters[x Int]\n[x inc x]",
+  }};
+  const std::array<std::string_view, 3> parameter_expected{{
+      "[4 4]", "[5]", "[4 5]"}};
+  for (std::size_t index = 0U; index < parameter_sources.size(); ++index) {
+    RewriteEvaluationResult parameter = evaluate_rewrite_source_impl(
+        parameter_sources[index], trusted_v2, false, arguments);
+    REQUIRE(parameter.ok);
+    REQUIRE(parameter.formatted.size() == 1U);
+    CHECK(parameter.formatted[0] == parameter_expected[index]);
+    release_rewrite_evaluation_result(parameter);
+  }
 }
 
 TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {
