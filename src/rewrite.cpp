@@ -13,6 +13,8 @@
 #include <array>
 #include <bit>
 #ifndef DOCTEST_CONFIG_DISABLE
+#include <cstdlib>
+#include <fstream>
 #include <ostream>
 #endif
 #include <charconv>
@@ -1744,8 +1746,15 @@ enum class RewriteCardinality {
   dynamic_vector,
 };
 
+enum class RewriteLoweringOperation {
+  source_node,
+  prepared_value,
+  immutable_borrow,
+};
+
 struct RewriteLoweringNode {
   RewriteNodeKind kind;
+  RewriteLoweringOperation operation;
   RewriteCardinality cardinality;
   ScalarType element_type;
   std::size_t element_count;
@@ -1791,6 +1800,13 @@ struct RewriteEvaluationResult {
   RewriteEvaluationDiagnostic diagnostic;
   EvaluationResources resources;
   std::size_t scalar_kernel_invocations;
+};
+
+struct PreparedRewriteValues {
+  std::vector<Value> values;
+  std::vector<std::uint8_t> present;
+  std::optional<std::size_t> fail_at_borrow_consumer;
+  std::size_t borrow_consumer_ordinal;
 };
 
 EvaluationResources make_rewrite_resources(
@@ -2124,6 +2140,7 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
   const bool vector = node.kind == RewriteNodeKind::vector_literal;
   return RewriteLoweringNode{
       node.kind,
+      RewriteLoweringOperation::source_node,
       vector ? RewriteCardinality::static_vector : RewriteCardinality::scalar,
       node.element_type,
       vector ? node.element_count : 1U,
@@ -2340,6 +2357,56 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
   }
   return RewriteLoweringResult{
       true, std::move(lowering), empty_rewrite_evaluation_diagnostic()};
+}
+
+bool rewrite_lowering_invariants_hold(
+    const RewriteProgram &program,
+    const RewriteLoweringProgram &lowering) {
+  if (lowering.nodes.size() != program.nodes.size() ||
+      lowering.arguments != program.arguments ||
+      lowering.roots != program.roots) {
+    return false;
+  }
+  std::vector<std::size_t> expected_uses(lowering.nodes.size(), 0U);
+  for (std::size_t node_index = 0U; node_index < lowering.nodes.size();
+       ++node_index) {
+    const RewriteLoweringNode &node = lowering.nodes[node_index];
+    if (node.argument_count == 0U) {
+      continue;
+    }
+    if (node.first_argument > lowering.arguments.size() ||
+        node.argument_count >
+            lowering.arguments.size() - node.first_argument) {
+      return false;
+    }
+    for (std::size_t position = 0U; position < node.argument_count;
+         ++position) {
+      const std::size_t argument =
+          lowering.arguments[node.first_argument + position];
+      if (argument >= node_index || argument >= lowering.nodes.size()) {
+        return false;
+      }
+      ++expected_uses[argument];
+    }
+  }
+  std::vector<std::uint8_t> roots(lowering.nodes.size(),
+                                  std::uint8_t{0U});
+  for (const std::size_t root : lowering.roots) {
+    if (root >= lowering.nodes.size() ||
+        roots[root] != std::uint8_t{0U}) {
+      return false;
+    }
+    roots[root] = std::uint8_t{1U};
+    ++expected_uses[root];
+  }
+  for (std::size_t index = 0U; index < lowering.nodes.size(); ++index) {
+    if (lowering.nodes[index].use_count != expected_uses[index] ||
+        lowering.nodes[index].retained_root !=
+            (roots[index] != std::uint8_t{0U})) {
+      return false;
+    }
+  }
+  return true;
 }
 
 VectorAllocationResult vector_literal_value(EvaluationResources &resources,
@@ -2796,9 +2863,22 @@ CBackendConfiguration c_backend_configuration(
 
 RewriteEvaluationResult evaluate_rewrite_source_impl(
     std::string_view source, const RewriteEvaluationCreationData &creation,
-    bool require_single_root, std::span<const Value> parameter_values) {
-  EvaluationResources resources = make_rewrite_resources(creation);
-  RewriteParseResult parsed = parse_rewrite(source);
+    bool require_single_root, std::span<const Value> parameter_values,
+    const RewriteProgram *prepared_program,
+    const RewriteLoweringProgram *prepared_lowering,
+    PreparedRewriteValues *prepared_values,
+    const EvaluationResources *prepared_resources) {
+  EvaluationResources resources =
+      prepared_resources == nullptr ? make_rewrite_resources(creation)
+                                    : *prepared_resources;
+  const bool prepared =
+      prepared_program != nullptr && prepared_lowering != nullptr;
+  RewriteParseResult parsed =
+      prepared
+          ? RewriteParseResult{
+                true, *prepared_program,
+                RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}}
+          : parse_rewrite(source);
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -2848,7 +2928,10 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   }
 
   const RewriteResolutionResult resolved =
-      resolve_rewrite_primitives(parsed.program);
+      prepared ? RewriteResolutionResult{
+                     true, RewriteDiagnostic{RewriteParseError::none, {}, {},
+                                             {}, {}}}
+               : resolve_rewrite_primitives(parsed.program);
   if (!resolved.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -2874,10 +2957,24 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
-  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  RewriteLoweringResult lowered =
+      prepared
+          ? RewriteLoweringResult{
+                true, *prepared_lowering,
+                empty_rewrite_evaluation_diagnostic()}
+          : lower_rewrite_program(parsed.program);
   if (!lowered.ok) {
     return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
                                       0U);
+  }
+  if (!rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::primitive_table;
+    diagnostic.error = make_error(
+        ErrorKind::invalid_primitive_table, SourceLocation{1U, 1U, 1U},
+        "prepared typed rewrite lowering violates flat-program invariants");
+    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
   Error parameter_error =
@@ -2933,6 +3030,45 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   for (std::size_t node_index = 0U;
        node_index < parsed.program.nodes.size(); ++node_index) {
     const RewriteNode &node = parsed.program.nodes[node_index];
+    const RewriteLoweringNode &lowered_node = lowering.nodes[node_index];
+    if (lowered_node.operation == RewriteLoweringOperation::prepared_value) {
+      if (prepared_values == nullptr ||
+          prepared_values->values.size() != lowering.nodes.size() ||
+          prepared_values->present.size() != lowering.nodes.size() ||
+          prepared_values->present[node_index] == std::uint8_t{0U}) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::primitive_table;
+        diagnostic.error = make_error(
+            ErrorKind::invalid_primitive_table, lowered_node.source_location,
+            "prepared lowering is missing a node value");
+        release_rewrite_node_values(resources, node_values, node_live);
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      const ValueValidationResult validation =
+          validate_value(prepared_values->values[node_index]);
+      if (!validation.ok) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::primitive_table;
+        diagnostic.error = make_error(
+            ErrorKind::invalid_primitive_table, lowered_node.source_location,
+            "prepared lowering contains an invalid owned value");
+        release_rewrite_node_values(resources, node_values, node_live);
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      node_values[node_index] =
+          move_value(prepared_values->values[node_index]);
+      prepared_values->present[node_index] = std::uint8_t{0U};
+      node_live[node_index] = std::uint8_t{1U};
+      if (remaining_uses[node_index] == 0U) {
+        release_rewrite_node_value(resources, node_values, node_live,
+                                   node_index);
+      }
+      continue;
+    }
     if (node.kind == RewriteNodeKind::scalar_literal) {
       node_values[node_index] = scalar_literal_value(node);
       node_live[node_index] = std::uint8_t{1U};
@@ -3038,10 +3174,47 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
-    PrimitiveApplicationResult applied = apply_typed_primitive(
-        application_context, *descriptor,
-        lowering.nodes[node_index].implementation, arguments,
-        rewrite_source_location(call.name_span.begin));
+    PrimitiveApplicationResult applied{
+        false, make_int_value(0),
+        make_error(ErrorKind::invalid_primitive_table,
+                   lowered_node.source_location)};
+    if (lowered_node.operation ==
+        RewriteLoweringOperation::immutable_borrow) {
+      bool valid_arguments = true;
+      for (const Value *argument : arguments) {
+        if (!validate_value(*argument).ok) {
+          valid_arguments = false;
+          break;
+        }
+      }
+      const std::size_t ordinal =
+          prepared_values == nullptr
+              ? 0U
+              : prepared_values->borrow_consumer_ordinal++;
+      const bool injected =
+          prepared_values != nullptr &&
+          prepared_values->fail_at_borrow_consumer.has_value() &&
+          ordinal == *prepared_values->fail_at_borrow_consumer;
+      if (valid_arguments && !injected) {
+        applied = PrimitiveApplicationResult{
+            true, make_int_value(static_cast<std::int64_t>(arguments.size())),
+            make_error(ErrorKind::none, lowered_node.source_location)};
+      } else {
+        applied = PrimitiveApplicationResult{
+            false, make_int_value(0),
+            make_error(
+                valid_arguments ? ErrorKind::domain_error
+                                : ErrorKind::invalid_value,
+                lowered_node.source_location,
+                injected ? "prepared immutable-borrow consumer failure"
+                         : "prepared immutable-borrow consumer received an "
+                           "invalid value")};
+      }
+    } else {
+      applied = apply_typed_primitive(
+          application_context, *descriptor, lowered_node.implementation,
+          arguments, rewrite_source_location(call.name_span.begin));
+    }
     scalar_kernel_invocations = application_context.scalar_kernel_invocations;
     const std::span<const std::size_t> argument_nodes(
         parsed.program.arguments.data() + call.first_argument,
@@ -3121,9 +3294,20 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
                                  scalar_kernel_invocations};
 }
 
+RewriteEvaluationResult evaluate_prepared_rewrite_program(
+    const RewriteProgram &program, const RewriteLoweringProgram &lowering,
+    const RewriteEvaluationCreationData &creation,
+    PreparedRewriteValues *prepared_values,
+    const EvaluationResources *prepared_resources) {
+  return evaluate_rewrite_source_impl(
+      program.source, creation, false, {}, &program, &lowering,
+      prepared_values, prepared_resources);
+}
+
 RewriteEvaluationResult evaluate_rewrite_source(
     std::string_view source, const RewriteEvaluationCreationData &creation) {
-  return evaluate_rewrite_source_impl(source, creation, false, {});
+  return evaluate_rewrite_source_impl(source, creation, false, {}, nullptr,
+                                      nullptr, nullptr, nullptr);
 }
 
 void append_c_unsigned(std::string &source, std::size_t value) {
@@ -3481,9 +3665,17 @@ void append_lowered_rewrite_nodes(std::string &source,
 }
 
 CEmissionResult emit_rewrite_c_source_impl(
-    std::string_view source,
-    const CBackendConfiguration &configuration) {
-  RewriteParseResult parsed = parse_rewrite(source);
+    std::string_view source, const CBackendConfiguration &configuration,
+    const RewriteProgram *prepared_program,
+    const RewriteLoweringProgram *prepared_lowering) {
+  const bool prepared =
+      prepared_program != nullptr && prepared_lowering != nullptr;
+  RewriteParseResult parsed =
+      prepared
+          ? RewriteParseResult{
+                true, *prepared_program,
+                RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}}
+          : parse_rewrite(source);
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -3512,7 +3704,10 @@ CEmissionResult emit_rewrite_c_source_impl(
         false, {}, public_error_from_diagnostic(source, diagnostic)};
   }
   RewriteResolutionResult resolution =
-      resolve_rewrite_primitives(parsed.program);
+      prepared ? RewriteResolutionResult{
+                     true, RewriteDiagnostic{RewriteParseError::none, {}, {},
+                                             {}, {}}}
+               : resolve_rewrite_primitives(parsed.program);
   if (!resolution.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -3530,10 +3725,24 @@ CEmissionResult emit_rewrite_c_source_impl(
         make_error(ErrorKind::invalid_primitive_table,
                    SourceLocation{1U, 1U, 1U})};
   }
-  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  RewriteLoweringResult lowered =
+      prepared
+          ? RewriteLoweringResult{
+                true, *prepared_lowering,
+                empty_rewrite_evaluation_diagnostic()}
+          : lower_rewrite_program(parsed.program);
   if (!lowered.ok) {
     return CEmissionResult{
         false, {}, public_error_from_diagnostic(source, lowered.diagnostic)};
+  }
+  if (!rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
+    return CEmissionResult{
+        false, {},
+        make_error(
+            ErrorKind::invalid_primitive_table,
+            SourceLocation{1U, 1U, 1U},
+            "prepared typed rewrite lowering violates flat-program "
+            "invariants")};
   }
   if (lowered.program.nodes.empty() && !lowered.program.roots.empty()) {
     return CEmissionResult{
@@ -3552,6 +3761,17 @@ CEmissionResult emit_rewrite_c_source_impl(
     return CEmissionResult{false, {}, std::move(resource_validation.error)};
   }
   const RewriteLoweringProgram &lowering = lowered.program;
+  for (const RewriteLoweringNode &node : lowering.nodes) {
+    if (node.operation != RewriteLoweringOperation::source_node) {
+      release_evaluation_resources(validation_resources);
+      return CEmissionResult{
+          false, {},
+          make_error(
+              ErrorKind::profile_error, node.source_location,
+              "prepared tuple values require Issue #50 generated-C tuple "
+              "runtime support")};
+    }
+  }
 
   std::string generated;
   append_rewrite_c_runtime(generated);
@@ -3627,13 +3847,22 @@ CEmissionResult emit_rewrite_c_source_impl(
     }
   }
   generated += "}\n\n"
+               "#ifndef BENNU_CUSTOM_MAIN\n"
                "int main(void) {\n"
                "  return bennu_execute(NULL);\n"
-               "}\n";
+               "}\n"
+               "#endif\n";
   release_evaluation_resources(validation_resources);
   return CEmissionResult{
       true, std::move(generated),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
+}
+
+CEmissionResult emit_prepared_rewrite_c_source(
+    const RewriteProgram &program, const RewriteLoweringProgram &lowering,
+    const CBackendConfiguration &configuration) {
+  return emit_rewrite_c_source_impl(program.source, configuration, &program,
+                                    &lowering);
 }
 
 #ifndef DOCTEST_CONFIG_DISABLE
@@ -3781,6 +4010,22 @@ struct SharedLivenessProbe {
   std::size_t logical_releases;
   std::vector<const void *> released_storage;
 };
+
+struct PreparedSharedRewriteFixture {
+  RewriteProgram program;
+  RewriteLoweringProgram lowering;
+};
+
+PreparedSharedRewriteFixture make_prepared_shared_vector_fixture() {
+  RewriteParseResult parsed = parse_rewrite("inc[(1 2)]\ninc[0]");
+  (void)resolve_rewrite_primitives(parsed.program);
+  parsed.program.arguments[1U] = parsed.program.arguments[0U];
+  parsed.program.argument_spans[1U] =
+      parsed.program.nodes[parsed.program.arguments[0U]].span;
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  return PreparedSharedRewriteFixture{
+      std::move(parsed.program), std::move(lowered.program)};
+}
 
 void record_shared_liveness_event(void *context,
                                   ResourceLifetimeEvent event) {
@@ -4848,7 +5093,18 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
     CHECK(resources.reservation_ordinal == 0U);
   }
 
-  SUBCASE("tuple table and nested payload survive both borrows then clean once") {
+  SUBCASE("prepared tuple producer feeds two successful immutable consumers") {
+    PreparedSharedRewriteFixture fixture =
+        make_prepared_shared_vector_fixture();
+    fixture.lowering.nodes[0U].operation =
+        RewriteLoweringOperation::prepared_value;
+    fixture.lowering.nodes[1U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    fixture.lowering.nodes[3U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    REQUIRE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+
     EvaluationResources resources =
         make_trusted_local_v2_resources({std::nullopt});
     SharedLivenessProbe probe{0U, {}};
@@ -4865,58 +5121,158 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
         resources, children, SourceLocation{1U, 1U, 1U},
         "shared-tuple-fixture");
     REQUIRE(tuple.ok);
-    std::vector<Value> values;
-    values.push_back(std::move(tuple.value));
-    std::vector<std::uint8_t> live{std::uint8_t{1U}};
-    std::vector<std::size_t> remaining{2U};
-    const std::size_t live_before_consumers =
-        resources.live_evaluation_bytes;
 
-    for (std::size_t attempt = 0U; attempt < 2U; ++attempt) {
-      REQUIRE(validate_value(values[0]).ok);
-      const std::array<const Value *, 1> borrowed{{&values[0]}};
-      PrimitiveApplicationContext context{resources, 0U};
-      PrimitiveApplicationResult applied = apply_typed_primitive(
-          context, *find_primitive(PrimitiveId::inc),
-          PrimitiveImplementation::inc_integer, borrowed,
-          SourceLocation{1U, 1U, 1U});
-      REQUIRE_FALSE(applied.ok);
-      CHECK(applied.error.kind == ErrorKind::type_mismatch);
-      REQUIRE(validate_value(values[0]).ok);
-      REQUIRE(complete_rewrite_consumer_attempt(
-          resources, arguments, nodes, remaining, values, live));
-      if (attempt == 0U) {
-        CHECK(resources.live_evaluation_bytes == live_before_consumers);
-        CHECK(probe.logical_releases == 0U);
-      }
+    PreparedRewriteValues prepared{{}, {}, std::nullopt, 0U};
+    for (std::size_t index = 0U; index < fixture.lowering.nodes.size();
+         ++index) {
+      prepared.values.push_back(make_int_value(0));
+      prepared.present.push_back(std::uint8_t{0U});
     }
-    CHECK(live[0] == std::uint8_t{0U});
+    prepared.values[0U] = move_value(tuple.value);
+    prepared.present[0U] = std::uint8_t{1U};
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v2,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            &prepared, &resources);
+    REQUIRE(evaluated.ok);
+    REQUIRE(evaluated.formatted.size() == 2U);
+    CHECK(evaluated.formatted[0] == "1");
+    CHECK(evaluated.formatted[1] == "1");
+    CHECK(prepared.borrow_consumer_ordinal == 2U);
+    CHECK(prepared.present[0U] == std::uint8_t{0U});
     CHECK(probe.logical_releases == 2U);
-    CHECK(resources.live_evaluation_bytes == 0U);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    release_rewrite_evaluation_result(evaluated);
+
+    const CEmissionResult unavailable = emit_prepared_rewrite_c_source(
+        fixture.program, fixture.lowering,
+        CBackendConfiguration{
+            ExecutionProfile::trusted_local_v2,
+            ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
+            AllocationFailureInjection{std::nullopt},
+            AllocationFailureInjection{std::nullopt}});
+    REQUIRE_FALSE(unavailable.ok);
+    CHECK(unavailable.error.kind == ErrorKind::profile_error);
+    CHECK(unavailable.error.message.find("Issue #50") !=
+          std::string::npos);
+  }
+
+  SUBCASE("prepared tuple failure consumes final borrow and cleans prior result") {
+    PreparedSharedRewriteFixture fixture =
+        make_prepared_shared_vector_fixture();
+    fixture.lowering.nodes[0U].operation =
+        RewriteLoweringOperation::prepared_value;
+    fixture.lowering.nodes[1U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    fixture.lowering.nodes[3U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    EvaluationResources resources =
+        make_trusted_local_v2_resources({std::nullopt});
+    SharedLivenessProbe probe{0U, {}};
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        resources,
+        ResourceLifetimeObserver{&probe, &record_shared_liveness_event}));
+    const std::array<std::int64_t, 1> element{{9}};
+    VectorAllocationResult vector = copy_int_vector(
+        resources, element, SourceLocation{1U, 1U, 1U},
+        "shared-tuple-failure-child");
+    REQUIRE(vector.ok);
+    std::array<Value, 1> children{{std::move(vector.value)}};
+    TupleConstructionResult tuple = make_tuple_value(
+        resources, children, SourceLocation{1U, 1U, 1U},
+        "shared-tuple-failure");
+    REQUIRE(tuple.ok);
+    PreparedRewriteValues prepared{{}, {}, std::size_t{1U}, 0U};
+    for (std::size_t index = 0U; index < fixture.lowering.nodes.size();
+         ++index) {
+      prepared.values.push_back(make_int_value(0));
+      prepared.present.push_back(std::uint8_t{0U});
+    }
+    prepared.values[0U] = move_value(tuple.value);
+    prepared.present[0U] = std::uint8_t{1U};
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v2,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            &prepared, &resources);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.error.kind == ErrorKind::domain_error);
+    CHECK(prepared.borrow_consumer_ordinal == 2U);
+    CHECK(probe.logical_releases == 2U);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    release_rewrite_evaluation_result(evaluated);
+  }
+
+  SUBCASE("invalid prepared use count is rejected before tuple ownership moves") {
+    PreparedSharedRewriteFixture fixture =
+        make_prepared_shared_vector_fixture();
+    fixture.lowering.nodes[0U].operation =
+        RewriteLoweringOperation::prepared_value;
+    fixture.lowering.nodes[1U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    fixture.lowering.nodes[3U].operation =
+        RewriteLoweringOperation::immutable_borrow;
+    --fixture.lowering.nodes[0U].use_count;
+    REQUIRE_FALSE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+    EvaluationResources resources =
+        make_trusted_local_v2_resources({std::nullopt});
+    std::array<Value, 1> children{{make_int_value(9)}};
+    TupleConstructionResult tuple = make_tuple_value(
+        resources, children, SourceLocation{1U, 1U, 1U},
+        "invalid-shared-tuple-lowering");
+    REQUIRE(tuple.ok);
+    PreparedRewriteValues prepared{{}, {}, std::nullopt, 0U};
+    for (std::size_t index = 0U; index < fixture.lowering.nodes.size();
+         ++index) {
+      prepared.values.push_back(make_int_value(0));
+      prepared.present.push_back(std::uint8_t{0U});
+    }
+    prepared.values[0U] = move_value(tuple.value);
+    prepared.present[0U] = std::uint8_t{1U};
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v2,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            &prepared, &resources);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.error.kind ==
+          ErrorKind::invalid_primitive_table);
+    CHECK(prepared.present[0U] == std::uint8_t{1U});
+    REQUIRE(validate_value(prepared.values[0U]).ok);
+    CHECK(release_value_reservations(resources, prepared.values[0U]).ok);
+    release_rewrite_evaluation_result(evaluated);
   }
 }
 
 TEST_CASE("SHARED-002 generated C releases a shared argument only at static last use") {
-  RewriteParseResult parsed =
-      parse_rewrite("inc[(1 2)]\ninc[(3 4)]");
-  REQUIRE(parsed.ok);
-  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
-  REQUIRE(parsed.program.arguments.size() == 2U);
-  parsed.program.arguments[1] = parsed.program.arguments[0];
-  parsed.program.argument_spans[1] =
-      parsed.program.nodes[parsed.program.arguments[0]].span;
-  REQUIRE(rewrite_program_invariants_hold(parsed.program));
-
-  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
-  REQUIRE(lowered.ok);
-  REQUIRE(lowered.program.nodes.size() == 4U);
-  const std::size_t shared_node = lowered.program.arguments[0];
-  CHECK(lowered.program.nodes[shared_node].use_count == 2U);
-  CHECK_FALSE(lowered.program.nodes[shared_node].retained_root);
-  CHECK(lowered.program.nodes[2].use_count == 0U);
+  PreparedSharedRewriteFixture fixture =
+      make_prepared_shared_vector_fixture();
+  REQUIRE(rewrite_program_invariants_hold(fixture.program));
+  REQUIRE(rewrite_lowering_invariants_hold(
+      fixture.program, fixture.lowering));
+  REQUIRE(fixture.lowering.nodes.size() == 4U);
+  const std::size_t shared_node = fixture.lowering.arguments[0];
+  CHECK(fixture.lowering.nodes[shared_node].use_count == 2U);
+  CHECK_FALSE(fixture.lowering.nodes[shared_node].retained_root);
+  CHECK(fixture.lowering.nodes[2].use_count == 0U);
 
   std::string emitted_nodes;
-  append_lowered_rewrite_nodes(emitted_nodes, lowered.program);
+  append_lowered_rewrite_nodes(emitted_nodes, fixture.lowering);
   const std::string first_apply =
       "bennu_apply(&bennu_resources, BENNU_IMPL_INC_INT, "
       "&bennu_values[1]";
@@ -4937,6 +5293,64 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
         std::string::npos);
   CHECK(emitted_nodes.find("remaining_uses") == std::string::npos);
   CHECK(emitted_nodes.find("reference_count") == std::string::npos);
+
+  const CEmissionResult full = emit_prepared_rewrite_c_source(
+      fixture.program, fixture.lowering,
+      CBackendConfiguration{
+          ExecutionProfile::bounded_v1,
+          ResourceLimits{std::nullopt, std::size_t{48U}, std::nullopt,
+                         std::nullopt},
+          AllocationFailureInjection{std::nullopt},
+          AllocationFailureInjection{std::nullopt}});
+  REQUIRE(full.ok);
+  CHECK(full.source.find("static int bennu_execute(BennuResources *snapshot)") !=
+        std::string::npos);
+  CHECK(full.source.find("#ifndef BENNU_CUSTOM_MAIN") !=
+        std::string::npos);
+  const std::size_t full_first = full.source.find(first_apply);
+  const std::size_t full_second = full.source.find(second_apply);
+  const std::size_t full_release = full.source.find(shared_release);
+  REQUIRE(full_first != std::string::npos);
+  REQUIRE(full_second != std::string::npos);
+  REQUIRE(full_release != std::string::npos);
+  CHECK(full_first < full_second);
+  CHECK(full_second < full_release);
+
+  const char *const output_directory =
+      std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
+  if (output_directory != nullptr) {
+    struct NativeCase {
+      std::string_view name;
+      std::size_t live_limit;
+      std::optional<std::size_t> failure_ordinal;
+    };
+    const std::array<NativeCase, 4> native_cases{{
+        {"success", 48U, std::nullopt},
+        {"boundary", 47U, std::nullopt},
+        {"allocation", 48U, std::size_t{2U}},
+        {"precedence", 47U, std::size_t{2U}},
+    }};
+    for (const NativeCase &native_case : native_cases) {
+      const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+          fixture.program, fixture.lowering,
+          CBackendConfiguration{
+              ExecutionProfile::bounded_v1,
+              ResourceLimits{std::nullopt, native_case.live_limit,
+                             std::nullopt, std::nullopt},
+              AllocationFailureInjection{std::nullopt},
+              AllocationFailureInjection{native_case.failure_ordinal}});
+      REQUIRE(emitted.ok);
+      const std::string path =
+          std::string(output_directory) + "/" +
+          std::string(native_case.name) + ".c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(emitted.source.data(),
+                   static_cast<std::streamsize>(emitted.source.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
 }
 
 TEST_CASE("SHARED-ROOT duplicate owned roots are rejected before either backend") {
@@ -5031,6 +5445,78 @@ TEST_CASE("SHARED-003 failure cleanup and live-byte boundaries are deterministic
       48U, AllocationFailureInjection{std::size_t{2U}});
   CHECK_FALSE(injected.first);
   CHECK(injected.second == 2U);
+}
+
+TEST_CASE("SHARED-004 prepared flat graph runs through the production evaluator") {
+  const auto run = [](std::size_t live_limit,
+                      AllocationFailureInjection failure) {
+    PreparedSharedRewriteFixture fixture =
+        make_prepared_shared_vector_fixture();
+    return evaluate_prepared_rewrite_program(
+        fixture.program, fixture.lowering,
+        RewriteEvaluationCreationData{
+            ExecutionProfile::bounded_v1,
+            ResourceLimits{std::nullopt, live_limit, std::nullopt,
+                           std::nullopt},
+            failure},
+        nullptr, nullptr);
+  };
+
+  RewriteEvaluationResult exact =
+      run(48U, AllocationFailureInjection{std::nullopt});
+  REQUIRE(exact.ok);
+  REQUIRE(exact.formatted.size() == 2U);
+  CHECK(exact.formatted[0] == "(2 3)");
+  CHECK(exact.formatted[1] == "(2 3)");
+  CHECK(exact.resources.live_evaluation_bytes == 32U);
+  CHECK(exact.resources.reservation_ordinal == 3U);
+  release_rewrite_evaluation_result(exact);
+  CHECK(exact.resources.live_evaluation_bytes == 0U);
+  CHECK(exact.resources.owner.token == 0U);
+
+  RewriteEvaluationResult boundary =
+      run(47U, AllocationFailureInjection{std::nullopt});
+  REQUIRE_FALSE(boundary.ok);
+  REQUIRE(boundary.diagnostic.error.resource.has_value());
+  CHECK(boundary.diagnostic.error.resource->reason ==
+        ResourceErrorReason::profile_limit);
+  CHECK(boundary.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_live_evaluation_bytes);
+  CHECK(boundary.diagnostic.error.resource->configured_limit ==
+        std::optional<std::size_t>{47U});
+  CHECK(boundary.resources.live_evaluation_bytes == 0U);
+  CHECK(boundary.resources.reservation_ordinal == 2U);
+  release_rewrite_evaluation_result(boundary);
+
+  RewriteEvaluationResult injected =
+      run(48U, AllocationFailureInjection{std::size_t{2U}});
+  REQUIRE_FALSE(injected.ok);
+  REQUIRE(injected.diagnostic.error.resource.has_value());
+  CHECK(injected.diagnostic.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(injected.diagnostic.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{2U});
+  CHECK(injected.resources.live_evaluation_bytes == 0U);
+  CHECK(injected.resources.reservation_ordinal == 3U);
+  release_rewrite_evaluation_result(injected);
+
+  PreparedSharedRewriteFixture precedence_fixture =
+      make_prepared_shared_vector_fixture();
+  RewriteEvaluationResult precedence = evaluate_prepared_rewrite_program(
+      precedence_fixture.program, precedence_fixture.lowering,
+      RewriteEvaluationCreationData{
+          ExecutionProfile::bounded_v1,
+          ResourceLimits{std::nullopt, std::size_t{47U}, std::nullopt,
+                         std::nullopt},
+          AllocationFailureInjection{std::size_t{2U}}},
+      nullptr, nullptr);
+  REQUIRE_FALSE(precedence.ok);
+  REQUIRE(precedence.diagnostic.error.resource.has_value());
+  CHECK(precedence.diagnostic.error.resource->reason ==
+        ResourceErrorReason::profile_limit);
+  CHECK(precedence.resources.reservation_ordinal == 2U);
+  CHECK(precedence.resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(precedence);
 }
 #endif
 
@@ -6008,7 +6494,8 @@ ValueResult evaluate_expression(
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
-      evaluate_rewrite_source_impl(source, creation, true, {});
+      evaluate_rewrite_source_impl(source, creation, true, {}, nullptr,
+                                   nullptr, nullptr, nullptr);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
@@ -6055,7 +6542,8 @@ ProgramResult evaluate_source(
       configuration.profile, configuration.limits,
       configuration.allocation_failure};
   RewriteEvaluationResult evaluated =
-      evaluate_rewrite_source_impl(source, creation, false, arguments);
+      evaluate_rewrite_source_impl(source, creation, false, arguments,
+                                   nullptr, nullptr, nullptr, nullptr);
   if (!evaluated.ok) {
     Error error = public_error_from_diagnostic(source, evaluated.diagnostic);
     release_rewrite_evaluation_result(evaluated);
@@ -6072,14 +6560,15 @@ ProgramResult evaluate_source(
 
 CEmissionResult emit_c_source(std::string_view source) {
   return emit_rewrite_c_source_impl(source,
-                                    trusted_local_c_configuration());
+                                    trusted_local_c_configuration(), nullptr,
+                                    nullptr);
 }
 
 CEmissionResult emit_c_source(
     std::string_view source,
     const EvaluationConfiguration &configuration) {
   return emit_rewrite_c_source_impl(
-      source, c_backend_configuration(configuration));
+      source, c_backend_configuration(configuration), nullptr, nullptr);
 }
 
 } // namespace bennu

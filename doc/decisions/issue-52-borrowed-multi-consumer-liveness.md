@@ -36,14 +36,24 @@
   but Bennu deliberately does not adopt executor-owned graphs, dynamic alias
   management, mutation, or runtime reference counting. Bennu's ordered flat
   lowering fixes sharing and last use before execution.
-- **Validation/evidence:** `SHARED-001` covers immutable scalar, vector,
-  empty-vector, and nested tuple owners through two completed consumer attempts
-  and observes exact logical release. `SHARED-002` duplicates a flat argument
-  index in an invariant-valid program and drives the same whole-node emission
-  helper as production, proving C release is emitted only after its final call
-  with no runtime use counter. `SHARED-ROOT` proves repeated owned roots are
-  rejected before evaluator/backend behavior can diverge.
+- **Validation/evidence:** `SHARED-001` covers immutable scalar, vector, and
+  empty-vector owners, plus a valid prepared tuple producer feeding two
+  successful immutable-borrow consumers through the evaluator's fail-fast
+  execution loop. It also covers tuple consumer failure, cleanup, and rejection
+  of an invalid static use count before ownership moves. `SHARED-002` duplicates
+  a flat argument index in an invariant-valid program and drives the complete
+  production C translation-unit emitter, proving C release is emitted only
+  after its final call with no runtime use counter. `SHARED-ROOT` proves repeated
+  owned roots are rejected before evaluator/backend behavior can diverge.
   `SHARED-003` covers the 47/48-byte live boundary, deterministic allocation
   ordinal 2 failure, retained completed-result cleanup, and exact releases.
-  Existing rewrite, typed-lowering, and application focused suites remain
-  unchanged apart from the liveness metadata snapshot.
+  `SHARED-004` runs that graph through the production prepared evaluator seam
+  and checks successful roots, maximum-live precedence, allocation ordinals,
+  first failure, and zero-live cleanup. Generated C from `SHARED-002` compiles
+  under strict C11 and runs natively with the same successful output.
+- **Current tuple C dependency:** Issue #49 supplies direct `Value` tuple
+  ownership, but the generated-C `BennuValue` still has only scalar and vector
+  representations. Prepared tuple emission therefore returns an explicit
+  profile error naming Issue #50 rather than claiming cross-backend tuple
+  parity. Completing the issue's generated-C tuple criterion requires #50's
+  tuple runtime/lowering work; #52 does not duplicate that concurrent change.
