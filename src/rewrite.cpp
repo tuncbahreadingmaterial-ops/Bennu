@@ -2165,12 +2165,16 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
-  std::vector<std::uint8_t> seen_roots(program.nodes.size(),
-                                       std::uint8_t{0U});
-  for (const std::size_t root : program.roots) {
-    const bool duplicate =
-        root < seen_roots.size() &&
-        seen_roots[root] != std::uint8_t{0U};
+  for (std::size_t root_index = 0U; root_index < program.roots.size();
+       ++root_index) {
+    const std::size_t root = program.roots[root_index];
+    bool duplicate = false;
+    for (std::size_t previous = 0U; previous < root_index; ++previous) {
+      if (program.roots[previous] == root) {
+        duplicate = true;
+        break;
+      }
+    }
     if (root >= program.nodes.size() || duplicate) {
       RewriteEvaluationDiagnostic diagnostic =
           empty_rewrite_evaluation_diagnostic();
@@ -2181,7 +2185,6 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
                     : "typed rewrite lowering contains an invalid root");
       return RewriteLoweringResult{false, {}, std::move(diagnostic)};
     }
-    seen_roots[root] = std::uint8_t{1U};
   }
   RewriteLoweringProgram lowering;
   lowering.arguments = program.arguments;
@@ -2371,12 +2374,25 @@ bool rewrite_lowering_invariants_hold(
   for (std::size_t node_index = 0U; node_index < lowering.nodes.size();
        ++node_index) {
     const RewriteLoweringNode &node = lowering.nodes[node_index];
-    if (node.argument_count == 0U) {
+    const RewriteNode &source_node = program.nodes[node_index];
+    if (node.kind != source_node.kind) {
+      return false;
+    }
+    if (source_node.kind != RewriteNodeKind::primitive_call) {
+      if (node.first_argument != 0U || node.argument_count != 0U) {
+        return false;
+      }
       continue;
     }
-    if (node.first_argument > lowering.arguments.size() ||
-        node.argument_count >
-            lowering.arguments.size() - node.first_argument) {
+    if (source_node.call_index >= program.calls.size()) {
+      return false;
+    }
+    const RewriteCall &call = program.calls[source_node.call_index];
+    if (call.first_argument > program.arguments.size() ||
+        call.argument_count >
+            program.arguments.size() - call.first_argument ||
+        node.first_argument != call.first_argument ||
+        node.argument_count != call.argument_count) {
       return false;
     }
     for (std::size_t position = 0U; position < node.argument_count;
@@ -2970,7 +2986,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
                                       0U);
   }
-  if (!rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
+  if (prepared &&
+      !rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
     diagnostic.stage = RewriteEvaluationStage::primitive_table;
@@ -3743,7 +3760,8 @@ CEmissionResult emit_rewrite_c_source_impl(
     return CEmissionResult{
         false, {}, public_error_from_diagnostic(source, lowered.diagnostic)};
   }
-  if (!rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
+  if (prepared &&
+      !rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
     return CEmissionResult{
         false, {},
         make_error(
@@ -5266,6 +5284,72 @@ TEST_CASE("SHARED-001 static liveness borrows scalar vector empty-vector and tup
     REQUIRE(validate_value(prepared.values[0U]).ok);
     CHECK(release_value_reservations(resources, prepared.values[0U]).ok);
     release_rewrite_evaluation_result(evaluated);
+  }
+
+  SUBCASE("prepared node and call structure is rejected before ownership moves") {
+    for (std::size_t mutation = 0U; mutation < 4U; ++mutation) {
+      PreparedSharedRewriteFixture fixture =
+          make_prepared_shared_vector_fixture();
+      fixture.lowering.nodes[0U].operation =
+          RewriteLoweringOperation::prepared_value;
+      fixture.lowering.nodes[1U].operation =
+          RewriteLoweringOperation::immutable_borrow;
+      fixture.lowering.nodes[3U].operation =
+          RewriteLoweringOperation::immutable_borrow;
+      if (mutation == 0U) {
+        fixture.lowering.nodes[1U].kind =
+            RewriteNodeKind::vector_literal;
+      } else if (mutation == 1U) {
+        ++fixture.lowering.nodes[1U].first_argument;
+      } else if (mutation == 2U) {
+        --fixture.lowering.nodes[1U].argument_count;
+      } else {
+        fixture.program.calls[0U].first_argument =
+            fixture.program.arguments.size() + 1U;
+        fixture.lowering.nodes[1U].first_argument =
+            fixture.program.calls[0U].first_argument;
+      }
+      REQUIRE_FALSE(rewrite_lowering_invariants_hold(
+          fixture.program, fixture.lowering));
+
+      EvaluationResources resources =
+          make_trusted_local_v2_resources({std::nullopt});
+      PreparedRewriteValues prepared{{}, {}, std::nullopt, 0U};
+      for (std::size_t index = 0U;
+           index < fixture.lowering.nodes.size(); ++index) {
+        prepared.values.push_back(make_int_value(0));
+        prepared.present.push_back(std::uint8_t{0U});
+      }
+      prepared.values[0U] = make_int_value(9);
+      prepared.present[0U] = std::uint8_t{1U};
+      RewriteEvaluationResult evaluated =
+          evaluate_prepared_rewrite_program(
+              fixture.program, fixture.lowering,
+              RewriteEvaluationCreationData{
+                  ExecutionProfile::trusted_local_v2,
+                  ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                                 std::nullopt},
+                  AllocationFailureInjection{std::nullopt}},
+              &prepared, &resources);
+      REQUIRE_FALSE(evaluated.ok);
+      CHECK(evaluated.diagnostic.error.kind ==
+            ErrorKind::invalid_primitive_table);
+      CHECK(prepared.present[0U] == std::uint8_t{1U});
+      REQUIRE(validate_value(prepared.values[0U]).ok);
+      destroy_value(prepared.values[0U]);
+      release_rewrite_evaluation_result(evaluated);
+
+      const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+          fixture.program, fixture.lowering,
+          CBackendConfiguration{
+              ExecutionProfile::trusted_local_v2,
+              ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt},
+              AllocationFailureInjection{std::nullopt},
+              AllocationFailureInjection{std::nullopt}});
+      REQUIRE_FALSE(emitted.ok);
+      CHECK(emitted.error.kind == ErrorKind::invalid_primitive_table);
+    }
   }
 }
 

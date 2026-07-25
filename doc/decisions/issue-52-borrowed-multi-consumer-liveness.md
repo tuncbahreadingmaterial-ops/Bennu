@@ -17,7 +17,13 @@
   retain their owner until result transfer or generated-output cleanup.
   Root indices remain unique because the evaluator's result is a vector of
   uniquely owned values; a repeated root would require a copy or shared owner,
-  so malformed repeated-root lowering is rejected before either backend.
+  so malformed repeated-root lowering is rejected before either backend. The
+  ordinary lowering path performs that check directly over the root arena
+  without allocating a node-sized seen-root sidecar. Full node/use/root
+  invariant validation is reserved for prepared flat inputs: each lowering
+  node must preserve its source-node kind and each call node must exactly
+  preserve the source call's checked argument range and count before any
+  prepared owner can move.
   Generated C consumes the same counts while emitting code and writes a direct
   `bennu_release` only at a non-root argument's last successful use. Runtime
   values contain no reference count, borrowed result, or shared owner.
@@ -49,8 +55,11 @@
   ordinal 2 failure, retained completed-result cleanup, and exact releases.
   `SHARED-004` runs that graph through the production prepared evaluator seam
   and checks successful roots, maximum-live precedence, allocation ordinals,
-  first failure, and zero-live cleanup. Generated C from `SHARED-002` compiles
-  under strict C11 and runs natively with the same successful output.
+  first failure, and zero-live cleanup. Prepared mutation probes cover node-kind,
+  call-range, first-argument, argument-count, and use-count mismatches, checking
+  evaluator and emitter rejection while the prepared owner remains intact.
+  Generated C from `SHARED-002` compiles under strict C11 and runs natively with
+  the same successful output.
 - **Current tuple C dependency:** Issue #49 supplies direct `Value` tuple
   ownership, but the generated-C `BennuValue` still has only scalar and vector
   representations. Prepared tuple emission therefore returns an explicit
