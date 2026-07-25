@@ -2711,6 +2711,22 @@ bool rewrite_lowering_invariants_hold(
   }
   std::vector<std::uint8_t> roots(lowering.nodes.size(),
                                   std::uint8_t{0U});
+  std::vector<std::uint8_t> tuple_owned(lowering.nodes.size(),
+                                        std::uint8_t{0U});
+  for (const RewriteLoweringNode &node : lowering.nodes) {
+    if (node.kind != RewriteNodeKind::tuple_literal) {
+      continue;
+    }
+    for (std::size_t position = 0U; position < node.element_count;
+         ++position) {
+      const std::size_t element =
+          lowering.tuple_elements[node.first_element + position];
+      if (tuple_owned[element] != std::uint8_t{0U}) {
+        return false;
+      }
+      tuple_owned[element] = std::uint8_t{1U};
+    }
+  }
   for (const std::size_t root : lowering.roots) {
     if (root >= lowering.nodes.size() ||
         roots[root] != std::uint8_t{0U}) {
@@ -2720,6 +2736,11 @@ bool rewrite_lowering_invariants_hold(
     ++expected_uses[root];
   }
   for (std::size_t index = 0U; index < lowering.nodes.size(); ++index) {
+    if (tuple_owned[index] != std::uint8_t{0U} &&
+        (expected_uses[index] != 1U ||
+         roots[index] != std::uint8_t{0U})) {
+      return false;
+    }
     if (lowering.nodes[index].use_count != expected_uses[index] ||
         lowering.nodes[index].retained_root !=
             (roots[index] != std::uint8_t{0U})) {
@@ -4066,7 +4087,8 @@ void append_shape_requirement(
     std::string &source, const RewriteLoweringNode &call,
     const RewriteLoweringNode &argument, std::size_t argument_node,
     std::size_t argument_position, std::optional<std::size_t> static_count,
-    std::optional<std::size_t> dynamic_anchor) {
+    std::optional<std::size_t> dynamic_anchor,
+    std::span<const std::size_t> final_use_releases) {
   source += "  if (!bennu_require_shape(&bennu_resources, \"";
   source += call.admission_point;
   source += "\", ";
@@ -4083,12 +4105,20 @@ void append_shape_requirement(
   append_source_span(source, argument.source_span);
   source += ", ";
   append_source_span(source, call.source_span);
-  source += ")) { goto bennu_failure; }\n";
+  source += ")) {\n";
+  for (const std::size_t release : final_use_releases) {
+    source += "    bennu_release(&bennu_resources, &bennu_values[" +
+              std::to_string(release) + "]);\n";
+  }
+  source += "    goto bennu_failure;\n"
+            "  }\n";
 }
 
 void append_call_shape_checks(std::string &source,
                               const RewriteLoweringNode &call,
-                              const RewriteLoweringProgram &program) {
+                              const RewriteLoweringProgram &program,
+                              std::span<const std::size_t>
+                                  final_use_releases) {
   if (!call.runtime_shape_check) {
     return;
   }
@@ -4120,19 +4150,50 @@ void append_call_shape_checks(std::string &source,
         source, call, argument, argument_node, position + 1U,
         has_static_anchor ? std::optional<std::size_t>{call.element_count}
                           : std::nullopt,
-        dynamic_anchor);
+        dynamic_anchor, final_use_releases);
+  }
+}
+
+void complete_lowered_consumer_emission(
+    const RewriteLoweringNode &node,
+    const RewriteLoweringProgram &program,
+    std::vector<std::size_t> &remaining_uses,
+    std::vector<std::size_t> &final_use_releases) {
+  final_use_releases.clear();
+  for (std::size_t position = 0U; position < node.argument_count;
+       ++position) {
+    const std::size_t argument_node =
+        program.arguments[node.first_argument + position];
+    --remaining_uses[argument_node];
+    if (remaining_uses[argument_node] == 0U &&
+        !program.nodes[argument_node].retained_root) {
+      final_use_releases.push_back(argument_node);
+    }
+  }
+}
+
+void append_final_use_releases(
+    std::string &source, std::span<const std::size_t> final_use_releases,
+    std::string_view indentation) {
+  for (const std::size_t release : final_use_releases) {
+    source += indentation;
+    source += "bennu_release(&bennu_resources, &bennu_values[" +
+              std::to_string(release) + "]);\n";
   }
 }
 
 void append_call_node(std::string &source, std::size_t node_index,
                       const RewriteLoweringNode &node,
                       const RewriteLoweringProgram &program,
-                      std::vector<std::size_t> &remaining_uses) {
+                      std::vector<std::size_t> &remaining_uses,
+                      std::vector<std::size_t> &final_use_releases) {
   const std::size_t left = program.arguments[node.first_argument];
   const std::size_t right = node.argument_count == 2U
                                 ? program.arguments[node.first_argument + 1U]
                                 : 0U;
-  append_call_shape_checks(source, node, program);
+  complete_lowered_consumer_emission(
+      node, program, remaining_uses, final_use_releases);
+  append_call_shape_checks(source, node, program, final_use_releases);
   source += "  if (!bennu_apply(&bennu_resources, ";
   source += c_implementation_name(node.implementation);
   source += ", &bennu_values[" + std::to_string(node_index) +
@@ -4150,32 +4211,33 @@ void append_call_node(std::string &source, std::size_t node_index,
   append_source_span(source, node.primary_span);
   source += ", ";
   append_source_span(source, node.source_span);
-  source += ")) { goto bennu_failure; }\n";
-  for (std::size_t end = node.argument_count; end != 0U; --end) {
-    const std::size_t argument_node =
-        program.arguments[node.first_argument + end - 1U];
-    --remaining_uses[argument_node];
-    if (remaining_uses[argument_node] == 0U &&
-        !program.nodes[argument_node].retained_root) {
-      source += "  bennu_release(&bennu_resources, &bennu_values[" +
-                std::to_string(argument_node) + "]);\n";
-    }
-  }
+  source += ")) {\n";
+  append_final_use_releases(source, final_use_releases, "    ");
+  source += "    goto bennu_failure;\n"
+            "  }\n";
+  append_final_use_releases(source, final_use_releases, "  ");
 }
 
 void append_immutable_borrow_node(
     std::string &source, std::size_t node_index,
     const RewriteLoweringNode &node,
     const RewriteLoweringProgram &program,
-    std::vector<std::size_t> &remaining_uses) {
+    std::vector<std::size_t> &remaining_uses,
+    std::vector<std::size_t> &final_use_releases) {
+  complete_lowered_consumer_emission(
+      node, program, remaining_uses, final_use_releases);
   for (std::size_t position = 0U; position < node.argument_count;
        ++position) {
     const std::size_t argument =
         program.arguments[node.first_argument + position];
     source += "  if (!bennu_value_valid(&bennu_values[" +
               std::to_string(argument) +
-              "])) { bennu_set_failure(&bennu_resources, "
-              "BENNU_FAILURE_INTERNAL); goto bennu_failure; }\n";
+              "])) {\n"
+              "    bennu_set_failure(&bennu_resources, "
+              "BENNU_FAILURE_INTERNAL);\n";
+    append_final_use_releases(source, final_use_releases, "    ");
+    source += "    goto bennu_failure;\n"
+              "  }\n";
   }
   if (node.operation ==
       RewriteLoweringOperation::immutable_borrow_failure) {
@@ -4204,16 +4266,7 @@ void append_immutable_borrow_node(
     append_c_unsigned(source, node.argument_count);
     source += ");\n";
   }
-  for (std::size_t end = node.argument_count; end != 0U; --end) {
-    const std::size_t argument_node =
-        program.arguments[node.first_argument + end - 1U];
-    --remaining_uses[argument_node];
-    if (remaining_uses[argument_node] == 0U &&
-        !program.nodes[argument_node].retained_root) {
-      source += "  bennu_release(&bennu_resources, &bennu_values[" +
-                std::to_string(argument_node) + "]);\n";
-    }
-  }
+  append_final_use_releases(source, final_use_releases, "  ");
   if (node.operation ==
       RewriteLoweringOperation::immutable_borrow_failure) {
     source += "  goto bennu_failure;\n";
@@ -4227,6 +4280,14 @@ void append_lowered_rewrite_nodes(std::string &source,
   for (const RewriteLoweringNode &node : lowering.nodes) {
     remaining_uses.push_back(node.use_count);
   }
+  std::size_t maximum_argument_count = 0U;
+  for (const RewriteLoweringNode &node : lowering.nodes) {
+    if (node.argument_count > maximum_argument_count) {
+      maximum_argument_count = node.argument_count;
+    }
+  }
+  std::vector<std::size_t> final_use_releases;
+  final_use_releases.reserve(maximum_argument_count);
   for (std::size_t index = 0U; index < lowering.nodes.size(); ++index) {
     const RewriteLoweringNode &node = lowering.nodes[index];
     if (node.kind == RewriteNodeKind::scalar_literal) {
@@ -4240,9 +4301,11 @@ void append_lowered_rewrite_nodes(std::string &source,
         node.operation ==
             RewriteLoweringOperation::immutable_borrow_failure) {
       append_immutable_borrow_node(
-          source, index, node, lowering, remaining_uses);
+          source, index, node, lowering, remaining_uses,
+          final_use_releases);
     } else {
-      append_call_node(source, index, node, lowering, remaining_uses);
+      append_call_node(source, index, node, lowering, remaining_uses,
+                       final_use_releases);
     }
     if (node.use_count == 0U && !node.retained_root) {
       source += "  bennu_release(&bennu_resources, &bennu_values[" +
@@ -4632,13 +4695,18 @@ struct SharedLivenessProbe {
   std::vector<const void *> released_storage;
 };
 
+struct SharedReleaseOrderProbe {
+  std::vector<std::size_t> logical_release_ordinals;
+};
+
 struct PreparedSharedRewriteFixture {
   RewriteProgram program;
   RewriteLoweringProgram lowering;
 };
 
-PreparedSharedRewriteFixture make_prepared_shared_vector_fixture() {
-  RewriteParseResult parsed = parse_rewrite("inc[(1 2)]\ninc[0]");
+PreparedSharedRewriteFixture make_prepared_shared_fixture(
+    std::string_view source) {
+  RewriteParseResult parsed = parse_rewrite(source);
   (void)resolve_rewrite_primitives(parsed.program);
   parsed.program.arguments[1U] = parsed.program.arguments[0U];
   parsed.program.argument_spans[1U] =
@@ -4646,6 +4714,79 @@ PreparedSharedRewriteFixture make_prepared_shared_vector_fixture() {
   RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
   return PreparedSharedRewriteFixture{
       std::move(parsed.program), std::move(lowered.program)};
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_vector_fixture() {
+  return make_prepared_shared_fixture("inc[(1 2)]\ninc[0]");
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_scalar_fixture() {
+  return make_prepared_shared_fixture("inc[41]\ninc[0]");
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_empty_vector_fixture() {
+  return make_prepared_shared_fixture("inc[Int()]\ninc[0]");
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_domain_failure_fixture() {
+  RewriteParseResult parsed = parse_rewrite(
+      "equals[(9223372036854775807 1) "
+      "(9223372036854775807 1)]\ninc[0]");
+  (void)resolve_rewrite_primitives(parsed.program);
+  const std::size_t first_root = parsed.program.roots[0U];
+  const std::size_t second_root = parsed.program.roots[1U];
+  const RewriteCall &first_call =
+      parsed.program.calls[parsed.program.nodes[first_root].call_index];
+  const RewriteCall &second_call =
+      parsed.program.calls[parsed.program.nodes[second_root].call_index];
+  const std::size_t shared =
+      parsed.program.arguments[first_call.first_argument];
+  parsed.program.arguments[second_call.first_argument] = shared;
+  parsed.program.argument_spans[second_call.first_argument] =
+      parsed.program.nodes[shared].span;
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  return PreparedSharedRewriteFixture{
+      std::move(parsed.program), std::move(lowered.program)};
+}
+
+PreparedSharedRewriteFixture make_prepared_shared_shape_failure_fixture() {
+  RewriteParseResult parsed =
+      parse_rewrite("inc[iota[2]]\nadd[iota[1] iota[1]]");
+  (void)resolve_rewrite_primitives(parsed.program);
+  const std::size_t first_root = parsed.program.roots[0U];
+  const std::size_t second_root = parsed.program.roots[1U];
+  const RewriteCall &first_call =
+      parsed.program.calls[parsed.program.nodes[first_root].call_index];
+  const RewriteCall &second_call =
+      parsed.program.calls[parsed.program.nodes[second_root].call_index];
+  const std::size_t shared =
+      parsed.program.arguments[first_call.first_argument];
+  parsed.program.arguments[second_call.first_argument + 1U] = shared;
+  parsed.program.argument_spans[second_call.first_argument + 1U] =
+      parsed.program.nodes[shared].span;
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  return PreparedSharedRewriteFixture{
+      std::move(parsed.program), std::move(lowered.program)};
+}
+
+void recompute_prepared_liveness(PreparedSharedRewriteFixture &fixture) {
+  fixture.lowering.arguments = fixture.program.arguments;
+  fixture.lowering.roots = fixture.program.roots;
+  fixture.lowering.tuple_elements = fixture.program.tuple_elements;
+  for (RewriteLoweringNode &node : fixture.lowering.nodes) {
+    node.use_count = 0U;
+    node.retained_root = false;
+  }
+  for (const std::size_t element : fixture.lowering.tuple_elements) {
+    ++fixture.lowering.nodes[element].use_count;
+  }
+  for (const std::size_t argument : fixture.lowering.arguments) {
+    ++fixture.lowering.nodes[argument].use_count;
+  }
+  for (const std::size_t root : fixture.lowering.roots) {
+    ++fixture.lowering.nodes[root].use_count;
+    fixture.lowering.nodes[root].retained_root = true;
+  }
 }
 
 PreparedSharedRewriteFixture make_prepared_shared_tuple_fixture(
@@ -4678,22 +4819,10 @@ PreparedSharedRewriteFixture make_prepared_shared_tuple_fixture(
       fail_second_consumer
           ? RewriteLoweringOperation::immutable_borrow_failure
           : RewriteLoweringOperation::immutable_borrow;
-  for (RewriteLoweringNode &node : lowered.program.nodes) {
-    node.use_count = 0U;
-    node.retained_root = false;
-  }
-  for (const std::size_t element : lowered.program.tuple_elements) {
-    ++lowered.program.nodes[element].use_count;
-  }
-  for (const std::size_t argument : lowered.program.arguments) {
-    ++lowered.program.nodes[argument].use_count;
-  }
-  for (const std::size_t root : lowered.program.roots) {
-    ++lowered.program.nodes[root].use_count;
-    lowered.program.nodes[root].retained_root = true;
-  }
-  return PreparedSharedRewriteFixture{
+  PreparedSharedRewriteFixture fixture{
       std::move(parsed.program), std::move(lowered.program)};
+  recompute_prepared_liveness(fixture);
+  return fixture;
 }
 
 void record_shared_liveness_event(void *context,
@@ -4704,6 +4833,104 @@ void record_shared_liveness_event(void *context,
   SharedLivenessProbe &probe = *static_cast<SharedLivenessProbe *>(context);
   ++probe.logical_releases;
   probe.released_storage.push_back(event.storage);
+}
+
+void record_shared_release_order(void *context,
+                                 ResourceLifetimeEvent event) {
+  if (event.kind != ResourceLifetimeEventKind::logical_release ||
+      !event.allocation_ordinal.has_value()) {
+    return;
+  }
+  SharedReleaseOrderProbe &probe =
+      *static_cast<SharedReleaseOrderProbe *>(context);
+  probe.logical_release_ordinals.push_back(
+      *event.allocation_ordinal);
+}
+
+std::string make_shared_failure_native_probe(
+    std::string_view generated, std::string_view expected_failure,
+    std::span<const std::size_t> expected_release_order) {
+  std::string probe =
+      "#include <stddef.h>\n"
+      "static void *bennu_probe_malloc(size_t size);\n"
+      "static void bennu_probe_free(void *data);\n"
+      "#define BENNU_RUNTIME_MALLOC(size) bennu_probe_malloc(size)\n"
+      "#define BENNU_RUNTIME_FREE(data) bennu_probe_free(data)\n"
+      "#define BENNU_CUSTOM_MAIN\n";
+  probe.append(generated);
+  probe +=
+      "\nstatic void *bennu_probe_allocations[16] = {0};\n"
+      "static size_t bennu_probe_allocation_count = 0U;\n"
+      "static size_t bennu_probe_release_order[16] = {0U};\n"
+      "static size_t bennu_probe_release_count = 0U;\n"
+      "static size_t bennu_probe_live_count = 0U;\n"
+      "static int bennu_probe_invalid_free = 0;\n"
+      "static void *bennu_probe_malloc(size_t size) {\n"
+      "  void *data = malloc(size);\n"
+      "  if (data != NULL) {\n"
+      "    if (bennu_probe_allocation_count < 16U) {\n"
+      "      bennu_probe_allocations[bennu_probe_allocation_count] = data;\n"
+      "    }\n"
+      "    ++bennu_probe_allocation_count;\n"
+      "    ++bennu_probe_live_count;\n"
+      "  }\n"
+      "  return data;\n"
+      "}\n"
+      "static void bennu_probe_free(void *data) {\n"
+      "  size_t allocation = bennu_probe_allocation_count < 16U\n"
+      "                          ? bennu_probe_allocation_count : 16U;\n"
+      "  if (data != NULL) {\n"
+      "    while (allocation != 0U) {\n"
+      "      --allocation;\n"
+      "      if (bennu_probe_allocations[allocation] == data) {\n"
+      "        if (bennu_probe_release_count < 16U) {\n"
+      "          bennu_probe_release_order[bennu_probe_release_count] = "
+      "allocation;\n"
+      "        }\n"
+      "        bennu_probe_allocations[allocation] = NULL;\n"
+      "        ++bennu_probe_release_count;\n"
+      "        break;\n"
+      "      }\n"
+      "    }\n"
+      "    if (bennu_probe_live_count == 0U) {\n"
+      "      bennu_probe_invalid_free = 1;\n"
+      "    } else {\n"
+      "      --bennu_probe_live_count;\n"
+      "    }\n"
+      "  }\n"
+      "  free(data);\n"
+      "}\n"
+      "int main(void) {\n"
+      "  BennuResources snapshot = {0};\n"
+      "  size_t index = 0U;\n"
+      "  if (bennu_execute(&snapshot) == 0 || snapshot.failure != ";
+  probe += expected_failure;
+  probe +=
+      " || snapshot.live_bytes != 0U || bennu_probe_live_count != 0U ||\n"
+      "      bennu_probe_invalid_free != 0 || bennu_probe_release_count != ";
+  probe += std::to_string(expected_release_order.size());
+  probe += "U) { return 1; }\n"
+           "  {\n"
+           "    static const size_t expected[] = {";
+  for (std::size_t index = 0U; index < expected_release_order.size();
+       ++index) {
+    if (index != 0U) {
+      probe += ", ";
+    }
+    probe += std::to_string(expected_release_order[index]);
+    probe += "U";
+  }
+  probe +=
+      "};\n"
+      "    for (index = 0U; index < bennu_probe_release_count; ++index) {\n"
+      "      if (bennu_probe_release_order[index] != expected[index]) {\n"
+      "        return 1;\n"
+      "      }\n"
+      "    }\n"
+      "  }\n"
+      "  return 0;\n"
+      "}\n";
+  return probe;
 }
 
 bool error_value_type_equal(const ErrorValueType &left,
@@ -6044,12 +6271,21 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
   const std::size_t first_position = emitted_nodes.find(first_apply);
   const std::size_t second_position = emitted_nodes.find(second_apply);
   const std::size_t release_position = emitted_nodes.find(shared_release);
+  const std::size_t success_release_position =
+      emitted_nodes.find(shared_release, release_position + 1U);
+  const std::size_t failure_goto =
+      emitted_nodes.find("goto bennu_failure", second_position);
   REQUIRE(first_position != std::string::npos);
   REQUIRE(second_position != std::string::npos);
   REQUIRE(release_position != std::string::npos);
+  REQUIRE(success_release_position != std::string::npos);
+  REQUIRE(failure_goto != std::string::npos);
   CHECK(first_position < second_position);
   CHECK(second_position < release_position);
-  CHECK(emitted_nodes.find(shared_release, release_position + 1U) ==
+  CHECK(release_position < failure_goto);
+  CHECK(failure_goto < success_release_position);
+  CHECK(emitted_nodes.find(
+            shared_release, success_release_position + 1U) ==
         std::string::npos);
   CHECK(emitted_nodes.find("remaining_uses") == std::string::npos);
   CHECK(emitted_nodes.find("reference_count") == std::string::npos);
@@ -6113,6 +6349,199 @@ TEST_CASE("SHARED-002 generated C releases a shared argument only at static last
   }
 }
 
+TEST_CASE("SHARED-KINDS scalar and empty-vector sharing reaches both production backends") {
+  struct SharedKindCase {
+    std::string_view name;
+    PreparedSharedRewriteFixture (*make_fixture)();
+    std::string_view formatted;
+    std::size_t expected_work;
+  };
+  const std::array<SharedKindCase, 2> cases{{
+      {"scalar", &make_prepared_shared_scalar_fixture, "42", 2U},
+      {"empty-vector", &make_prepared_shared_empty_vector_fixture, "()",
+       0U},
+  }};
+  for (const SharedKindCase &shared_case : cases) {
+    INFO(shared_case.name);
+    PreparedSharedRewriteFixture fixture = shared_case.make_fixture();
+    REQUIRE(rewrite_program_invariants_hold(fixture.program));
+    REQUIRE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+    const std::size_t first_root = fixture.program.roots[0U];
+    const RewriteCall &first_call =
+        fixture.program.calls[
+            fixture.program.nodes[first_root].call_index];
+    const std::size_t shared =
+        fixture.program.arguments[first_call.first_argument];
+    CHECK(fixture.lowering.nodes[shared].use_count == 2U);
+    CHECK_FALSE(fixture.lowering.nodes[shared].retained_root);
+
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v1,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            nullptr, nullptr);
+    REQUIRE(evaluated.ok);
+    REQUIRE(evaluated.formatted.size() == 2U);
+    CHECK(evaluated.formatted[0] == shared_case.formatted);
+    CHECK(evaluated.formatted[1] == shared_case.formatted);
+    CHECK(evaluated.resources.work_units == shared_case.expected_work);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluated.resources.reservation_ordinal == 0U);
+    release_rewrite_evaluation_result(evaluated);
+
+    const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+        fixture.program, fixture.lowering,
+        CBackendConfiguration{
+            ExecutionProfile::trusted_local_v1,
+            ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
+            AllocationFailureInjection{std::nullopt},
+            AllocationFailureInjection{std::nullopt}});
+    REQUIRE(emitted.ok);
+    const std::string second_apply =
+        "bennu_apply(&bennu_resources, BENNU_IMPL_INC_INT, "
+        "&bennu_values[3]";
+    const std::string shared_release =
+        "bennu_release(&bennu_resources, &bennu_values[" +
+        std::to_string(shared) + "])";
+    const std::size_t second_position =
+        emitted.source.find(second_apply);
+    const std::size_t release_position =
+        emitted.source.find(shared_release, second_position);
+    REQUIRE(second_position != std::string::npos);
+    REQUIRE(release_position != std::string::npos);
+    CHECK(second_position < release_position);
+    CHECK(emitted.source.find("reference_count") == std::string::npos);
+
+    const char *const output_directory =
+        std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
+    if (output_directory != nullptr) {
+      const std::string path =
+          std::string(output_directory) + "/" +
+          std::string(shared_case.name) + ".c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(
+          emitted.source.data(),
+          static_cast<std::streamsize>(emitted.source.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
+}
+
+TEST_CASE("SHARED-FAILURE production C completes final uses before cleanup") {
+  struct FailureCase {
+    std::string_view name;
+    PreparedSharedRewriteFixture (*make_fixture)();
+    ErrorKind evaluator_error;
+    std::string_view c_failure;
+    std::array<std::size_t, 4> release_order;
+    bool shape_failure;
+  };
+  const std::array<FailureCase, 2> cases{{
+      {"production-domain-failure",
+       &make_prepared_shared_domain_failure_fixture,
+       ErrorKind::domain_error, "BENNU_FAILURE_DOMAIN", {1U, 3U, 0U, 2U},
+       false},
+      {"production-shape-failure",
+       &make_prepared_shared_shape_failure_fixture,
+       ErrorKind::shape_mismatch, "BENNU_FAILURE_SHAPE", {3U, 2U, 0U, 1U},
+       true},
+  }};
+  for (const FailureCase &failure_case : cases) {
+    INFO(failure_case.name);
+    PreparedSharedRewriteFixture fixture = failure_case.make_fixture();
+    REQUIRE(rewrite_program_invariants_hold(fixture.program));
+    REQUIRE(rewrite_lowering_invariants_hold(
+        fixture.program, fixture.lowering));
+    const std::size_t first_root = fixture.program.roots[0U];
+    const RewriteCall &first_call =
+        fixture.program.calls[
+            fixture.program.nodes[first_root].call_index];
+    const std::size_t shared =
+        fixture.program.arguments[first_call.first_argument];
+    CHECK(fixture.lowering.nodes[shared].use_count == 2U);
+
+    SharedReleaseOrderProbe evaluator_probe{{}};
+    EvaluationResources evaluator_resources =
+        make_trusted_local_resources({std::nullopt});
+    REQUIRE(set_evaluation_resource_lifetime_observer(
+        evaluator_resources,
+        ResourceLifetimeObserver{
+            &evaluator_probe, &record_shared_release_order}));
+    RewriteEvaluationResult evaluated =
+        evaluate_prepared_rewrite_program(
+            fixture.program, fixture.lowering,
+            RewriteEvaluationCreationData{
+                ExecutionProfile::trusted_local_v1,
+                ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                               std::nullopt},
+                AllocationFailureInjection{std::nullopt}},
+            nullptr, &evaluator_resources);
+    REQUIRE_FALSE(evaluated.ok);
+    CHECK(evaluated.diagnostic.error.kind ==
+          failure_case.evaluator_error);
+    CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+    CHECK(evaluator_probe.logical_release_ordinals ==
+          std::vector<std::size_t>(
+              failure_case.release_order.begin(),
+              failure_case.release_order.end()));
+    release_rewrite_evaluation_result(evaluated);
+
+    const CEmissionResult emitted = emit_prepared_rewrite_c_source(
+        fixture.program, fixture.lowering,
+        CBackendConfiguration{
+            ExecutionProfile::trusted_local_v1,
+            ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                           std::nullopt},
+            AllocationFailureInjection{std::nullopt},
+            AllocationFailureInjection{std::nullopt}});
+    REQUIRE(emitted.ok);
+    const std::string shared_release =
+        "bennu_release(&bennu_resources, &bennu_values[" +
+        std::to_string(shared) + "])";
+    const std::size_t failure_call =
+        failure_case.shape_failure
+            ? emitted.source.find("if (!bennu_require_shape")
+            : emitted.source.find(
+                  "if (!bennu_apply(&bennu_resources, "
+                  "BENNU_IMPL_INC_INT");
+    const std::size_t failure_release =
+        emitted.source.find(shared_release, failure_call);
+    const std::size_t failure_goto =
+        emitted.source.find("goto bennu_failure", failure_call);
+    REQUIRE(failure_call != std::string::npos);
+    REQUIRE(failure_release != std::string::npos);
+    REQUIRE(failure_goto != std::string::npos);
+    CHECK(failure_call < failure_release);
+    CHECK(failure_release < failure_goto);
+    CHECK(emitted.source.find("reference_count") == std::string::npos);
+
+    const char *const output_directory =
+        std::getenv("BENNU_SHARED_LIVENESS_C_DIR");
+    if (output_directory != nullptr) {
+      const std::string probe = make_shared_failure_native_probe(
+          emitted.source, failure_case.c_failure,
+          failure_case.release_order);
+      const std::string path =
+          std::string(output_directory) + "/" +
+          std::string(failure_case.name) + ".c";
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      REQUIRE(output.good());
+      output.write(probe.data(),
+                   static_cast<std::streamsize>(probe.size()));
+      output.close();
+      CHECK(output.good());
+    }
+  }
+}
+
 TEST_CASE("SHARED-TUPLE prepared tuple sharing is evaluator and C equivalent") {
   const RewriteEvaluationCreationData exact_creation{
       ExecutionProfile::bounded_v2,
@@ -6169,15 +6598,30 @@ TEST_CASE("SHARED-TUPLE prepared tuple sharing is evaluator and C equivalent") {
       emitted.source.find(first_borrow);
   const std::size_t second_borrow_position =
       emitted.source.find(second_borrow);
+  const std::size_t second_validation_position =
+      emitted.source.find(
+          "if (!bennu_value_valid(&bennu_values[2]))",
+          first_borrow_position + first_borrow.size());
   const std::size_t tuple_release_position =
-      emitted.source.find(tuple_release);
+      emitted.source.find(tuple_release, second_validation_position);
+  const std::size_t tuple_success_release_position =
+      emitted.source.find(tuple_release, tuple_release_position + 1U);
+  const std::size_t tuple_failure_goto =
+      emitted.source.find("goto bennu_failure",
+                          second_validation_position);
   REQUIRE(first_borrow_position != std::string::npos);
   REQUIRE(second_borrow_position != std::string::npos);
+  REQUIRE(second_validation_position != std::string::npos);
   REQUIRE(tuple_release_position != std::string::npos);
-  CHECK(first_borrow_position < second_borrow_position);
-  CHECK(second_borrow_position < tuple_release_position);
+  REQUIRE(tuple_success_release_position != std::string::npos);
+  REQUIRE(tuple_failure_goto != std::string::npos);
+  CHECK(first_borrow_position < second_validation_position);
+  CHECK(second_validation_position < tuple_release_position);
+  CHECK(tuple_release_position < tuple_failure_goto);
+  CHECK(tuple_failure_goto < second_borrow_position);
+  CHECK(second_borrow_position < tuple_success_release_position);
   CHECK(emitted.source.find(
-            tuple_release, tuple_release_position + 1U) ==
+            tuple_release, tuple_success_release_position + 1U) ==
         std::string::npos);
   CHECK(emitted.source.find("reference_count") == std::string::npos);
 
@@ -6296,6 +6740,85 @@ TEST_CASE("SHARED-TUPLE prepared tuple sharing is evaluator and C equivalent") {
             AllocationFailureInjection{std::nullopt}});
     CHECK_FALSE(rejected_c.ok);
     CHECK(rejected_c.error.kind == ErrorKind::invalid_primitive_table);
+  }
+
+  SUBCASE("tuple children reject every alias before prepared ownership moves") {
+    for (std::size_t mutation = 0U; mutation < 3U; ++mutation) {
+      PreparedSharedRewriteFixture invalid =
+          make_prepared_shared_tuple_fixture(false);
+      const std::size_t child = invalid.program.tuple_elements[0U];
+      invalid.lowering.nodes[child].operation =
+          RewriteLoweringOperation::prepared_value;
+      if (mutation == 0U) {
+        const std::size_t later_root = invalid.program.roots[1U];
+        const RewriteCall &later_call =
+            invalid.program.calls[
+                invalid.program.nodes[later_root].call_index];
+        invalid.program.arguments[later_call.first_argument] = child;
+        invalid.program.argument_spans[later_call.first_argument] =
+            invalid.program.nodes[child].span;
+      } else if (mutation == 1U) {
+        invalid.program.roots.insert(
+            invalid.program.roots.begin(), child);
+      } else {
+        invalid.program.tuple_elements[1U] = child;
+      }
+      recompute_prepared_liveness(invalid);
+      INFO(mutation);
+      REQUIRE_FALSE(rewrite_lowering_invariants_hold(
+          invalid.program, invalid.lowering));
+
+      EvaluationResources resources =
+          make_trusted_local_v2_resources({std::nullopt});
+      const std::array<std::int64_t, 2> elements{{1, 2}};
+      VectorAllocationResult owner = copy_int_vector(
+          resources, elements, SourceLocation{1U, 1U, 1U},
+          "exclusive-tuple-child");
+      REQUIRE(owner.ok);
+      const void *const owner_storage = owner.value.vector.integers.get();
+      PreparedRewriteValues prepared{{}, {}, std::nullopt, 0U};
+      for (std::size_t index = 0U;
+           index < invalid.lowering.nodes.size(); ++index) {
+        prepared.values.push_back(make_int_value(0));
+        prepared.present.push_back(std::uint8_t{0U});
+      }
+      prepared.values[child] = move_value(owner.value);
+      prepared.present[child] = std::uint8_t{1U};
+
+      RewriteEvaluationResult rejected =
+          evaluate_prepared_rewrite_program(
+              invalid.program, invalid.lowering, exact_creation,
+              &prepared, &resources);
+      REQUIRE_FALSE(rejected.ok);
+      CHECK(rejected.diagnostic.error.kind ==
+            ErrorKind::invalid_primitive_table);
+      CHECK(prepared.present[child] == std::uint8_t{1U});
+      REQUIRE(validate_value(prepared.values[child]).ok);
+      CHECK(prepared.values[child].vector.integers.get() ==
+            owner_storage);
+      CHECK(resources.reservation_ordinal == 1U);
+      CHECK(resources.live_evaluation_bytes == 16U);
+
+      const CEmissionResult rejected_c =
+          emit_prepared_rewrite_c_source(
+              invalid.program, invalid.lowering,
+              CBackendConfiguration{
+                  exact_creation.profile, exact_creation.limits,
+                  AllocationFailureInjection{std::nullopt},
+                  AllocationFailureInjection{std::nullopt}});
+      REQUIRE_FALSE(rejected_c.ok);
+      CHECK(rejected_c.source.empty());
+      CHECK(rejected_c.error.kind ==
+            ErrorKind::invalid_primitive_table);
+      CHECK(rejected_c.error.message.find("flat-program invariants") !=
+            std::string::npos);
+
+      CHECK(release_value_reservations(
+                resources, prepared.values[child])
+                .ok);
+      release_evaluation_resources(resources);
+      release_rewrite_evaluation_result(rejected);
+    }
   }
 
   const char *const output_directory =

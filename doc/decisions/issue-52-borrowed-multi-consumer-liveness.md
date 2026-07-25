@@ -24,10 +24,15 @@
   invariant validation is reserved for prepared flat inputs: each lowering
   node must preserve its source-node kind and each call node must exactly
   preserve the source call's checked argument range and count before any
-  prepared owner can move.
+  prepared owner can move. A tuple-element edge is an exclusive ownership
+  move: prepared validation rejects a child that is repeated in the same or
+  another tuple, appears in any call argument, or is retained as a root.
   Generated C consumes the same counts while emitting code and writes a direct
-  `bennu_release` only at a non-root argument's last successful use. Runtime
-  values contain no reference count, borrowed result, or shared owner.
+  `bennu_release` only at a non-root argument's last use. The identical static
+  release list is emitted on shape failure, primitive failure, and success
+  paths before reverse global cleanup, so a failed final consumer has the same
+  release timing and order as the evaluator. Runtime values contain no
+  reference count, borrowed result, or shared owner.
   After Issue #50 supplied the generated-C tuple representation, prepared
   immutable-borrow consumers use that same representation directly: tuple
   construction moves its uniquely owned children once, later consumers borrow
@@ -43,7 +48,12 @@
 - **Rationale:** Static counts make ownership and costs visible, preserve
   primitive const-borrowing, add no payload copy or runtime allocation, and
   apply uniformly to scalars, vectors, empty vectors, and structural tuple
-  owners. The same sidecar drives evaluator and C release placement.
+  owners. The same sidecar drives evaluator and C release placement. Ordinary
+  duplicate-root detection deliberately remains allocation-free and therefore
+  costs `O(root_count^2)` comparisons in the worst case. Root count is the
+  number of published program results rather than the node count; this visible
+  one-time lowering cost avoids a node-sized allocation, but should be measured
+  again if workloads begin publishing very large root sets.
 - **Anka difference:** Anka's executor experiments are a language-design cue,
   but Bennu deliberately does not adopt executor-owned graphs, dynamic alias
   management, mutation, or runtime reference counting. Bennu's ordered flat
@@ -64,8 +74,19 @@
   first failure, and zero-live cleanup. Prepared mutation probes cover node-kind,
   call-range, first-argument, argument-count, and use-count mismatches, checking
   evaluator and emitter rejection while the prepared owner remains intact.
+  Tuple-owner mutation probes additionally reject a child reused by a later
+  call, retained as a root, or repeated in the tuple before the prepared vector
+  owner moves.
   Generated C from `SHARED-002` compiles under strict C11 and runs natively with
-  the same successful output. `SHARED-TUPLE` integrates Issue #50's tuple
+  the same successful output. `SHARED-KINDS` runs invariant-valid shared scalar
+  and typed empty-vector nodes through the prepared evaluator and complete C
+  emitter and exports both strict-C11/native journeys, completing the same
+  production-path evidence already present for nonempty vectors and tuples.
+  `SHARED-FAILURE` uses production `inc`, `equals`, `add`, and `iota` behavior
+  rather than the synthetic immutable-borrow failure: a later overflow and a
+  later dynamic-shape mismatch compare evaluator and native-C release ordinals,
+  prove zero live bytes, and prove exactly-once cleanup.
+  `SHARED-TUPLE` integrates Issue #50's tuple
   parser, lowering, evaluator, and C runtime with the #52 prepared graph: two
   vector payloads and one tuple table are constructed exactly once, borrowed by
   two ordered consumers, and released after the final borrow. Evaluator and
