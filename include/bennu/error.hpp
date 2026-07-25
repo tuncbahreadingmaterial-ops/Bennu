@@ -188,6 +188,13 @@ struct ValueErrorContext {
   std::optional<std::size_t> edge_index;
 };
 
+struct FormattingErrorContext {
+  ValueFormatError reason;
+  std::size_t root_position;
+  SourceSpan root_span;
+  std::optional<ValueInvariant> invalid_value_invariant{};
+};
+
 struct Error {
   ErrorKind kind;
   SourceLocation location;
@@ -206,6 +213,7 @@ struct Error {
   std::optional<DomainErrorContext> domain{};
   std::optional<ArgumentErrorContext> argument{};
   std::optional<ParameterErrorContext> parameter{};
+  std::optional<FormattingErrorContext> formatting{};
   std::optional<SourceSpan> primary_span{};
   std::optional<SourceSpan> context_span{};
   std::optional<SourceSpan> related_span{};
