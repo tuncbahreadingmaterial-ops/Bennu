@@ -2873,12 +2873,14 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
                                     : *prepared_resources;
   const bool prepared =
       prepared_program != nullptr && prepared_lowering != nullptr;
-  RewriteParseResult parsed =
-      prepared
-          ? RewriteParseResult{
-                true, *prepared_program,
-                RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}}
-          : parse_rewrite(source);
+  RewriteParseResult parsed = [&]() {
+    if (prepared_program != nullptr && prepared_lowering != nullptr) {
+      return RewriteParseResult{
+          true, *prepared_program,
+          RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}};
+    }
+    return parse_rewrite(source);
+  }();
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -2957,12 +2959,13 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
-  RewriteLoweringResult lowered =
-      prepared
-          ? RewriteLoweringResult{
-                true, *prepared_lowering,
-                empty_rewrite_evaluation_diagnostic()}
-          : lower_rewrite_program(parsed.program);
+  RewriteLoweringResult lowered = [&]() {
+    if (prepared_program != nullptr && prepared_lowering != nullptr) {
+      return RewriteLoweringResult{
+          true, *prepared_lowering, empty_rewrite_evaluation_diagnostic()};
+    }
+    return lower_rewrite_program(parsed.program);
+  }();
   if (!lowered.ok) {
     return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
                                       0U);
@@ -3294,6 +3297,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
                                  scalar_kernel_invocations};
 }
 
+#ifndef DOCTEST_CONFIG_DISABLE
 RewriteEvaluationResult evaluate_prepared_rewrite_program(
     const RewriteProgram &program, const RewriteLoweringProgram &lowering,
     const RewriteEvaluationCreationData &creation,
@@ -3303,6 +3307,7 @@ RewriteEvaluationResult evaluate_prepared_rewrite_program(
       program.source, creation, false, {}, &program, &lowering,
       prepared_values, prepared_resources);
 }
+#endif
 
 RewriteEvaluationResult evaluate_rewrite_source(
     std::string_view source, const RewriteEvaluationCreationData &creation) {
@@ -3670,12 +3675,14 @@ CEmissionResult emit_rewrite_c_source_impl(
     const RewriteLoweringProgram *prepared_lowering) {
   const bool prepared =
       prepared_program != nullptr && prepared_lowering != nullptr;
-  RewriteParseResult parsed =
-      prepared
-          ? RewriteParseResult{
-                true, *prepared_program,
-                RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}}
-          : parse_rewrite(source);
+  RewriteParseResult parsed = [&]() {
+    if (prepared_program != nullptr && prepared_lowering != nullptr) {
+      return RewriteParseResult{
+          true, *prepared_program,
+          RewriteDiagnostic{RewriteParseError::none, {}, {}, {}, {}}};
+    }
+    return parse_rewrite(source);
+  }();
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
         empty_rewrite_evaluation_diagnostic();
@@ -3725,12 +3732,13 @@ CEmissionResult emit_rewrite_c_source_impl(
         make_error(ErrorKind::invalid_primitive_table,
                    SourceLocation{1U, 1U, 1U})};
   }
-  RewriteLoweringResult lowered =
-      prepared
-          ? RewriteLoweringResult{
-                true, *prepared_lowering,
-                empty_rewrite_evaluation_diagnostic()}
-          : lower_rewrite_program(parsed.program);
+  RewriteLoweringResult lowered = [&]() {
+    if (prepared_program != nullptr && prepared_lowering != nullptr) {
+      return RewriteLoweringResult{
+          true, *prepared_lowering, empty_rewrite_evaluation_diagnostic()};
+    }
+    return lower_rewrite_program(parsed.program);
+  }();
   if (!lowered.ok) {
     return CEmissionResult{
         false, {}, public_error_from_diagnostic(source, lowered.diagnostic)};
@@ -3858,12 +3866,14 @@ CEmissionResult emit_rewrite_c_source_impl(
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
 }
 
+#ifndef DOCTEST_CONFIG_DISABLE
 CEmissionResult emit_prepared_rewrite_c_source(
     const RewriteProgram &program, const RewriteLoweringProgram &lowering,
     const CBackendConfiguration &configuration) {
   return emit_rewrite_c_source_impl(program.source, configuration, &program,
                                     &lowering);
 }
+#endif
 
 #ifndef DOCTEST_CONFIG_DISABLE
 bool rewrite_program_invariants_hold(const RewriteProgram &program) {
