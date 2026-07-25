@@ -11,6 +11,11 @@ enum class PrimitiveId : std::uint8_t {
   equals = 2,
   logical_not = 3,
   iota = 4,
+  dec = 5,
+  neg = 6,
+  abs = 7,
+  sub = 8,
+  mul = 9,
 };
 
 } // namespace bennu

@@ -3,6 +3,7 @@
 # TEST-ID: LOWERING-ARTIFACT-DYNAMIC-DIAGNOSTICS
 # TEST-ID: PUBLIC-DYNAMIC-PRECEDENCE-PAIR-MATRIX
 # TEST-ID: PUBLIC-EVALUATOR-GENERATED-NATIVE-DIAGNOSTIC-EQUIVALENCE
+# TEST-ID: CHECKED-ARITHMETIC-PUBLIC-ERROR-MATRIX
 foreach(required BENNU_EXECUTABLE BENNU_C_COMPILER BENNU_C_COMPILER_ID
                  BENNU_EXECUTABLE_SUFFIX)
   if(NOT DEFINED ${required})
@@ -123,14 +124,15 @@ function(check_public_dynamic_failure case_name source_text line column
 
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${c_output}" "/Fe:${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
               -pedantic-errors
               "${c_output}" -o "${emitted_output}"
       WORKING_DIRECTORY "${work_directory}"
@@ -205,6 +207,33 @@ check_public_dynamic_failure(domain "inc 9223372036854775807" 1 1
 check_public_dynamic_failure(domain_vector
   "add[(0 9223372036854775807) (0 1)]" 1 1
   "DomainError" "add failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_dec "dec -9223372036854775808" 1 1
+  "DomainError" "dec failed: integer_overflow")
+check_public_dynamic_failure(domain_dec_vector
+  "dec[(0 -9223372036854775808 -9223372036854775808)]" 1 1
+  "DomainError" "dec failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_neg "neg -9223372036854775808" 1 1
+  "DomainError" "neg failed: integer_overflow")
+check_public_dynamic_failure(domain_neg_vector
+  "neg[(0 -9223372036854775808 -9223372036854775808)]" 1 1
+  "DomainError" "neg failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_abs "abs -9223372036854775808" 1 1
+  "DomainError" "abs failed: integer_overflow")
+check_public_dynamic_failure(domain_abs_vector
+  "abs[(0 -9223372036854775808 -9223372036854775808)]" 1 1
+  "DomainError" "abs failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_sub "sub[-9223372036854775808 1]" 1 1
+  "DomainError" "sub failed: integer_overflow")
+check_public_dynamic_failure(domain_sub_vector
+  "sub[(0 -9223372036854775808 -9223372036854775808) (0 1 1)]" 1 1
+  "DomainError" "sub failed: integer_overflow at result index 1")
+check_public_dynamic_failure(domain_mul_vector
+  "mul[(1 3037000500) (1 3037000500)]" 1 1
+  "DomainError" "mul failed: integer_overflow at result index 1")
+check_public_failure(shape_sub "sub[(1 2) (3)]" 1 11 "ShapeMismatch"
+  "sub argument 2 expected shape [2], got [1]")
+check_public_failure(shape_mul "mul[(1 2) (3)]" 1 11 "ShapeMismatch"
+  "mul argument 2 expected shape [2], got [1]")
 check_public_dynamic_failure(resource "iota[2305843009213693952]" 1 1
   "ResourceError" "iota resource request failed: size_overflow")
 check_public_dynamic_failure(resource_child_before_shape
@@ -222,6 +251,12 @@ check_public_failure(static_shape_before_nested_domain
 check_public_dynamic_failure(dynamic_shape_dynamic_dynamic
   "add[iota[2] iota[3]]" 1 13
   "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
+check_public_dynamic_failure(dynamic_shape_sub
+  "sub[iota[2] iota[3]]" 1 13
+  "ShapeMismatch" "sub argument 2 expected shape [2], got [3]")
+check_public_dynamic_failure(dynamic_shape_mul
+  "mul[iota[2] iota[3]]" 1 13
+  "ShapeMismatch" "mul argument 2 expected shape [2], got [3]")
 check_public_dynamic_failure(dynamic_shape_static_dynamic
   "add[(1 2) iota[3]]" 1 11
   "ShapeMismatch" "add argument 2 expected shape [2], got [3]")
@@ -268,6 +303,16 @@ add[(1 2) (3)]
 inc 5
 inc 9223372036854775807
 inc 5
+dec -9223372036854775808
+inc 5
+neg -9223372036854775808
+inc 5
+abs -9223372036854775808
+inc 5
+sub[-9223372036854775808 1]
+inc 5
+mul[-9223372036854775808 -1]
+inc 5
 iota[2305843009213693952]
 inc 5
 equals[2 2]
@@ -293,6 +338,11 @@ set(expected_repl_stdout [=[> > 6
 > > 6
 > > 6
 > > 6
+> > 6
+> > 6
+> > 6
+> > 6
+> > 6
 > true
 > true
 > ()
@@ -308,6 +358,11 @@ set(expected_repl_stderr [=[<repl>:1:1: InvalidByte: invalid source byte
 <repl>:1:7: TypeError: add arguments do not match an accepted signature; first unsupported argument is 2
 <repl>:1:11: ShapeMismatch: add argument 2 expected shape [2], got [1]
 <repl>:1:1: DomainError: inc failed: integer_overflow
+<repl>:1:1: DomainError: dec failed: integer_overflow
+<repl>:1:1: DomainError: neg failed: integer_overflow
+<repl>:1:1: DomainError: abs failed: integer_overflow
+<repl>:1:1: DomainError: sub failed: integer_overflow
+<repl>:1:1: DomainError: mul failed: integer_overflow
 <repl>:1:1: ResourceError: iota resource request failed: size_overflow
 ]=])
 if(NOT "${repl_exit}" STREQUAL "0" OR
