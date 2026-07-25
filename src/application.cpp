@@ -103,14 +103,14 @@ bool type_accepts(const PrimitiveDescriptor &descriptor,
 
 Error type_error(PrimitiveApplicationContext &application_context,
                  const PrimitiveDescriptor &descriptor,
-                 std::span<const Value> arguments,
+                 std::span<const Value *const> arguments,
                  std::span<const ScalarType> actual_types,
                  SourceLocation location) {
   Error error = primitive_error(ErrorKind::type_mismatch, descriptor, location);
   TypeErrorContext context;
   context.actual_arguments.reserve(arguments.size());
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    ValueTypeResult actual = value_type(arguments[index]);
+    ValueTypeResult actual = value_type(*arguments[index]);
     if (actual.ok) {
       context.actual_arguments.push_back(std::move(actual.type));
     } else if (actual.resource_error != HostResourceErrorReason::none) {
@@ -153,7 +153,7 @@ Error type_error(PrimitiveApplicationContext &application_context,
     std::vector<const PrimitiveSignature *> remaining;
     for (const PrimitiveSignature *candidate : candidates) {
       if (type_accepts(descriptor, *candidate, argument_index,
-                       arguments[argument_index],
+                       *arguments[argument_index],
                        actual_types[argument_index])) {
         remaining.push_back(candidate);
       }
@@ -225,7 +225,7 @@ PrimitiveApplicationResult apply_primitive_impl(
     PrimitiveApplicationContext &context,
     const PrimitiveDescriptor &descriptor,
     const PrimitiveSignature *typed_signature,
-    std::span<const Value> arguments, SourceLocation call_location) {
+    std::span<const Value *const> arguments, SourceLocation call_location) {
   bool arity_exists = false;
   for (std::size_t index = 0; index < descriptor.signature_count; ++index) {
     if (descriptor.signatures[index].parameter_count == arguments.size()) {
@@ -244,7 +244,8 @@ PrimitiveApplicationResult apply_primitive_impl(
 
   std::array<ScalarType, maximum_application_arity> actual_types{};
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    const ValueValidationResult validation = validate_value(arguments[index]);
+    const ValueValidationResult validation =
+        validate_value(*arguments[index]);
     if (!validation.ok) {
       if (validation.resource_error != HostResourceErrorReason::none) {
         Error error = host_resource_error(context, descriptor,
@@ -265,7 +266,7 @@ PrimitiveApplicationResult apply_primitive_impl(
     }
     ScalarType element_type = ScalarType::boolean;
     const ValueValidationResult element_type_result =
-        value_element_type(arguments[index], element_type);
+        value_element_type(*arguments[index], element_type);
     if (!element_type_result.ok) {
       if (element_type_result.resource_error !=
           HostResourceErrorReason::none) {
@@ -294,7 +295,7 @@ PrimitiveApplicationResult apply_primitive_impl(
       for (std::size_t argument_index = 0;
            argument_index < arguments.size(); ++argument_index) {
         if (signature.parameters[argument_index].container !=
-                arguments[argument_index].container ||
+                arguments[argument_index]->container ||
             signature.parameters[argument_index].element !=
                 actual_type_span[argument_index]) {
           return false;
@@ -329,7 +330,7 @@ PrimitiveApplicationResult apply_primitive_impl(
           ErrorKind::invalid_primitive_table, descriptor, call_location));
     }
 
-    const std::int64_t bound = arguments[0].scalar.integer;
+    const std::int64_t bound = arguments[0]->scalar.integer;
     const std::uint64_t element_count =
         bound > 0 ? static_cast<std::uint64_t>(bound) : UINT64_C(0);
     const std::size_t work_units =
@@ -384,10 +385,10 @@ PrimitiveApplicationResult apply_primitive_impl(
   bool vector_result = false;
   std::size_t result_length = 1;
   for (std::size_t index = 0; index < arguments.size(); ++index) {
-    if (arguments[index].container != ContainerKind::vector) {
+    if (arguments[index]->container != ContainerKind::vector) {
       continue;
     }
-    const std::size_t length = validated_vector_length(arguments[index]);
+    const std::size_t length = validated_vector_length(*arguments[index]);
     if (!vector_result) {
       vector_result = true;
       result_length = length;
@@ -434,7 +435,7 @@ PrimitiveApplicationResult apply_primitive_impl(
     for (std::size_t argument_index = 0; argument_index < arguments.size();
          ++argument_index) {
       const ScalarValue projected =
-          project_validated_scalar(arguments[argument_index], result_index);
+          project_validated_scalar(*arguments[argument_index], result_index);
       const ScalarConversionResult converted = convert_scalar(
           projected,
           selected_signature->parameters[argument_index].element);
@@ -484,14 +485,37 @@ apply_primitive(PrimitiveApplicationContext &context,
                 const PrimitiveDescriptor &descriptor,
                 std::span<const Value> arguments,
                 SourceLocation call_location) {
-  return apply_primitive_impl(context, descriptor, nullptr, arguments,
-                              call_location);
+  if (arguments.size() > maximum_application_arity) {
+    bool arity_exists = false;
+    for (std::size_t index = 0U; index < descriptor.signature_count; ++index) {
+      if (descriptor.signatures[index].parameter_count == arguments.size()) {
+        arity_exists = true;
+        break;
+      }
+    }
+    if (!arity_exists) {
+      return application_failure(
+          arity_error(descriptor, arguments.size(), call_location));
+    }
+    return application_failure(
+        primitive_error(ErrorKind::invalid_primitive_table, descriptor,
+                        call_location));
+  }
+  std::array<const Value *, maximum_application_arity> borrowed{};
+  for (std::size_t index = 0U; index < arguments.size(); ++index) {
+    borrowed[index] = &arguments[index];
+  }
+  return apply_primitive_impl(
+      context, descriptor, nullptr,
+      std::span<const Value *const>(borrowed.data(), arguments.size()),
+      call_location);
 }
 
 PrimitiveApplicationResult apply_typed_primitive(
     PrimitiveApplicationContext &context,
     const PrimitiveDescriptor &descriptor,
-    PrimitiveImplementation implementation, std::span<const Value> arguments,
+    PrimitiveImplementation implementation,
+    std::span<const Value *const> arguments,
     SourceLocation call_location) {
   const PrimitiveSignature *selected = nullptr;
   for (std::size_t index = 0U; index < descriptor.signature_count; ++index) {
@@ -571,9 +595,10 @@ TEST_CASE("typed application executes the lowered implementation without redispa
   PrimitiveApplicationContext context{resources, 0};
   const PrimitiveDescriptor &add = *find_primitive(PrimitiveId::add);
   const std::array<Value, 2> arguments{{make_int_value(1), make_int_value(2)}};
+  const std::array<const Value *, 2> borrowed{{&arguments[0], &arguments[1]}};
 
   const PrimitiveApplicationResult result = apply_typed_primitive(
-      context, add, PrimitiveImplementation::add_double, arguments,
+      context, add, PrimitiveImplementation::add_double, borrowed,
       SourceLocation{4, 2, 3});
 
   REQUIRE(result.ok);
