@@ -10,7 +10,7 @@ file(READ "${BENNU_SOURCE_DIR}/VERSION" product_version)
 string(REGEX REPLACE "\n$" "" product_version "${product_version}")
 foreach(required_text IN ITEMS
     "inc" "add" "equals" "not" "iota"
-    "examples/rewrite.bennu" "trusted-local-v1"
+    "examples/rewrite.bennu" "trusted-local-v2" "Tuple literals"
     "Deliberate differences from Anka"
     "`${product_version}`;" "VERSION does not authorize a release"
     "CLOSED NOT_PLANNED by the owner"

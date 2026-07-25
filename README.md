@@ -19,19 +19,23 @@ calls also support right-associative prefix syntax: `inc 5` and `inc inc 5`.
 Scalars are `Bool`, signed 64-bit `Int`, or IEEE 754 binary64 `Double` values.
 Vector literals are homogeneous, for example `(1 2 3)`, `(1.0 2.5)`, and
 `(false true)`. Typed empty vectors are `Bool()`, `Int()`, and `Double()`.
+Tuple literals use square brackets in expression position: `[]`, `[1]`,
+`[1 2.5 true]`, and `[1 [2 3]]`. Tuples are ordered, heterogeneous, immutable
+structural values. A tuple inside an adjacent call remains one argument, so
+`inc[[1 2]]` reports a type error; tuple spreading is not yet part of Bennu.
 
 Elementwise calls broadcast scalars over vectors and require all vector
 arguments to have equal lengths. A singleton vector remains a vector and does
 not broadcast. Exact overloads win; the only implicit conversion is
 `Int -> Double`. Integer overflow is a structured domain error. Output is
 canonical, including `true`/`false`, visible `.0` for integral-valued Doubles,
-`-0.0`, `inf`, `-inf`, `nan`, and parenthesized vectors. Every complete program
-is evaluated before runner output is published.
+`-0.0`, `inf`, `-inf`, `nan`, parenthesized vectors, and bracketed tuples.
+Every complete program is evaluated before runner output is published.
 
-The CLI defaults to the `trusted-local-v1` execution profile with
-`max_vector_bytes`, `max_live_evaluation_bytes`, and `max_work_units` omitted.
-Mandatory representability, overflow-safe sizing, complete-allocation, and
-all-or-nothing result checks still apply.
+The CLI defaults to the `trusted-local-v2` execution profile with
+`max_vector_bytes`, `max_live_evaluation_bytes`, `max_work_units`, and
+`max_tuple_table_bytes` omitted. Mandatory representability, overflow-safe
+sizing, complete-allocation, and all-or-nothing result checks still apply.
 
 ## Build and quick start
 
@@ -101,12 +105,14 @@ publish-last and preserve an existing destination on failure.
 ## Deliberate differences from Anka
 
 Anka is language-design inspiration, not a compatibility target. Bennu keeps
-readable bracket calls, parenthesized vector literals, and concise unary prefix
-calls. Bennu deliberately uses `iota` as its only sequence-constructor spelling,
-requires brackets for multi-argument calls, reserves parentheses for homogeneous
-rank-1 literals, and requires an explicit type for empty vectors. The initial
-language has no variables, user functions, trains, effects, reductions,
-multidimensional arrays, `length`, or `divide`.
+readable bracket calls, parenthesized vector literals, concise unary prefix
+calls, and square-bracket structural tuples. Bennu deliberately uses flat
+postorder tuple ownership, fixed profile-v2 table charges, explicit adjacent
+calls that never spread tuples, and `iota` as its only sequence-constructor
+spelling. It requires parentheses for homogeneous rank-1 literals and an
+explicit type for empty vectors. The initial language has no variables, user
+functions, trains, effects, reductions, multidimensional arrays, `length`, or
+`divide`.
 
 ## Version and release provenance
 

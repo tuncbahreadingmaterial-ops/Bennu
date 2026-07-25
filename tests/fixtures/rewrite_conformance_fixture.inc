@@ -160,7 +160,6 @@ const RewriteInvalidFixture rewrite_invalid_fixtures[] = {
   {"semantic Vector notation", "Vector<Int>()", false, RewriteParseError::invalid_byte, {{1U, 1U, 1U}, {7U, 1U, 7U}}},
   {"nested vector", "((1 2))", false, RewriteParseError::invalid_vector_element, {{2U, 1U, 2U}, {3U, 1U, 3U}}},
   {"application in vector", "(inc 1)", false, RewriteParseError::invalid_vector_element, {{2U, 1U, 2U}, {5U, 1U, 5U}}},
-  {"whitespace before bracket", "add [1 2]", false, RewriteParseError::whitespace_before_bracket, {{4U, 1U, 4U}, {5U, 1U, 5U}}},
   {"comma in call", "add[1, 2]", false, RewriteParseError::invalid_byte, {{6U, 1U, 6U}, {7U, 1U, 7U}}},
   {"missing call close", "add[1 2", false, RewriteParseError::missing_delimiter, {{8U, 1U, 8U}, {8U, 1U, 8U}}},
   {"mismatched nested close", "add[(1 2] 3]", false, RewriteParseError::mismatched_delimiter, {{9U, 1U, 9U}, {10U, 1U, 10U}}},

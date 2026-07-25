@@ -541,6 +541,7 @@ RewriteTokens tokenize_rewrite(std::string_view source) {
 enum class RewriteNodeKind {
   scalar_literal,
   vector_literal,
+  tuple_literal,
   parameter_reference,
   unresolved_name,
   primitive_call,
@@ -632,6 +633,8 @@ struct RewriteProgram {
   std::vector<std::int64_t> integer_elements;
   std::vector<double> double_elements;
   std::vector<RewriteSpan> vector_element_spans;
+  std::vector<std::size_t> tuple_elements;
+  std::vector<RewriteSpan> tuple_element_spans;
 };
 
 struct RewriteParseResult {
@@ -642,6 +645,7 @@ struct RewriteParseResult {
 
 enum class RewriteContextKind {
   bracket_call,
+  tuple_literal,
   prefix_call,
 };
 
@@ -1011,8 +1015,58 @@ std::size_t finish_call(RewriteProgram &program,
   return program.nodes.size() - 1U;
 }
 
+std::size_t finish_tuple(RewriteProgram &program,
+                         const std::vector<RewritePendingArgument> &pending,
+                         const RewriteContext &context,
+                         RewriteSpan closing_span) {
+  const std::size_t first_element = program.tuple_elements.size();
+  const std::size_t first_element_span = program.tuple_element_spans.size();
+  std::size_t pending_index = context.first_pending_argument;
+  while (pending_index != no_index) {
+    const std::size_t node_index = pending[pending_index].node;
+    program.tuple_elements.push_back(node_index);
+    program.tuple_element_spans.push_back(program.nodes[node_index].span);
+    pending_index = pending[pending_index].next;
+  }
+  const RewriteSpan complete{context.opening_span.begin, closing_span.end};
+  program.nodes.push_back(RewriteNode{
+      RewriteNodeKind::tuple_literal,
+      complete,
+      ScalarType::boolean,
+      false,
+      0,
+      0.0,
+      first_element,
+      context.argument_count,
+      first_element_span,
+      0U});
+  return program.nodes.size() - 1U;
+}
+
+std::size_t finish_delimited(
+    RewriteProgram &program,
+    const std::vector<RewritePendingArgument> &pending,
+    const RewriteContext &context, RewriteSpan closing_span) {
+  if (context.kind == RewriteContextKind::tuple_literal) {
+    return finish_tuple(program, pending, context, closing_span);
+  }
+  return finish_call(
+      program, pending, context, closing_span,
+      RewriteSpan{context.name_span.begin, closing_span.end});
+}
+
+RewriteSpan rewrite_context_span(const RewriteTokens &tokens,
+                                 const RewriteContext &context) {
+  if (context.kind == RewriteContextKind::tuple_literal) {
+    return delimited_context_span(tokens, context.opening_token_index,
+                                  RewriteTokenKind::right_bracket);
+  }
+  return bracket_call_context_span(tokens, context);
+}
+
 bool token_starts_expression(RewriteTokenKind kind) {
   return is_scalar_token(kind) || kind == RewriteTokenKind::name ||
+         kind == RewriteTokenKind::left_bracket ||
          kind == RewriteTokenKind::left_parenthesis ||
          kind == RewriteTokenKind::bool_type ||
          kind == RewriteTokenKind::int_type ||
@@ -1327,7 +1381,8 @@ RewriteParseResult parse_rewrite(std::string_view source) {
     }
 
     if (!contexts.empty() &&
-        contexts.back().kind == RewriteContextKind::bracket_call) {
+        (contexts.back().kind == RewriteContextKind::bracket_call ||
+         contexts.back().kind == RewriteContextKind::tuple_literal)) {
       RewriteContext &context = contexts.back();
       if (context.after_argument) {
         if (token_index < tokens.tokens.size() &&
@@ -1337,9 +1392,9 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           ++token_index;
           const RewriteContext completed_context = context;
           contexts.pop_back();
-          completed_node = finish_call(
-              result.program, pending_arguments, completed_context, closing,
-              RewriteSpan{completed_context.name_span.begin, closing.end});
+          completed_node =
+              finish_delimited(result.program, pending_arguments,
+                               completed_context, closing);
           have_expression = true;
           continue;
         }
@@ -1365,7 +1420,7 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           const RewriteSpan insertion = insertion_span(tokens.end);
           set_diagnostic(
               result, RewriteParseError::missing_delimiter, insertion,
-              bracket_call_context_span(tokens, context),
+              rewrite_context_span(tokens, context),
               context.opening_span);
           return result;
         } else if (tokens.tokens[token_index].kind ==
@@ -1373,7 +1428,7 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           set_diagnostic(
               result, RewriteParseError::mismatched_delimiter,
               tokens.tokens[token_index].span,
-              bracket_call_context_span(tokens, context),
+              rewrite_context_span(tokens, context),
               context.opening_span);
           return result;
         } else {
@@ -1384,7 +1439,7 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           set_diagnostic(
               result, error,
               tokens.tokens[token_index].span,
-              bracket_call_context_span(tokens, context),
+              rewrite_context_span(tokens, context),
               context.opening_span);
           return result;
         }
@@ -1392,7 +1447,7 @@ RewriteParseResult parse_rewrite(std::string_view source) {
       if (token_index == tokens.tokens.size()) {
         const RewriteSpan insertion = insertion_span(tokens.end);
         set_diagnostic(result, RewriteParseError::missing_delimiter, insertion,
-                       bracket_call_context_span(tokens, context),
+                       rewrite_context_span(tokens, context),
                        context.opening_span);
         return result;
       }
@@ -1402,9 +1457,9 @@ RewriteParseResult parse_rewrite(std::string_view source) {
         ++token_index;
         const RewriteContext completed_context = context;
         contexts.pop_back();
-        completed_node = finish_call(
-            result.program, pending_arguments, completed_context, closing,
-            RewriteSpan{completed_context.name_span.begin, closing.end});
+        completed_node =
+            finish_delimited(result.program, pending_arguments,
+                             completed_context, closing);
         have_expression = true;
         continue;
       }
@@ -1413,7 +1468,7 @@ RewriteParseResult parse_rewrite(std::string_view source) {
         set_diagnostic(
             result, RewriteParseError::mismatched_delimiter,
             tokens.tokens[token_index].span,
-            bracket_call_context_span(tokens, context),
+            rewrite_context_span(tokens, context),
             context.opening_span);
         return result;
       }
@@ -1452,6 +1507,27 @@ RewriteParseResult parse_rewrite(std::string_view source) {
       completed_node = result.program.nodes.size() - 1U;
       ++token_index;
       have_expression = true;
+      continue;
+    }
+    if (token.kind == RewriteTokenKind::left_bracket) {
+      contexts.push_back(RewriteContext{
+          RewriteContextKind::tuple_literal,
+          token.span,
+          token.span,
+          insertion_span(token.span.end),
+          no_index,
+          no_index,
+          0U,
+          token_index,
+          false});
+      ++token_index;
+      while (token_index < tokens.tokens.size() &&
+             (tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::horizontal_space ||
+              tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::line_terminator)) {
+        ++token_index;
+      }
       continue;
     }
     if (token.kind == RewriteTokenKind::left_parenthesis) {
@@ -1502,7 +1578,8 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           find_parameter(result.program, rewrite_token_spelling(tokens, token));
       const bool inside_bracket =
           !contexts.empty() &&
-          contexts.back().kind == RewriteContextKind::bracket_call;
+          (contexts.back().kind == RewriteContextKind::bracket_call ||
+           contexts.back().kind == RewriteContextKind::tuple_literal);
       const bool adjacent_bracket =
           token_index + 1U < tokens.tokens.size() &&
           tokens.tokens[token_index + 1U].kind ==
@@ -1548,14 +1625,6 @@ RewriteParseResult parse_rewrite(std::string_view source) {
       if (token_index + 1U < tokens.tokens.size() &&
           tokens.tokens[token_index + 1U].kind ==
               RewriteTokenKind::horizontal_space) {
-        if (token_index + 2U < tokens.tokens.size() &&
-            tokens.tokens[token_index + 2U].kind ==
-                RewriteTokenKind::left_bracket) {
-          set_diagnostic(result, RewriteParseError::whitespace_before_bracket,
-                         tokens.tokens[token_index + 1U].span, token.span,
-                         tokens.tokens[token_index + 2U].span);
-          return result;
-        }
         const RewriteSpan separator = tokens.tokens[token_index + 1U].span;
         contexts.push_back(RewriteContext{RewriteContextKind::prefix_call,
                                           token.span,
@@ -1715,6 +1784,7 @@ struct RewriteEvaluationCreationData {
   ExecutionProfile profile;
   ResourceLimits limits;
   AllocationFailureInjection allocation_failure;
+  ResourceLifetimeObserver lifetime_observer{};
 };
 
 struct CBackendConfiguration {
@@ -1742,6 +1812,7 @@ enum class RewriteCardinality {
   scalar,
   static_vector,
   dynamic_vector,
+  tuple,
 };
 
 struct RewriteLoweringNode {
@@ -1764,6 +1835,7 @@ struct RewriteLoweringNode {
   SourceLocation source_location;
   std::string_view admission_point;
   RewriteSpan declaration_name_span;
+  TypeArena structural_type;
 };
 
 struct RewriteLoweringProgram {
@@ -1773,6 +1845,8 @@ struct RewriteLoweringProgram {
   std::vector<std::uint8_t> boolean_elements;
   std::vector<std::int64_t> integer_elements;
   std::vector<double> double_elements;
+  std::vector<std::size_t> tuple_elements;
+  std::vector<RewriteSpan> tuple_element_spans;
 };
 
 struct RewriteLoweringResult {
@@ -1793,15 +1867,39 @@ struct RewriteEvaluationResult {
 
 EvaluationResources make_rewrite_resources(
     const RewriteEvaluationCreationData &creation) {
+  EvaluationResources resources;
   if (creation.profile == ExecutionProfile::trusted_local_v1 &&
       !creation.limits.max_vector_bytes.has_value() &&
       !creation.limits.max_live_evaluation_bytes.has_value() &&
-      !creation.limits.max_work_units.has_value()) {
-    return make_trusted_local_resources(creation.allocation_failure);
+      !creation.limits.max_work_units.has_value() &&
+      !creation.limits.max_tuple_table_bytes.has_value()) {
+    resources = make_trusted_local_resources(creation.allocation_failure);
+  } else {
+    resources = make_evaluation_resources(
+        creation.profile, creation.limits, creation.allocation_failure,
+        0U, 0U, 0U);
   }
-  return make_evaluation_resources(
-      creation.profile, creation.limits, creation.allocation_failure,
-      0U, 0U, 0U);
+  if (creation.lifetime_observer.record != nullptr) {
+    static_cast<void>(set_evaluation_resource_lifetime_observer(
+        resources, creation.lifetime_observer));
+  }
+  return resources;
+}
+
+EvaluationResources invalid_rewrite_resources(
+    const RewriteEvaluationCreationData &creation) {
+  return EvaluationResources{
+      EvaluationResourceOwner{},
+      EvaluationResourceStateHandle{},
+      creation.profile,
+      creation.limits,
+      HostResourceErrorReason::none,
+      creation.allocation_failure,
+      0U,
+      0U,
+      0U,
+      creation.lifetime_observer,
+      0U};
 }
 
 SourceLocation rewrite_source_location(RewritePosition position) {
@@ -1965,6 +2063,48 @@ RewriteEvaluationResult rewrite_evaluation_failure(
                                  scalar_kernel_invocations};
 }
 
+std::optional<RewriteSpan>
+first_tuple_span(const RewriteProgram &program) {
+  std::optional<RewriteSpan> earliest;
+  for (const RewriteNode &node : program.nodes) {
+    if (node.kind != RewriteNodeKind::tuple_literal) {
+      continue;
+    }
+    if (!earliest.has_value() ||
+        node.span.begin.offset < earliest->begin.offset ||
+        (node.span.begin.offset == earliest->begin.offset &&
+         node.span.end.offset > earliest->end.offset)) {
+      earliest = node.span;
+    }
+  }
+  return earliest;
+}
+
+std::optional<RewriteEvaluationDiagnostic>
+tuple_profile_diagnostic(const RewriteProgram &program,
+                         ExecutionProfile profile) {
+  const std::optional<RewriteSpan> span = first_tuple_span(program);
+  const bool v1 = profile == ExecutionProfile::trusted_local_v1 ||
+                  profile == ExecutionProfile::bounded_v1;
+  if (!span.has_value() || !v1) {
+    return std::nullopt;
+  }
+  RewriteEvaluationDiagnostic diagnostic =
+      empty_rewrite_evaluation_diagnostic();
+  diagnostic.stage = RewriteEvaluationStage::resource_admission;
+  diagnostic.primary = *span;
+  diagnostic.context = *span;
+  diagnostic.related = *span;
+  diagnostic.error = make_error(
+      ErrorKind::profile_error,
+      rewrite_source_location(span->begin));
+  diagnostic.error.profile = ProfileErrorContext{
+      ProfileErrorReason::unsupported_value_kind,
+      execution_profile_name(profile),
+      TypeKind::tuple};
+  return diagnostic;
+}
+
 Value scalar_literal_value(const RewriteNode &node) {
   if (node.element_type == ScalarType::boolean) {
     return make_bool_value(node.boolean);
@@ -1976,9 +2116,13 @@ Value scalar_literal_value(const RewriteNode &node) {
 }
 
 ContainerKind lowering_container(const RewriteLoweringNode &node) {
-  return node.cardinality == RewriteCardinality::scalar
-             ? ContainerKind::scalar
-             : ContainerKind::vector;
+  if (node.cardinality == RewriteCardinality::scalar) {
+    return ContainerKind::scalar;
+  }
+  if (node.cardinality == RewriteCardinality::tuple) {
+    return ContainerKind::tuple;
+  }
+  return ContainerKind::vector;
 }
 
 Error lowering_primitive_error(ErrorKind kind,
@@ -2010,6 +2154,9 @@ bool lowering_type_accepts(const PrimitiveDescriptor &descriptor,
                            const PrimitiveSignature &signature,
                            std::size_t argument_index,
                            const RewriteLoweringNode &argument) {
+  if (argument.cardinality == RewriteCardinality::tuple) {
+    return false;
+  }
   const ValueType parameter = signature.parameters[argument_index];
   if (descriptor.lifting == LiftingMode::none) {
     return parameter.container == lowering_container(argument) &&
@@ -2032,10 +2179,10 @@ Error lowering_type_error(const RewriteProgram &program,
   for (std::size_t index = 0U; index < call.argument_count; ++index) {
     const RewriteLoweringNode &argument =
         lowering.nodes[program.arguments[call.first_argument + index]];
-    context.actual_arguments.push_back(
-        lowering_container(argument) == ContainerKind::scalar
-            ? make_scalar_type(argument.element_type)
-            : make_vector_type(argument.element_type));
+    TypeConstructionResult actual = clone_type(argument.structural_type);
+    if (actual.ok) {
+      context.actual_arguments.push_back(std::move(actual.type));
+    }
   }
 
   std::vector<const PrimitiveSignature *> candidates;
@@ -2120,11 +2267,17 @@ RewriteLoweringResult lowering_failure(const RewriteProgram &program,
 
 RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
   const bool vector = node.kind == RewriteNodeKind::vector_literal;
+  const bool tuple = node.kind == RewriteNodeKind::tuple_literal;
+  TypeArena structural_type =
+      vector ? make_vector_type(node.element_type)
+             : make_scalar_type(node.element_type);
   return RewriteLoweringNode{
       node.kind,
-      vector ? RewriteCardinality::static_vector : RewriteCardinality::scalar,
+      tuple ? RewriteCardinality::tuple
+            : vector ? RewriteCardinality::static_vector
+                     : RewriteCardinality::scalar,
       node.element_type,
-      vector ? node.element_count : 1U,
+      (vector || tuple) ? node.element_count : 1U,
       std::nullopt,
       PrimitiveImplementation::none,
       false,
@@ -2140,7 +2293,8 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       node.span,
       rewrite_source_location(node.span.begin),
       vector ? std::string_view{"vector-literal"} : std::string_view{},
-      node.declaration_name_span};
+      node.declaration_name_span,
+      std::move(structural_type)};
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
@@ -2150,6 +2304,8 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
   lowering.boolean_elements = program.boolean_elements;
   lowering.integer_elements = program.integer_elements;
   lowering.double_elements = program.double_elements;
+  lowering.tuple_elements = program.tuple_elements;
+  lowering.tuple_element_spans = program.tuple_element_spans;
   lowering.nodes.reserve(program.nodes.size());
   for (const RewriteNode &node : program.nodes) {
     lowering.nodes.push_back(base_lowering_node(node));
@@ -2193,6 +2349,70 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
   for (std::size_t node_index = 0U; node_index < program.nodes.size();
        ++node_index) {
     const RewriteNode &node = program.nodes[node_index];
+    if (node.kind == RewriteNodeKind::tuple_literal) {
+      std::vector<TypeArena> element_types;
+      element_types.reserve(node.element_count);
+      for (std::size_t element_index = 0U;
+           element_index < node.element_count; ++element_index) {
+        const std::size_t child =
+            program.tuple_elements[node.first_element + element_index];
+        TypeConstructionResult cloned =
+            clone_type(lowering.nodes[child].structural_type);
+        if (!cloned.ok) {
+          RewriteEvaluationDiagnostic diagnostic =
+              empty_rewrite_evaluation_diagnostic();
+          diagnostic.stage = RewriteEvaluationStage::resource_admission;
+          diagnostic.primary = node.span;
+          diagnostic.context = node.span;
+          Error error = make_error(
+              ErrorKind::resource_error,
+              rewrite_source_location(node.span.begin));
+          error.resource = ResourceErrorContext{
+              cloned.resource_error == HostResourceErrorReason::size_overflow
+                  ? ResourceErrorReason::size_overflow
+                  : ResourceErrorReason::allocation_unavailable,
+              node.element_count,
+              std::nullopt,
+              "typed-lowering",
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              std::nullopt,
+              std::nullopt};
+          diagnostic.error = std::move(error);
+          return RewriteLoweringResult{false, {}, std::move(diagnostic)};
+        }
+        element_types.push_back(std::move(cloned.type));
+      }
+      TypeConstructionResult tuple_type = make_tuple_type(element_types);
+      if (!tuple_type.ok) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::resource_admission;
+        diagnostic.primary = node.span;
+        diagnostic.context = node.span;
+        Error error = make_error(
+            ErrorKind::resource_error,
+            rewrite_source_location(node.span.begin));
+        error.resource = ResourceErrorContext{
+            tuple_type.resource_error == HostResourceErrorReason::size_overflow
+                ? ResourceErrorReason::size_overflow
+                : ResourceErrorReason::allocation_unavailable,
+            node.element_count,
+            std::nullopt,
+            "typed-lowering",
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            std::nullopt};
+        diagnostic.error = std::move(error);
+        return RewriteLoweringResult{false, {}, std::move(diagnostic)};
+      }
+      lowering.nodes[node_index].structural_type =
+          std::move(tuple_type.type);
+      continue;
+    }
     if (node.kind != RewriteNodeKind::primitive_call) {
       continue;
     }
@@ -2220,20 +2440,26 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
       }
     } else {
       std::array<ScalarType, 2> actual_types{};
+      bool has_structural_argument = false;
       if (call.argument_count <= actual_types.size()) {
         for (std::size_t argument_index = 0U;
              argument_index < call.argument_count; ++argument_index) {
-          actual_types[argument_index] =
-              lowering
-                  .nodes[program.arguments[call.first_argument + argument_index]]
-                  .element_type;
+          const RewriteLoweringNode &argument =
+              lowering.nodes[
+                  program.arguments[call.first_argument + argument_index]];
+          if (argument.cardinality == RewriteCardinality::tuple) {
+            has_structural_argument = true;
+          }
+          actual_types[argument_index] = argument.element_type;
         }
-        const SignatureSelectionResult selected = select_primitive_signature(
-            descriptor,
-            std::span<const ScalarType>(actual_types.data(),
-                                        call.argument_count));
-        if (selected.status == SignatureSelectionStatus::success) {
-          signature = selected.signature;
+        if (!has_structural_argument) {
+          const SignatureSelectionResult selected = select_primitive_signature(
+              descriptor,
+              std::span<const ScalarType>(actual_types.data(),
+                                          call.argument_count));
+          if (selected.status == SignatureSelectionStatus::success) {
+            signature = selected.signature;
+          }
         }
       }
     }
@@ -2254,6 +2480,10 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
     lowered.cardinality = descriptor.lifting == LiftingMode::none
                               ? RewriteCardinality::dynamic_vector
                               : RewriteCardinality::scalar;
+    lowered.structural_type =
+        signature->result.container == ContainerKind::scalar
+            ? make_scalar_type(signature->result.element)
+            : make_vector_type(signature->result.element);
   }
 
   // Phase 6 computes cardinality and rejects only lengths proven unequal.
@@ -2340,7 +2570,8 @@ VectorAllocationResult vector_literal_value(EvaluationResources &resources,
 
 void release_rewrite_values(EvaluationResources &resources,
                             std::vector<Value> &values) {
-  for (Value &value : values) {
+  for (std::size_t index = values.size(); index != 0U; --index) {
+    Value &value = values[index - 1U];
     if (value.container == ContainerKind::vector) {
       release_vector_reservation(resources, value);
     } else {
@@ -2348,12 +2579,14 @@ void release_rewrite_values(EvaluationResources &resources,
     }
   }
   values.clear();
+  static_cast<void>(refresh_evaluation_resources(resources));
 }
 
 void release_rewrite_node_values(EvaluationResources &resources,
                                  std::vector<Value> &values,
                                  std::vector<std::uint8_t> &live) {
-  for (std::size_t index = 0U; index < values.size(); ++index) {
+  for (std::size_t end = values.size(); end != 0U; --end) {
+    const std::size_t index = end - 1U;
     if (live[index] == std::uint8_t{0U}) {
       continue;
     }
@@ -2364,6 +2597,7 @@ void release_rewrite_node_values(EvaluationResources &resources,
     }
     live[index] = std::uint8_t{0U};
   }
+  static_cast<void>(refresh_evaluation_resources(resources));
 }
 
 RewriteEvaluationDiagnostic application_rewrite_diagnostic(
@@ -2693,7 +2927,7 @@ Error public_error_from_diagnostic(
 
 CBackendConfiguration trusted_local_c_configuration() {
   return CBackendConfiguration{
-      ExecutionProfile::trusted_local_v1,
+      ExecutionProfile::trusted_local_v2,
       ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
       AllocationFailureInjection{std::nullopt},
       AllocationFailureInjection{std::nullopt}};
@@ -2701,7 +2935,7 @@ CBackendConfiguration trusted_local_c_configuration() {
 
 EvaluationConfiguration trusted_local_evaluation_configuration() {
   return EvaluationConfiguration{
-      ExecutionProfile::trusted_local_v1,
+      ExecutionProfile::trusted_local_v2,
       ResourceLimits{std::nullopt, std::nullopt, std::nullopt},
       AllocationFailureInjection{std::nullopt}};
 }
@@ -2714,9 +2948,70 @@ CBackendConfiguration c_backend_configuration(
       configuration.allocation_failure};
 }
 
+std::optional<Error> validate_rewrite_configuration(
+    ExecutionProfile profile, const ResourceLimits &limits,
+    std::string_view producer_name) {
+  const bool has_configured_limit =
+      limits.max_vector_bytes.has_value() ||
+      limits.max_live_evaluation_bytes.has_value() ||
+      limits.max_work_units.has_value() ||
+      limits.max_tuple_table_bytes.has_value();
+  std::string_view message;
+  switch (profile) {
+  case ExecutionProfile::trusted_local_v1:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v1 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v1:
+    if (has_configured_limit &&
+        !limits.max_tuple_table_bytes.has_value()) {
+      return std::nullopt;
+    }
+    message = limits.max_tuple_table_bytes.has_value()
+                  ? "bounded-v1 does not support max_tuple_table_bytes"
+                  : "bounded-v1 requires at least one configured resource limit";
+    break;
+  case ExecutionProfile::trusted_local_v2:
+    if (!has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "trusted-local-v2 requires every resource limit to be omitted";
+    break;
+  case ExecutionProfile::bounded_v2:
+    if (has_configured_limit) {
+      return std::nullopt;
+    }
+    message = "bounded-v2 requires at least one configured resource limit";
+    break;
+  default:
+    message = "execution profile tag is unknown";
+    break;
+  }
+
+  Error error = make_error(
+      ErrorKind::invalid_execution_profile, SourceLocation{1U, 1U, 1U});
+  error.static_message = message;
+  error.primitive =
+      make_primitive_error_context(producer_name, std::nullopt);
+  return error;
+}
+
 RewriteEvaluationResult evaluate_rewrite_source_impl(
     std::string_view source, const RewriteEvaluationCreationData &creation,
     bool require_single_root, std::span<const Value> parameter_values) {
+  std::optional<Error> configuration_error =
+      validate_rewrite_configuration(
+          creation.profile, creation.limits, "rewrite-evaluator");
+  if (configuration_error.has_value()) {
+    RewriteEvaluationDiagnostic diagnostic =
+        empty_rewrite_evaluation_diagnostic();
+    diagnostic.stage = RewriteEvaluationStage::resource_admission;
+    diagnostic.error = std::move(*configuration_error);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
+  }
   EvaluationResources resources = make_rewrite_resources(creation);
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
@@ -2794,6 +3089,13 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
   }
 
+  std::optional<RewriteEvaluationDiagnostic> profile_diagnostic =
+      tuple_profile_diagnostic(parsed.program, creation.profile);
+  if (profile_diagnostic.has_value()) {
+    return rewrite_evaluation_failure(
+        resources, std::move(*profile_diagnostic), 0U);
+  }
+
   RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
   if (!lowered.ok) {
     return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
@@ -2831,12 +3133,21 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       maximum_call_arity = call.argument_count;
     }
   }
+  for (const RewriteNode &node : parsed.program.nodes) {
+    if (node.kind == RewriteNodeKind::tuple_literal &&
+        node.element_count > maximum_call_arity) {
+      maximum_call_arity = node.element_count;
+    }
+  }
   std::vector<Value> arguments;
   arguments.reserve(maximum_call_arity);
 
   std::vector<std::size_t> remaining_uses(parsed.program.nodes.size(), 0U);
   for (const std::size_t argument : parsed.program.arguments) {
     ++remaining_uses[argument];
+  }
+  for (const std::size_t element : parsed.program.tuple_elements) {
+    ++remaining_uses[element];
   }
   for (const std::size_t root : parsed.program.roots) {
     ++remaining_uses[root];
@@ -2889,6 +3200,55 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       release_rewrite_node_values(resources, node_values, node_live);
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
+    }
+    if (node.kind == RewriteNodeKind::tuple_literal) {
+      bool invalid_forward_use = false;
+      for (std::size_t element_index = 0U;
+           element_index < node.element_count; ++element_index) {
+        const std::size_t element_node =
+            parsed.program.tuple_elements[node.first_element + element_index];
+        if (node_live[element_node] == std::uint8_t{0U} ||
+            remaining_uses[element_node] != 1U) {
+          invalid_forward_use = true;
+          break;
+        }
+        arguments.push_back(move_value(node_values[element_node]));
+        node_live[element_node] = std::uint8_t{0U};
+        --remaining_uses[element_node];
+      }
+      if (invalid_forward_use) {
+        release_rewrite_values(resources, arguments);
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::primitive_table;
+        diagnostic.primary = node.span;
+        diagnostic.context = node.span;
+        diagnostic.error = make_error(
+            ErrorKind::invalid_primitive_table,
+            rewrite_source_location(node.span.begin));
+        release_rewrite_node_values(resources, node_values, node_live);
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      TupleConstructionResult tuple = make_tuple_value(
+          resources, arguments, rewrite_source_location(node.span.begin),
+          "tuple-literal");
+      if (!tuple.ok) {
+        release_rewrite_values(resources, arguments);
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::literal;
+        diagnostic.primary = node.span;
+        diagnostic.context = node.span;
+        diagnostic.error = std::move(tuple.error);
+        release_rewrite_node_values(resources, node_values, node_live);
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      arguments.clear();
+      node_values[node_index] = move_value(tuple.value);
+      node_live[node_index] = std::uint8_t{1U};
+      continue;
     }
 
     const RewriteCall &call = parsed.program.calls[node.call_index];
@@ -3157,9 +3517,11 @@ void append_resource_initialization(
   append_presence(configuration.limits.max_vector_bytes);
   append_presence(configuration.limits.max_live_evaluation_bytes);
   append_presence(configuration.limits.max_work_units);
+  append_presence(configuration.limits.max_tuple_table_bytes);
   append_value(configuration.limits.max_vector_bytes);
   append_value(configuration.limits.max_live_evaluation_bytes);
   append_value(configuration.limits.max_work_units);
+  append_value(configuration.limits.max_tuple_table_bytes);
   source += "0U, 0U, 0U, ";
   source += configuration.runtime_allocation_failure
                         .fail_at_reservation_ordinal.has_value()
@@ -3170,9 +3532,15 @@ void append_resource_initialization(
       configuration.runtime_allocation_failure.fail_at_reservation_ordinal
           .value_or(0U));
   source += ", BENNU_FAILURE_NONE, ";
-  source += configuration.profile == ExecutionProfile::bounded_v1
-                ? "BENNU_PROFILE_BOUNDED_V1, "
-                : "BENNU_PROFILE_TRUSTED_LOCAL_V1, ";
+  if (configuration.profile == ExecutionProfile::bounded_v1) {
+    source += "BENNU_PROFILE_BOUNDED_V1, ";
+  } else if (configuration.profile == ExecutionProfile::trusted_local_v2) {
+    source += "BENNU_PROFILE_TRUSTED_LOCAL_V2, ";
+  } else if (configuration.profile == ExecutionProfile::bounded_v2) {
+    source += "BENNU_PROFILE_BOUNDED_V2, ";
+  } else {
+    source += "BENNU_PROFILE_TRUSTED_LOCAL_V1, ";
+  }
   source +=
       "BENNU_LIMIT_NONE, 0U, 0U, 0U, NULL, {0U, 1U, 1U}, "
       "0, 0U, 0, 0U, 0, 0U, BENNU_IMPL_NONE, "
@@ -3236,6 +3604,39 @@ void append_vector_node(std::string &source, std::size_t node_index,
   source += ", ";
   append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n";
+}
+
+void append_tuple_node(std::string &source, std::size_t node_index,
+                       const RewriteLoweringNode &node,
+                       const RewriteLoweringProgram &program) {
+  source += "  {\n";
+  if (node.element_count != 0U) {
+    source += "    BennuValue *bennu_tuple_elements_" +
+              std::to_string(node_index) + "[] = {";
+    for (std::size_t element_index = 0U;
+         element_index < node.element_count; ++element_index) {
+      if (element_index != 0U) {
+        source += ", ";
+      }
+      const std::size_t child =
+          program.tuple_elements[node.first_element + element_index];
+      source += "&bennu_values[" + std::to_string(child) + "]";
+    }
+    source += "};\n";
+  }
+  source += "    if (!bennu_tuple(&bennu_resources, &bennu_values[" +
+            std::to_string(node_index) + "], ";
+  source += node.element_count == 0U
+                ? "NULL"
+                : "bennu_tuple_elements_" + std::to_string(node_index);
+  source += ", ";
+  append_c_unsigned(source, node.element_count);
+  source += ", \"tuple-literal\", ";
+  append_source_span(source, node.primary_span);
+  source += ", ";
+  append_source_span(source, node.source_span);
+  source += ")) { goto bennu_failure; }\n"
+            "  }\n";
 }
 
 void append_shape_requirement(
@@ -3326,9 +3727,9 @@ void append_call_node(std::string &source, std::size_t node_index,
   source += ", ";
   append_source_span(source, node.source_span);
   source += ")) { goto bennu_failure; }\n";
-  for (std::size_t argument = 0U; argument < node.argument_count; ++argument) {
+  for (std::size_t end = node.argument_count; end != 0U; --end) {
     const std::size_t argument_node =
-        program.arguments[node.first_argument + argument];
+        program.arguments[node.first_argument + end - 1U];
     source += "  bennu_release(&bennu_resources, &bennu_values[" +
               std::to_string(argument_node) + "]);\n";
   }
@@ -3337,6 +3738,12 @@ void append_call_node(std::string &source, std::size_t node_index,
 CEmissionResult emit_rewrite_c_source_impl(
     std::string_view source,
     const CBackendConfiguration &configuration) {
+  std::optional<Error> configuration_error =
+      validate_rewrite_configuration(
+          configuration.profile, configuration.limits, "rewrite-emitter");
+  if (configuration_error.has_value()) {
+    return CEmissionResult{false, {}, std::move(*configuration_error)};
+  }
   RewriteParseResult parsed = parse_rewrite(source);
   if (!parsed.ok) {
     RewriteEvaluationDiagnostic diagnostic =
@@ -3384,6 +3791,13 @@ CEmissionResult emit_rewrite_c_source_impl(
         make_error(ErrorKind::invalid_primitive_table,
                    SourceLocation{1U, 1U, 1U})};
   }
+  std::optional<RewriteEvaluationDiagnostic> profile_diagnostic =
+      tuple_profile_diagnostic(parsed.program, configuration.profile);
+  if (profile_diagnostic.has_value()) {
+    return CEmissionResult{
+        false, {},
+        public_error_from_diagnostic(source, *profile_diagnostic)};
+  }
   RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
   if (!lowered.ok) {
     return CEmissionResult{
@@ -3413,6 +3827,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   generated += "static int bennu_execute(BennuResources *snapshot) {\n";
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
+               "  (void)bennu_tuple;\n"
                "  (void)bennu_apply;\n"
                "  (void)bennu_require_shape;\n"
                "  (void)bennu_source_location;\n"
@@ -3441,6 +3856,8 @@ CEmissionResult emit_rewrite_c_source_impl(
       append_scalar_node(generated, index, node);
     } else if (node.kind == RewriteNodeKind::vector_literal) {
       append_vector_node(generated, index, node);
+    } else if (node.kind == RewriteNodeKind::tuple_literal) {
+      append_tuple_node(generated, index, node, lowering);
     } else {
       append_call_node(generated, index, node, lowering);
     }
@@ -3451,11 +3868,12 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "])) { goto bennu_output_failure; }\n";
   }
   if (!lowering.nodes.empty()) {
-    generated += "  { size_t bennu_index = 0U;\n"
-                 "    for (bennu_index = 0U; bennu_index < ";
+    generated += "  { size_t bennu_index = ";
     append_c_unsigned(generated, lowering.nodes.size());
     generated +=
-        "; ++bennu_index) {\n"
+        ";\n"
+        "    while (bennu_index != 0U) {\n"
+        "      --bennu_index;\n"
         "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
         "    }\n"
         "  }\n";
@@ -3464,10 +3882,11 @@ CEmissionResult emit_rewrite_c_source_impl(
                "  return fflush(stdout) == 0 ? 0 : 1;\n";
   if (!lowering.nodes.empty()) {
     generated += "bennu_failure:\n"
-                 "  { size_t bennu_index = 0U;\n"
-                 "    for (bennu_index = 0U; bennu_index < ";
+                 "  { size_t bennu_index = ";
     append_c_unsigned(generated, lowering.nodes.size());
-    generated += "; ++bennu_index) {\n"
+    generated += ";\n"
+                 "    while (bennu_index != 0U) {\n"
+                 "      --bennu_index;\n"
                  "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
                  "    }\n"
                  "  }\n"
@@ -3476,11 +3895,12 @@ CEmissionResult emit_rewrite_c_source_impl(
                  "  return 1;\n";
     if (!lowering.roots.empty()) {
       generated += "bennu_output_failure:\n"
-                   "  { size_t bennu_index = 0U;\n"
-                   "    for (bennu_index = 0U; bennu_index < ";
+                   "  { size_t bennu_index = ";
       append_c_unsigned(generated, lowering.nodes.size());
       generated +=
-          "; ++bennu_index) {\n"
+          ";\n"
+          "    while (bennu_index != 0U) {\n"
+          "      --bennu_index;\n"
           "      bennu_release(&bennu_resources, &bennu_values[bennu_index]);\n"
           "    }\n"
           "  }\n"
@@ -3839,6 +4259,9 @@ std::string_view node_kind_name(RewriteNodeKind kind) {
   if (kind == RewriteNodeKind::vector_literal) {
     return "vector_literal";
   }
+  if (kind == RewriteNodeKind::tuple_literal) {
+    return "tuple_literal";
+  }
   if (kind == RewriteNodeKind::parameter_reference) {
     return "parameter_reference";
   }
@@ -3981,6 +4404,26 @@ std::string rewrite_flat_snapshot(const RewriteProgram &program) {
     append_span(snapshot, program.vector_element_spans[index]);
   }
   snapshot.push_back(']');
+  if (!program.tuple_elements.empty() ||
+      !program.tuple_element_spans.empty()) {
+    snapshot.append(";tuple_elements=[");
+    for (std::size_t index = 0U; index < program.tuple_elements.size();
+         ++index) {
+      if (index != 0U) {
+        snapshot.push_back(',');
+      }
+      append_size(snapshot, program.tuple_elements[index]);
+    }
+    snapshot.append("];tuple_element_spans=[");
+    for (std::size_t index = 0U;
+         index < program.tuple_element_spans.size(); ++index) {
+      if (index != 0U) {
+        snapshot.push_back(',');
+      }
+      append_span(snapshot, program.tuple_element_spans[index]);
+    }
+    snapshot.push_back(']');
+  }
   return snapshot;
 }
 
@@ -3990,6 +4433,9 @@ std::string_view lowering_cardinality_name(RewriteCardinality cardinality) {
   }
   if (cardinality == RewriteCardinality::static_vector) {
     return "static_vector";
+  }
+  if (cardinality == RewriteCardinality::tuple) {
+    return "tuple";
   }
   return "dynamic_vector";
 }
@@ -4352,7 +4798,6 @@ TEST_CASE("rewrite parser rejects normative invalid syntax at exact spans") {
       {"Vector<Int>()", RewriteParseError::invalid_byte, 1U, 7U},
       {"((1 2))", RewriteParseError::invalid_vector_element, 2U, 3U},
       {"(inc 1)", RewriteParseError::invalid_vector_element, 2U, 5U},
-      {"add [1 2]", RewriteParseError::whitespace_before_bracket, 4U, 5U},
       {"add[1, 2]", RewriteParseError::invalid_byte, 6U, 7U},
       {"add[1 2", RewriteParseError::missing_delimiter, 8U, 8U},
       {"add[(1 2] 3]", RewriteParseError::mismatched_delimiter, 9U, 10U},
@@ -4802,6 +5247,73 @@ TEST_CASE("rewrite evaluator validates every complete execution profile early") 
   }
 }
 
+TEST_CASE("TUP-050 invalid configuration precedes source analysis") {
+  struct PrecedenceCase {
+    RewriteEvaluationCreationData creation;
+    std::string_view expected_message;
+  };
+  const ResourceLimits no_limits{
+      std::nullopt, std::nullopt, std::nullopt, std::nullopt};
+  const ResourceLimits tuple_limit{
+      std::nullopt, std::nullopt, std::nullopt, 16U};
+  const std::array<PrecedenceCase, 3> cases{{
+      {{ExecutionProfile::bounded_v2, no_limits,
+        AllocationFailureInjection{std::nullopt}},
+       "bounded-v2 requires at least one configured resource limit"},
+      {{ExecutionProfile::trusted_local_v1, tuple_limit,
+        AllocationFailureInjection{std::nullopt}},
+       "trusted-local-v1 requires every resource limit to be omitted"},
+      {{ExecutionProfile::bounded_v1, tuple_limit,
+        AllocationFailureInjection{std::nullopt}},
+       "bounded-v1 does not support max_tuple_table_bytes"},
+  }};
+  const std::array<std::string_view, 3> sources{{
+      "add[1, 2]",
+      "[[1]]",
+      "bogus[1]",
+  }};
+
+  for (const PrecedenceCase &precedence_case : cases) {
+    for (const std::string_view source : sources) {
+      INFO(precedence_case.expected_message);
+      INFO(source);
+      RewriteEvaluationResult evaluated =
+          evaluate_rewrite_source(source, precedence_case.creation);
+      REQUIRE_FALSE(evaluated.ok);
+      CHECK(evaluated.diagnostic.stage ==
+            RewriteEvaluationStage::resource_admission);
+      CHECK(evaluated.diagnostic.error.kind ==
+            ErrorKind::invalid_execution_profile);
+      CHECK(evaluated.diagnostic.error.static_message ==
+            precedence_case.expected_message);
+      REQUIRE(evaluated.diagnostic.error.primitive.has_value());
+      CHECK(evaluated.diagnostic.error.primitive->name ==
+            "rewrite-evaluator");
+      CHECK(evaluated.resources.owner.token == 0U);
+      CHECK(evaluated.resources.reservation_ordinal == 0U);
+      CHECK(evaluated.resources.live_evaluation_bytes == 0U);
+
+      const CBackendConfiguration emitter_configuration{
+          precedence_case.creation.profile,
+          precedence_case.creation.limits,
+          AllocationFailureInjection{std::nullopt},
+          AllocationFailureInjection{std::nullopt}};
+      CEmissionResult emitted =
+          emit_rewrite_c_source_impl(source, emitter_configuration);
+      REQUIRE_FALSE(emitted.ok);
+      CHECK(emitted.source.empty());
+      CHECK(emitted.error.kind == ErrorKind::invalid_execution_profile);
+      CHECK(emitted.error.static_message ==
+            precedence_case.expected_message);
+      REQUIRE(emitted.error.primitive.has_value());
+      CHECK(emitted.error.primitive->name == "rewrite-emitter");
+      CHECK(emitted.error.location.offset == 1U);
+      CHECK(emitted.error.location.line == 1U);
+      CHECK(emitted.error.location.column == 1U);
+    }
+  }
+}
+
 TEST_CASE("rewrite evaluator constructs accounted typed vector literals") {
   const RewriteEvaluationCreationData creation{
       ExecutionProfile::trusted_local_v1,
@@ -5131,6 +5643,421 @@ TEST_CASE("rewrite evaluator refuses resources before latent scalar domain work"
   CHECK(evaluated.resources.live_evaluation_bytes == 0U);
   CHECK(evaluated.values.empty());
   CHECK(evaluated.formatted.empty());
+}
+
+TEST_CASE("TUP-001-GRAMMAR") {
+  const RewriteParseResult comprehensive = parse_rewrite(
+      "parameters[n Int]\n"
+      "[]\n"
+      "[n]\n"
+      "[1 2.5 true [n]]\n"
+      "[\n"
+      "  n\n"
+      "]\n"
+      "add[]\n"
+      "[]");
+  REQUIRE(comprehensive.ok);
+  CHECK(rewrite_flat_snapshot(comprehensive.program) ==
+        R"snapshot(roots=[0,2,8,10,11,12];nodes=[{kind=tuple_literal,span=[19:2:1,21:2:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[23:3:2,24:3:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[22:3:1,25:3:4),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0},{kind=scalar_literal,span=[27:4:2,28:4:3),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[29:4:4,32:4:7),element_type=double_precision,boolean=0,integer=0,double_precision=bits:4004000000000000,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[33:4:8,37:4:12),element_type=boolean,boolean=1,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[39:4:14,40:4:15),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[38:4:13,41:4:16),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=1,element_count=1,first_element_span=1,call_index=0},{kind=tuple_literal,span=[26:4:1,42:4:17),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=2,element_count=4,first_element_span=2,call_index=0},{kind=parameter_reference,span=[47:6:3,48:6:4),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[43:5:1,50:7:2),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=6,element_count=1,first_element_span=6,call_index=0},{kind=primitive_call,span=[51:8:1,56:8:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[57:9:1,59:9:3),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=7,element_count=0,first_element_span=7,call_index=0}];arguments=[];argument_spans=[];calls=[{syntax=bracketed,name=add,name_span=[51:8:1,54:8:4),opening_delimiter_span=[54:8:4,55:8:5),closing_delimiter_span=[55:8:5,56:8:6),prefix_separator_span=[55:8:5,55:8:5),span=[51:8:1,56:8:6),first_argument=0,argument_count=0,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[1,6,3,4,5,7,9];tuple_element_spans=[[23:3:2,24:3:3),[39:4:14,40:4:15),[27:4:2,28:4:3),[29:4:4,32:4:7),[33:4:8,37:4:12),[38:4:13,41:4:16),[47:6:3,48:6:4)])snapshot");
+
+  const std::array<std::string_view, 8> exact_sources{{
+      "add[1 2]",
+      "add [1 2]",
+      "add []",
+      "parameters[x Int]\n[x x]",
+      "parameters[x Int]\n[inc x]",
+      "parameters[x Int]\n[x inc x]",
+      "unknown [1 2]",
+      " \r\nparameters[\r\n x Int\r\n]\r\n[\r\n x\r\n]\r\n",
+  }};
+  const std::array<std::string_view, 8> exact_snapshots{{
+      R"snapshot(roots=[2];nodes=[{kind=scalar_literal,span=[5:1:5,6:1:6),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[7:1:7,8:1:8),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,9:1:9),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[0,1];argument_spans=[[5:1:5,6:1:6),[7:1:7,8:1:8)];calls=[{syntax=bracketed,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,5:1:5),closing_delimiter_span=[8:1:8,9:1:9),prefix_separator_span=[5:1:5,5:1:5),span=[1:1:1,9:1:9),first_argument=0,argument_count=2,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=scalar_literal,span=[6:1:6,7:1:7),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[8:1:8,9:1:9),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[5:1:5,10:1:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,10:1:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[2];argument_spans=[[5:1:5,10:1:10)];calls=[{syntax=prefix,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,4:1:4),closing_delimiter_span=[5:1:5,5:1:5),prefix_separator_span=[4:1:4,5:1:5),span=[1:1:1,10:1:10),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[6:1:6,7:1:7),[8:1:8,9:1:9)])snapshot",
+      R"snapshot(roots=[1];nodes=[{kind=tuple_literal,span=[5:1:5,7:1:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,7:1:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[0];argument_spans=[[5:1:5,7:1:7)];calls=[{syntax=prefix,name=add,name_span=[1:1:1,4:1:4),opening_delimiter_span=[4:1:4,4:1:4),closing_delimiter_span=[5:1:5,5:1:5),prefix_separator_span=[4:1:4,5:1:5),span=[1:1:1,7:1:7),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[])snapshot",
+      R"snapshot(roots=[2];nodes=[{kind=parameter_reference,span=[20:2:2,21:2:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[22:2:4,23:2:5),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,24:2:6),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[20:2:2,21:2:3),[22:2:4,23:2:5)])snapshot",
+      R"snapshot(roots=[2];nodes=[{kind=parameter_reference,span=[24:2:6,25:2:7),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[20:2:2,25:2:7),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,26:2:8),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0}];arguments=[0];argument_spans=[[24:2:6,25:2:7)];calls=[{syntax=prefix,name=inc,name_span=[20:2:2,23:2:5),opening_delimiter_span=[23:2:5,23:2:5),closing_delimiter_span=[24:2:6,24:2:6),prefix_separator_span=[23:2:5,24:2:6),span=[20:2:2,25:2:7),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[1];tuple_element_spans=[[20:2:2,25:2:7)])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=parameter_reference,span=[20:2:2,21:2:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=parameter_reference,span=[26:2:8,27:2:9),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=primitive_call,span=[22:2:4,27:2:9),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[19:2:1,28:2:10),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0}];arguments=[1];argument_spans=[[26:2:8,27:2:9)];calls=[{syntax=prefix,name=inc,name_span=[22:2:4,25:2:7),opening_delimiter_span=[25:2:7,25:2:7),closing_delimiter_span=[26:2:8,26:2:8),prefix_separator_span=[25:2:7,26:2:8),span=[22:2:4,27:2:9),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,2];tuple_element_spans=[[20:2:2,21:2:3),[22:2:4,27:2:9)])snapshot",
+      R"snapshot(roots=[3];nodes=[{kind=scalar_literal,span=[10:1:10,11:1:11),element_type=integer,boolean=0,integer=1,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=scalar_literal,span=[12:1:12,13:1:13),element_type=integer,boolean=0,integer=2,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[9:1:9,14:1:14),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=2,first_element_span=0,call_index=0},{kind=primitive_call,span=[1:1:1,14:1:14),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0}];arguments=[2];argument_spans=[[9:1:9,14:1:14)];calls=[{syntax=prefix,name=unknown,name_span=[1:1:1,8:1:8),opening_delimiter_span=[8:1:8,8:1:8),closing_delimiter_span=[9:1:9,9:1:9),prefix_separator_span=[8:1:8,9:1:9),span=[1:1:1,14:1:14),first_argument=0,argument_count=1,primitive=none}];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0,1];tuple_element_spans=[[10:1:10,11:1:11),[12:1:12,13:1:13)])snapshot",
+      R"snapshot(roots=[1];nodes=[{kind=parameter_reference,span=[32:6:2,33:6:3),element_type=integer,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=0,first_element_span=0,call_index=0},{kind=tuple_literal,span=[28:5:1,36:7:2),element_type=boolean,boolean=0,integer=0,double_precision=bits:0,first_element=0,element_count=1,first_element_span=0,call_index=0}];arguments=[];argument_spans=[];calls=[];boolean_elements=[];integer_elements=[];double_elements=[];vector_element_spans=[];tuple_elements=[0];tuple_element_spans=[[32:6:2,33:6:3)])snapshot",
+  }};
+  for (std::size_t index = 0U; index < exact_sources.size(); ++index) {
+    const std::string_view source = exact_sources[index];
+    const RewriteParseResult exact = parse_rewrite(source);
+    REQUIRE(exact.ok);
+    INFO(source);
+    CHECK(rewrite_flat_snapshot(exact.program) == exact_snapshots[index]);
+  }
+  RewriteParseResult unknown_prefix = parse_rewrite("unknown [1 2]");
+  REQUIRE(unknown_prefix.ok);
+  const RewriteResolutionResult unknown_resolution =
+      resolve_rewrite_primitives(unknown_prefix.program);
+  REQUIRE_FALSE(unknown_resolution.ok);
+  CHECK(unknown_resolution.diagnostic.error ==
+        RewriteParseError::unknown_primitive);
+  CHECK(span_is(unknown_resolution.diagnostic.primary, 1U, 1U, 1U, 8U, 1U,
+                8U));
+  CHECK(span_is(unknown_resolution.diagnostic.context, 1U, 1U, 1U, 14U, 1U,
+                14U));
+  CHECK(span_is(unknown_resolution.diagnostic.related, 1U, 1U, 1U, 8U, 1U,
+                8U));
+
+  const std::array<std::string_view, 4> lowering_sources{{
+      "[]",
+      "[1]",
+      "[\n 1\n [2.5 true]\n]",
+      "parameters[n Int]\n[n]",
+  }};
+  const std::array<std::string_view, 4> lowering_snapshots{{
+      "roots=[0];arguments=[];nodes=["
+      "0:tuple_literal/boolean/tuple(0)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-3]",
+      "roots=[1];arguments=[];nodes=["
+      "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=2-3,"
+      "1:tuple_literal/boolean/tuple(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-4]",
+      "roots=[4];arguments=[];nodes=["
+      "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=4-5,"
+      "1:scalar_literal/double_precision/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=8-11,"
+      "2:scalar_literal/boolean/scalar(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=12-16,"
+      "3:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=7-17,"
+      "4:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=1-19]",
+      "roots=[1];arguments=[];nodes=["
+      "0:parameter_reference/integer/scalar(1)/impl=0/parameter=0/"
+      "arguments=0+0/shape_check=0/span=20-21,"
+      "1:tuple_literal/boolean/tuple(1)/impl=0/parameter=-/"
+      "arguments=0+0/shape_check=0/span=19-22]",
+  }};
+  for (std::size_t index = 0U; index < lowering_sources.size(); ++index) {
+    const std::string_view source = lowering_sources[index];
+    RewriteParseResult lowering_parse = parse_rewrite(source);
+    REQUIRE(lowering_parse.ok);
+    REQUIRE(resolve_rewrite_primitives(lowering_parse.program).ok);
+    RewriteLoweringResult lowering_result =
+        lower_rewrite_program(lowering_parse.program);
+    REQUIRE(lowering_result.ok);
+    INFO(source);
+    CHECK(rewrite_lowering_snapshot(lowering_result.program) ==
+          lowering_snapshots[index]);
+  }
+
+  const RewriteParseResult invalid = parse_rewrite("[1, 2]");
+  REQUIRE_FALSE(invalid.ok);
+  CHECK(invalid.diagnostic.error == RewriteParseError::invalid_byte);
+  CHECK(span_is(invalid.diagnostic.primary, 3U, 1U, 3U, 4U, 1U, 4U));
+  CHECK(span_is(invalid.diagnostic.context, 1U, 1U, 1U, 7U, 1U, 7U));
+  CHECK(span_is(invalid.diagnostic.related, 1U, 1U, 1U, 2U, 1U, 2U));
+
+  const RewriteParseResult missing_separator =
+      parse_rewrite("[1[2]]");
+  REQUIRE_FALSE(missing_separator.ok);
+  CHECK(missing_separator.diagnostic.error ==
+        RewriteParseError::missing_separator);
+  CHECK(span_is(missing_separator.diagnostic.primary, 3U, 1U, 3U, 4U, 1U,
+                4U));
+  CHECK(span_is(missing_separator.diagnostic.context, 1U, 1U, 1U, 7U, 1U,
+                7U));
+  CHECK(span_is(missing_separator.diagnostic.related, 1U, 1U, 1U, 2U, 1U,
+                2U));
+
+  const RewriteParseResult missing_delimiter = parse_rewrite("[1");
+  REQUIRE_FALSE(missing_delimiter.ok);
+  CHECK(missing_delimiter.diagnostic.error ==
+        RewriteParseError::missing_delimiter);
+  CHECK(span_is(missing_delimiter.diagnostic.primary, 3U, 1U, 3U, 3U, 1U,
+                3U));
+  CHECK(span_is(missing_delimiter.diagnostic.context, 1U, 1U, 1U, 3U, 1U,
+                3U));
+  CHECK(span_is(missing_delimiter.diagnostic.related, 1U, 1U, 1U, 2U, 1U,
+                2U));
+
+  const RewriteParseResult mismatched = parse_rewrite("[1)");
+  REQUIRE_FALSE(mismatched.ok);
+  CHECK(mismatched.diagnostic.error ==
+        RewriteParseError::mismatched_delimiter);
+  CHECK(span_is(mismatched.diagnostic.primary, 3U, 1U, 3U, 4U, 1U, 4U));
+  CHECK(span_is(mismatched.diagnostic.context, 1U, 1U, 1U, 4U, 1U, 4U));
+  CHECK(span_is(mismatched.diagnostic.related, 1U, 1U, 1U, 2U, 1U, 2U));
+
+  const RewriteParseResult parsed =
+      parse_rewrite("[[1 2] add[3 4]]");
+  REQUIRE(parsed.ok);
+  REQUIRE(parsed.program.roots.size() == 1U);
+  REQUIRE(parsed.program.tuple_elements.size() == 4U);
+  REQUIRE(parsed.program.tuple_element_spans.size() == 4U);
+  const RewriteNode &outer =
+      parsed.program.nodes[parsed.program.roots[0]];
+  REQUIRE(outer.kind == RewriteNodeKind::tuple_literal);
+  CHECK(outer.element_count == 2U);
+  CHECK(outer.span.begin.offset == 1U);
+  CHECK(outer.span.end.offset == 17U);
+  CHECK(parsed.program.tuple_element_spans[2].begin.offset == 2U);
+  CHECK(parsed.program.tuple_element_spans[2].end.offset == 7U);
+  CHECK(parsed.program.tuple_element_spans[3].begin.offset == 8U);
+  CHECK(parsed.program.tuple_element_spans[3].end.offset == 16U);
+#ifndef DOCTEST_CONFIG_DISABLE
+  const std::string snapshot = rewrite_flat_snapshot(parsed.program);
+  CHECK(snapshot.find("tuple_elements=[0,1,2,5]") !=
+        std::string::npos);
+  CHECK(snapshot.find(
+            "tuple_element_spans=[[3:1:3,4:1:4)") !=
+        std::string::npos);
+#endif
+
+  RewriteParseResult resolved = parsed;
+  REQUIRE(resolve_rewrite_primitives(resolved.program).ok);
+  RewriteLoweringResult lowered =
+      lower_rewrite_program(resolved.program);
+  REQUIRE(lowered.ok);
+  TypeFormattingResult formatted =
+      format_type(lowered.program.nodes[resolved.program.roots[0]]
+                      .structural_type);
+  REQUIRE(formatted.ok);
+  CHECK(formatted.formatted == "Tuple<Tuple<Int, Int>, Int>");
+  CHECK(rewrite_lowering_snapshot(lowered.program) ==
+        "roots=[6];arguments=[3,4];nodes=["
+        "0:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=3-4,"
+        "1:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=5-6,"
+        "2:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=2-7,"
+        "3:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=12-13,"
+        "4:scalar_literal/integer/scalar(1)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=14-15,"
+        "5:primitive_call/integer/scalar(1)/impl=3/parameter=-/"
+        "arguments=0+2/shape_check=0/span=8-16,"
+        "6:tuple_literal/boolean/tuple(2)/impl=0/parameter=-/"
+        "arguments=0+0/shape_check=0/span=1-17]");
+}
+
+TEST_CASE("TUP-050-EVALUATOR-FORMAT-PROFILE") {
+  const RewriteEvaluationCreationData trusted_v2{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult values = evaluate_rewrite_source(
+      "[]\n[1]\n[1 2.5 true]\n[1 [2 3]]\n[(1 2) add[3 4]]",
+      trusted_v2);
+  REQUIRE(values.ok);
+  REQUIRE(values.formatted.size() == 5U);
+  CHECK(values.formatted[0] == "[]");
+  CHECK(values.formatted[1] == "[1]");
+  CHECK(values.formatted[2] == "[1 2.5 true]");
+  CHECK(values.formatted[3] == "[1 [2 3]]");
+  CHECK(values.formatted[4] == "[(1 2) 7]");
+  CHECK(values.resources.reservation_ordinal == 6U);
+  CHECK(values.resources.live_evaluation_bytes == 176U);
+  release_rewrite_evaluation_result(values);
+
+  const RewriteEvaluationCreationData bounded_exact{
+      ExecutionProfile::bounded_v2,
+      ResourceLimits{64U, 64U, 16U, 16U},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult singleton =
+      evaluate_rewrite_source("[1]", bounded_exact);
+  REQUIRE(singleton.ok);
+  CHECK(singleton.resources.live_evaluation_bytes == 16U);
+  CHECK(singleton.resources.work_units == 0U);
+  release_rewrite_evaluation_result(singleton);
+
+  RewriteEvaluationResult refused =
+      evaluate_rewrite_source("[1 2]", bounded_exact);
+  REQUIRE_FALSE(refused.ok);
+  REQUIRE(refused.diagnostic.error.resource.has_value());
+  CHECK(refused.diagnostic.error.resource->limit_kind ==
+        ResourceLimitKind::max_tuple_table_bytes);
+  CHECK(refused.diagnostic.error.resource->refused_charge == 32U);
+  CHECK(refused.resources.live_evaluation_bytes == 0U);
+  CHECK(refused.resources.reservation_ordinal == 0U);
+
+  const RewriteEvaluationCreationData v1{
+      ExecutionProfile::trusted_local_v1,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult profile =
+      evaluate_rewrite_source("inc[[1]]", v1);
+  REQUIRE_FALSE(profile.ok);
+  CHECK(profile.diagnostic.error.kind == ErrorKind::profile_error);
+  REQUIRE(profile.diagnostic.error.profile.has_value());
+  CHECK(profile.diagnostic.error.profile->reason ==
+        ProfileErrorReason::unsupported_value_kind);
+  CHECK(span_is(profile.diagnostic.primary, 5U, 1U, 5U, 8U, 1U, 8U));
+  CHECK(profile.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult nested_profile =
+      evaluate_rewrite_source("[[1]]", v1);
+  REQUIRE_FALSE(nested_profile.ok);
+  CHECK(span_is(nested_profile.diagnostic.primary, 1U, 1U, 1U, 6U, 1U,
+                6U));
+  CHECK(span_is(nested_profile.diagnostic.context, 1U, 1U, 1U, 6U, 1U,
+                6U));
+  CHECK(span_is(nested_profile.diagnostic.related, 1U, 1U, 1U, 6U, 1U,
+                6U));
+
+  CEmissionResult nested_emission =
+      emit_rewrite_c_source_impl("[[1]]", c_backend_configuration(
+                                               EvaluationConfiguration{
+                                                   v1.profile, v1.limits,
+                                                   v1.allocation_failure}));
+  REQUIRE_FALSE(nested_emission.ok);
+  CHECK(nested_emission.error.kind == ErrorKind::profile_error);
+  CHECK(nested_emission.error.location.offset == 1U);
+  CHECK(nested_emission.error.location.line == 1U);
+  CHECK(nested_emission.error.location.column == 1U);
+}
+
+TEST_CASE("TUP-050-FAULT-TRANSACTION") {
+  for (std::size_t ordinal = 0U; ordinal < 3U; ++ordinal) {
+    const RewriteEvaluationCreationData creation{
+        ExecutionProfile::trusted_local_v2,
+        ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                       std::nullopt},
+        AllocationFailureInjection{ordinal}};
+    RewriteEvaluationResult failed =
+        evaluate_rewrite_source("[(1 2) [3]]", creation);
+    INFO(ordinal);
+    REQUIRE_FALSE(failed.ok);
+    REQUIRE(failed.diagnostic.error.resource.has_value());
+    CHECK(failed.diagnostic.error.resource->reason ==
+          ResourceErrorReason::allocation_unavailable);
+    CHECK(failed.resources.reservation_ordinal == ordinal + 1U);
+    CHECK(failed.resources.live_evaluation_bytes == 0U);
+    CHECK(failed.values.empty());
+    CHECK(failed.formatted.empty());
+  }
+
+  const auto record_event = [](void *context, ResourceLifetimeEvent event) {
+    auto &events =
+        *static_cast<std::vector<ResourceLifetimeEvent> *>(context);
+    events.push_back(event);
+  };
+  std::vector<ResourceLifetimeEvent> success_events;
+  const RewriteEvaluationCreationData success_creation{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt},
+      ResourceLifetimeObserver{&success_events, record_event}};
+  RewriteEvaluationResult released =
+      evaluate_rewrite_source("[(1) (2)]\n[(3)]", success_creation);
+  REQUIRE(released.ok);
+  REQUIRE(success_events.size() == 5U);
+  release_rewrite_evaluation_result(released);
+  REQUIRE(success_events.size() == 15U);
+  const std::array<std::size_t, 5> success_release_order{
+      {3U, 4U, 1U, 0U, 2U}};
+  for (std::size_t index = 0U; index < success_release_order.size();
+       ++index) {
+    const ResourceLifetimeEvent &logical =
+        success_events[5U + index * 2U];
+    const ResourceLifetimeEvent &physical =
+        success_events[6U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{success_release_order[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
+  }
+
+  std::vector<ResourceLifetimeEvent> failure_events;
+  const RewriteEvaluationCreationData outer_failure_creation{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{4U},
+      ResourceLifetimeObserver{&failure_events, record_event}};
+  RewriteEvaluationResult outer_failure = evaluate_rewrite_source(
+      "[(1)]\n[(2) [3]]", outer_failure_creation);
+  REQUIRE_FALSE(outer_failure.ok);
+  CHECK(outer_failure.resources.live_evaluation_bytes == 0U);
+  REQUIRE(failure_events.size() == 12U);
+  const std::array<std::size_t, 4> failure_release_order{
+      {3U, 2U, 0U, 1U}};
+  for (std::size_t index = 0U; index < failure_release_order.size();
+       ++index) {
+    const ResourceLifetimeEvent &logical =
+        failure_events[4U + index * 2U];
+    const ResourceLifetimeEvent &physical =
+        failure_events[5U + index * 2U];
+    CHECK(logical.kind == ResourceLifetimeEventKind::logical_release);
+    CHECK(physical.kind == ResourceLifetimeEventKind::physical_release);
+    CHECK(logical.allocation_ordinal ==
+          std::optional<std::size_t>{failure_release_order[index]});
+    CHECK(physical.allocation_ordinal == logical.allocation_ordinal);
+  }
+}
+
+TEST_CASE("TUP-050-DIRECT-PRESERVATION") {
+  const RewriteEvaluationCreationData trusted_v2{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult type =
+      evaluate_rewrite_source("inc[[1 2]]", trusted_v2);
+  REQUIRE_FALSE(type.ok);
+  CHECK(type.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(type.diagnostic.error.argument_position == 1U);
+  REQUIRE(type.diagnostic.error.type.has_value());
+  REQUIRE(type.diagnostic.error.type->actual_arguments.size() == 1U);
+  TypeFormattingResult actual =
+      format_type(type.diagnostic.error.type->actual_arguments[0]);
+  REQUIRE(actual.ok);
+  CHECK(actual.formatted == "Tuple<Int, Int>");
+  CHECK(type.diagnostic.primary.begin.offset == 5U);
+  CHECK(type.diagnostic.primary.end.offset == 10U);
+
+  RewriteEvaluationResult arity =
+      evaluate_rewrite_source("add[[1 2]]", trusted_v2);
+  REQUIRE_FALSE(arity.ok);
+  CHECK(arity.diagnostic.error.kind == ErrorKind::arity_error);
+  REQUIRE(arity.diagnostic.error.arity.has_value());
+  CHECK(arity.diagnostic.error.arity->supplied == 1U);
+  CHECK(arity.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult adjacent =
+      evaluate_rewrite_source("add[1 2]", trusted_v2);
+  REQUIRE(adjacent.ok);
+  REQUIRE(adjacent.formatted.size() == 1U);
+  CHECK(adjacent.formatted[0] == "3");
+  release_rewrite_evaluation_result(adjacent);
+
+  for (const std::string_view source :
+       std::array<std::string_view, 2>{{"add [1 2]", "add []"}}) {
+    RewriteEvaluationResult prefix =
+        evaluate_rewrite_source(source, trusted_v2);
+    REQUIRE_FALSE(prefix.ok);
+    CHECK(prefix.diagnostic.error.kind == ErrorKind::arity_error);
+    REQUIRE(prefix.diagnostic.error.arity.has_value());
+    CHECK(prefix.diagnostic.error.arity->supplied == 1U);
+    CHECK(prefix.scalar_kernel_invocations == 0U);
+  }
+
+  const std::array<Value, 1> arguments{{make_int_value(4)}};
+  const std::array<std::string_view, 3> parameter_sources{{
+      "parameters[x Int]\n[x x]",
+      "parameters[x Int]\n[inc x]",
+      "parameters[x Int]\n[x inc x]",
+  }};
+  const std::array<std::string_view, 3> parameter_expected{{
+      "[4 4]", "[5]", "[4 5]"}};
+  for (std::size_t index = 0U; index < parameter_sources.size(); ++index) {
+    RewriteEvaluationResult parameter = evaluate_rewrite_source_impl(
+        parameter_sources[index], trusted_v2, false, arguments);
+    REQUIRE(parameter.ok);
+    REQUIRE(parameter.formatted.size() == 1U);
+    CHECK(parameter.formatted[0] == parameter_expected[index]);
+    release_rewrite_evaluation_result(parameter);
+  }
 }
 
 TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {

@@ -27,7 +27,8 @@ typedef enum BennuType {
 
 typedef enum BennuContainer {
   BENNU_SCALAR = 0,
-  BENNU_VECTOR = 1
+  BENNU_VECTOR = 1,
+  BENNU_TUPLE = 2
 } BennuContainer;
 
 typedef enum BennuImplementation {
@@ -64,14 +65,17 @@ typedef enum BennuFailure {
 
 typedef enum BennuProfile {
   BENNU_PROFILE_TRUSTED_LOCAL_V1 = 0,
-  BENNU_PROFILE_BOUNDED_V1 = 1
+  BENNU_PROFILE_BOUNDED_V1 = 1,
+  BENNU_PROFILE_TRUSTED_LOCAL_V2 = 2,
+  BENNU_PROFILE_BOUNDED_V2 = 3
 } BennuProfile;
 
 typedef enum BennuLimitKind {
   BENNU_LIMIT_NONE = 0,
   BENNU_LIMIT_MAX_VECTOR_BYTES = 1,
   BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES = 2,
-  BENNU_LIMIT_MAX_WORK_UNITS = 3
+  BENNU_LIMIT_MAX_WORK_UNITS = 3,
+  BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES = 4
 } BennuLimitKind;
 
 typedef struct BennuSourceLocation {
@@ -98,7 +102,9 @@ typedef struct BennuScalar {
   double double_precision;
 } BennuScalar;
 
-typedef struct BennuValue {
+typedef struct BennuValue BennuValue;
+
+struct BennuValue {
   BennuContainer container;
   BennuType type;
   size_t count;
@@ -106,15 +112,20 @@ typedef struct BennuValue {
   int64_t integer;
   double double_precision;
   void *data;
-} BennuValue;
+  BennuValue *parent;
+  size_t parent_index;
+  size_t cleanup_index;
+};
 
 typedef struct BennuResources {
   int has_vector_limit;
   int has_live_limit;
   int has_work_limit;
+  int has_tuple_limit;
   size_t vector_limit;
   size_t live_limit;
   size_t work_limit;
+  size_t tuple_limit;
   size_t live_bytes;
   size_t work_units;
   size_t reservation_ordinal;
@@ -383,15 +394,125 @@ static int bennu_charge_work(
   return 1;
 }
 
-static void bennu_release(BennuResources *resources, BennuValue *value) {
-  if (value->container == BENNU_VECTOR) {
-    const size_t bytes = value->count * bennu_width(value->type);
-    if (bytes <= resources->live_bytes) {
-      resources->live_bytes -= bytes;
-    }
-    BENNU_RUNTIME_FREE(value->data);
+static int bennu_tuple(BennuResources *resources, BennuValue *result,
+                       BennuValue **elements, size_t count,
+                       const char *admission_point,
+                       BennuSourceSpan primary_span,
+                       BennuSourceSpan context_span) {
+  const size_t slot_bytes = 16U;
+  size_t bytes = 0U;
+  size_t live_after = 0U;
+  BennuValue *table = NULL;
+  size_t index = 0U;
+  if (count > SIZE_MAX / slot_bytes) {
+    bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 0, 0U,
+                               admission_point, BENNU_PRIMITIVE_NONE,
+                               primary_span, context_span);
+    return 0;
   }
-  (void)memset(value, 0, sizeof(*value));
+  bytes = count * slot_bytes;
+  if (bytes > SIZE_MAX - resources->live_bytes) {
+    bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 1,
+                               bytes, admission_point, BENNU_PRIMITIVE_NONE,
+                               primary_span, context_span);
+    return 0;
+  }
+  live_after = resources->live_bytes + bytes;
+  if (resources->has_tuple_limit != 0 && bytes > resources->tuple_limit) {
+    bennu_set_profile_failure(
+        resources, BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES, resources->tuple_limit,
+        0U, bytes, 1, count, 1, bytes, admission_point,
+        BENNU_PRIMITIVE_NONE, primary_span, context_span);
+    return 0;
+  }
+  if (resources->has_live_limit != 0 && live_after > resources->live_limit) {
+    bennu_set_profile_failure(
+        resources, BENNU_LIMIT_MAX_LIVE_EVALUATION_BYTES,
+        resources->live_limit, resources->live_bytes, bytes, 1, count, 1,
+        bytes, admission_point, BENNU_PRIMITIVE_NONE, primary_span,
+        context_span);
+    return 0;
+  }
+  if (count != 0U) {
+    const size_t ordinal = resources->reservation_ordinal;
+    if (count > SIZE_MAX / sizeof(BennuValue)) {
+      bennu_set_resource_failure(resources, BENNU_FAILURE_SIZE, 1, count, 1,
+                                 bytes, admission_point,
+                                 BENNU_PRIMITIVE_NONE, primary_span,
+                                 context_span);
+      return 0;
+    }
+    resources->reservation_ordinal += 1U;
+    if (resources->has_failure_ordinal != 0 &&
+        ordinal == resources->failure_ordinal) {
+      bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
+                                 1, bytes, admission_point,
+                                 BENNU_PRIMITIVE_NONE, primary_span,
+                                 context_span);
+      return 0;
+    }
+    table = (BennuValue *)BENNU_RUNTIME_MALLOC(count * sizeof(BennuValue));
+    if (table == NULL) {
+      bennu_set_resource_failure(resources, BENNU_FAILURE_ALLOCATION, 1, count,
+                                 1, bytes, admission_point,
+                                 BENNU_PRIMITIVE_NONE, primary_span,
+                                 context_span);
+      return 0;
+    }
+    (void)memset(table, 0, count * sizeof(BennuValue));
+  }
+  result->container = BENNU_TUPLE;
+  result->count = count;
+  result->data = table;
+  result->cleanup_index = count;
+  for (index = 0U; index < count; ++index) {
+    BennuValue *child = elements[index];
+    size_t nested_index = 0U;
+    table[index] = *child;
+    table[index].parent = result;
+    table[index].parent_index = index;
+    if (table[index].container == BENNU_TUPLE) {
+      BennuValue *nested = (BennuValue *)table[index].data;
+      for (nested_index = 0U; nested_index < table[index].count;
+           ++nested_index) {
+        nested[nested_index].parent = &table[index];
+        nested[nested_index].parent_index = nested_index;
+      }
+    }
+    (void)memset(child, 0, sizeof(*child));
+  }
+  resources->live_bytes = live_after;
+  return 1;
+}
+
+static void bennu_release(BennuResources *resources, BennuValue *value) {
+  BennuValue *current = value;
+  while (current != NULL) {
+    BennuValue *parent = NULL;
+    if (current->container == BENNU_TUPLE &&
+        current->cleanup_index != 0U) {
+      BennuValue *children = (BennuValue *)current->data;
+      current->cleanup_index -= 1U;
+      current = &children[current->cleanup_index];
+      continue;
+    }
+    parent = current->parent;
+    if (current->container == BENNU_VECTOR) {
+      const size_t bytes = current->count * bennu_width(current->type);
+      if (bytes <= resources->live_bytes) {
+        resources->live_bytes -= bytes;
+      }
+      BENNU_RUNTIME_FREE(current->data);
+    } else if (current->container == BENNU_TUPLE) {
+      const size_t bytes = current->count * 16U;
+      if (bytes <= resources->live_bytes) {
+        resources->live_bytes -= bytes;
+      }
+      BENNU_RUNTIME_FREE(current->data);
+    }
+    (void)memset(current, 0, sizeof(*current));
+    current = parent;
+  }
 }
 
 static BennuValue bennu_scalar_bool(uint8_t value) {
@@ -830,14 +951,65 @@ static int bennu_write_double(double value) {
   return bennu_write_double(double_precision);
 }
 
-static int bennu_print_value(const BennuValue *value) {
-  size_t index = 0U;
-  if (value->container == BENNU_SCALAR) {
-    if (!bennu_print_scalar(value->type, value->boolean, value->integer,
-                            value->double_precision)) {
+static int bennu_value_valid(const BennuValue *value) {
+  const BennuValue *current = value;
+  if (value == NULL || value->parent != NULL) {
+    return 0;
+  }
+  while (current != NULL) {
+    if (current->container == BENNU_SCALAR) {
+      if (current->type < BENNU_BOOL || current->type > BENNU_DOUBLE ||
+          current->count != 1U || current->data != NULL ||
+          current->cleanup_index != 0U) {
+        return 0;
+      }
+    } else if (current->container == BENNU_VECTOR) {
+      if (current->type < BENNU_BOOL || current->type > BENNU_DOUBLE ||
+          (current->count != 0U && current->data == NULL) ||
+          current->cleanup_index != 0U) {
+        return 0;
+      }
+    } else if (current->container == BENNU_TUPLE) {
+      const BennuValue *children = (const BennuValue *)current->data;
+      size_t index = 0U;
+      if ((current->count == 0U) != (current->data == NULL) ||
+          current->cleanup_index != current->count) {
+        return 0;
+      }
+      for (index = 0U; index < current->count; ++index) {
+        if (children[index].parent != current ||
+            children[index].parent_index != index) {
+          return 0;
+        }
+      }
+    } else {
       return 0;
     }
-    return bennu_write_text("\n");
+    if (current->container == BENNU_TUPLE && current->count != 0U) {
+      current = &((const BennuValue *)current->data)[0];
+      continue;
+    }
+    while (current->parent != NULL) {
+      const BennuValue *parent = current->parent;
+      const size_t next = current->parent_index + 1U;
+      if (next < parent->count) {
+        current = &((const BennuValue *)parent->data)[next];
+        break;
+      }
+      current = parent;
+    }
+    if (current->parent == NULL) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int bennu_print_atom(const BennuValue *value) {
+  size_t index = 0U;
+  if (value->container == BENNU_SCALAR) {
+    return bennu_print_scalar(value->type, value->boolean, value->integer,
+                              value->double_precision);
   }
   if (!bennu_write_text("(")) {
     return 0;
@@ -852,12 +1024,62 @@ static int bennu_print_value(const BennuValue *value) {
       return 0;
     }
   }
-  return bennu_write_text(")\n");
+  return bennu_write_text(")");
+}
+
+static int bennu_print_value(const BennuValue *value) {
+  const BennuValue *current = value;
+  if (!bennu_value_valid(value)) {
+    return 0;
+  }
+  while (current != NULL) {
+    if (current->container == BENNU_TUPLE) {
+      if (!bennu_write_text("[")) {
+        return 0;
+      }
+      if (current->count != 0U) {
+        current = &((const BennuValue *)current->data)[0];
+        continue;
+      }
+      if (!bennu_write_text("]")) {
+        return 0;
+      }
+    } else if (!bennu_print_atom(current)) {
+      return 0;
+    }
+    while (current->parent != NULL) {
+      const BennuValue *parent = current->parent;
+      const size_t next = current->parent_index + 1U;
+      if (next < parent->count) {
+        if (!bennu_write_text(" ")) {
+          return 0;
+        }
+        current = &((const BennuValue *)parent->data)[next];
+        break;
+      }
+      if (!bennu_write_text("]")) {
+        return 0;
+      }
+      current = parent;
+    }
+    if (current->parent == NULL) {
+      return bennu_write_text("\n");
+    }
+  }
+  return 0;
 }
 
 static const char *bennu_profile_name(BennuProfile profile) {
-  return profile == BENNU_PROFILE_BOUNDED_V1 ? "bounded-v1"
-                                             : "trusted-local-v1";
+  if (profile == BENNU_PROFILE_BOUNDED_V1) {
+    return "bounded-v1";
+  }
+  if (profile == BENNU_PROFILE_TRUSTED_LOCAL_V2) {
+    return "trusted-local-v2";
+  }
+  if (profile == BENNU_PROFILE_BOUNDED_V2) {
+    return "bounded-v2";
+  }
+  return "trusted-local-v1";
 }
 
 static const char *bennu_limit_name(BennuLimitKind limit) {
@@ -869,6 +1091,9 @@ static const char *bennu_limit_name(BennuLimitKind limit) {
   }
   if (limit == BENNU_LIMIT_MAX_WORK_UNITS) {
     return "max_work_units";
+  }
+  if (limit == BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES) {
+    return "max_tuple_table_bytes";
   }
   return "none";
 }
