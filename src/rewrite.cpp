@@ -1807,6 +1807,8 @@ struct RewriteEvaluationDiagnostic {
   RewriteSpan primitive_name;
   RewriteSpan call;
   std::vector<RewriteSpan> arguments;
+  bool has_operand;
+  RewriteSpan operand;
   std::size_t formatting_root_position;
   ValueInvariant formatting_invariant;
   ValueFormatError formatting_error;
@@ -1837,6 +1839,8 @@ struct RewriteLoweringNode {
   bool runtime_shape_check;
   std::size_t first_argument;
   std::size_t argument_count;
+  bool spreads_tuple;
+  std::size_t spread_operand;
   std::size_t use_count;
   bool retained_root;
   std::size_t first_element;
@@ -1914,6 +1918,8 @@ clone_rewrite_lowering_program(const RewriteLoweringProgram &source) {
         node.runtime_shape_check,
         node.first_argument,
         node.argument_count,
+        node.spreads_tuple,
+        node.spread_operand,
         node.use_count,
         node.retained_root,
         node.first_element,
@@ -2245,6 +2251,8 @@ RewriteEvaluationDiagnostic empty_rewrite_evaluation_diagnostic() {
       empty,
       empty,
       {},
+      false,
+      empty,
       0U,
       ValueInvariant::none,
       ValueFormatError::none};
@@ -2349,6 +2357,18 @@ Error lowering_arity_error(const PrimitiveDescriptor &descriptor,
   return error;
 }
 
+std::optional<std::size_t>
+prefix_tuple_operand(const RewriteProgram &program,
+                     const RewriteCall &call);
+std::size_t semantic_argument_count(const RewriteProgram &program,
+                                    const RewriteCall &call);
+std::size_t semantic_argument_node(const RewriteProgram &program,
+                                   const RewriteCall &call,
+                                   std::size_t position);
+RewriteSpan semantic_argument_span(const RewriteProgram &program,
+                                   const RewriteCall &call,
+                                   std::size_t position);
+
 bool lowering_type_accepts(const PrimitiveDescriptor &descriptor,
                            const PrimitiveSignature &signature,
                            std::size_t argument_index,
@@ -2374,10 +2394,12 @@ Error lowering_type_error(const RewriteProgram &program,
       ErrorKind::type_mismatch, descriptor,
       rewrite_source_location(call.name_span.begin));
   TypeErrorContext context;
-  context.actual_arguments.reserve(call.argument_count);
-  for (std::size_t index = 0U; index < call.argument_count; ++index) {
+  const std::size_t argument_count =
+      semantic_argument_count(program, call);
+  context.actual_arguments.reserve(argument_count);
+  for (std::size_t index = 0U; index < argument_count; ++index) {
     const RewriteLoweringNode &argument =
-        lowering.nodes[program.arguments[call.first_argument + index]];
+        lowering.nodes[semantic_argument_node(program, call, index)];
     TypeConstructionResult actual = clone_type(argument.structural_type);
     if (actual.ok) {
       context.actual_arguments.push_back(std::move(actual.type));
@@ -2389,7 +2411,7 @@ Error lowering_type_error(const RewriteProgram &program,
        signature_index < descriptor.signature_count; ++signature_index) {
     const PrimitiveSignature &signature =
         descriptor.signatures[signature_index];
-    if (signature.parameter_count != call.argument_count) {
+    if (signature.parameter_count != argument_count) {
       continue;
     }
     TypeErrorSignatureContext accepted;
@@ -2409,11 +2431,12 @@ Error lowering_type_error(const RewriteProgram &program,
     candidates.push_back(&signature);
   }
   for (std::size_t argument_index = 0U;
-       argument_index < call.argument_count && !candidates.empty();
+       argument_index < argument_count && !candidates.empty();
        ++argument_index) {
     std::vector<const PrimitiveSignature *> remaining;
     const RewriteLoweringNode &argument =
-        lowering.nodes[program.arguments[call.first_argument + argument_index]];
+        lowering.nodes[
+            semantic_argument_node(program, call, argument_index)];
     for (const PrimitiveSignature *candidate : candidates) {
       if (lowering_type_accepts(descriptor, *candidate, argument_index,
                                 argument)) {
@@ -2439,11 +2462,20 @@ RewriteEvaluationDiagnostic lowering_diagnostic(
   diagnostic.context = call.span;
   diagnostic.related = call.name_span;
   diagnostic.arguments.assign(
-      program.argument_spans.begin() +
-          static_cast<std::ptrdiff_t>(call.first_argument),
-      program.argument_spans.begin() + static_cast<std::ptrdiff_t>(
-                                           call.first_argument +
-                                           call.argument_count));
+      semantic_argument_count(program, call), RewriteSpan{});
+  for (std::size_t position = 0U;
+       position < diagnostic.arguments.size(); ++position) {
+    diagnostic.arguments[position] =
+        semantic_argument_span(program, call, position);
+  }
+  const std::optional<std::size_t> spread_operand =
+      prefix_tuple_operand(program, call);
+  if (spread_operand.has_value()) {
+    diagnostic.has_operand = true;
+    diagnostic.operand =
+        program.argument_spans[call.first_argument];
+    diagnostic.related = diagnostic.operand;
+  }
   diagnostic.primary = call.name_span;
   if ((error.kind == ErrorKind::type_mismatch ||
        error.kind == ErrorKind::shape_mismatch) &&
@@ -2483,6 +2515,8 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       false,
       0U,
       0U,
+      false,
+      0U,
       0U,
       false,
       node.first_element,
@@ -2497,6 +2531,55 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       vector ? std::string_view{"vector-literal"} : std::string_view{},
       node.declaration_name_span,
       std::move(structural_type)};
+}
+
+std::optional<std::size_t>
+prefix_tuple_operand(const RewriteProgram &program,
+                     const RewriteCall &call) {
+  if (call.syntax != RewriteCallSyntax::prefix ||
+      call.argument_count != 1U ||
+      call.first_argument >= program.arguments.size()) {
+    return std::nullopt;
+  }
+  const std::size_t operand = program.arguments[call.first_argument];
+  if (operand >= program.nodes.size() ||
+      program.nodes[operand].kind != RewriteNodeKind::tuple_literal) {
+    return std::nullopt;
+  }
+  return operand;
+}
+
+std::size_t semantic_argument_count(const RewriteProgram &program,
+                                    const RewriteCall &call) {
+  const std::optional<std::size_t> operand =
+      prefix_tuple_operand(program, call);
+  return operand.has_value() ? program.nodes[*operand].element_count
+                             : call.argument_count;
+}
+
+std::size_t semantic_argument_node(const RewriteProgram &program,
+                                   const RewriteCall &call,
+                                   std::size_t position) {
+  const std::optional<std::size_t> operand =
+      prefix_tuple_operand(program, call);
+  if (!operand.has_value()) {
+    return program.arguments[call.first_argument + position];
+  }
+  const RewriteNode &tuple = program.nodes[*operand];
+  return program.tuple_elements[tuple.first_element + position];
+}
+
+RewriteSpan semantic_argument_span(const RewriteProgram &program,
+                                   const RewriteCall &call,
+                                   std::size_t position) {
+  const std::optional<std::size_t> operand =
+      prefix_tuple_operand(program, call);
+  if (!operand.has_value()) {
+    return program.argument_spans[call.first_argument + position];
+  }
+  const RewriteNode &tuple = program.nodes[*operand];
+  return program.tuple_element_spans[
+      tuple.first_element_span + position];
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
@@ -2544,8 +2627,10 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
     lowering.nodes[root].retained_root = true;
   }
 
-  // Phase 4 is program-wide: no type or runtime work may hide a later arity
-  // failure.
+  // Phase 4 records dependency-independent arity candidates. Dependency-
+  // available spread candidates join this same ordered category in phase 5.
+  std::optional<std::size_t> arity_failure_node;
+  std::optional<RewriteEvaluationDiagnostic> arity_failure;
   for (std::size_t node_index = 0U; node_index < program.nodes.size();
        ++node_index) {
     const RewriteNode &node = program.nodes[node_index];
@@ -2561,28 +2646,58 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
           make_error(ErrorKind::invalid_primitive_table,
                      rewrite_source_location(call.name_span.begin)));
     }
+    if (prefix_tuple_operand(program, call).has_value()) {
+      continue;
+    }
     bool arity_exists = false;
+    const std::size_t argument_count =
+        semantic_argument_count(program, call);
     for (std::size_t signature_index = 0U;
          signature_index < descriptor->signature_count; ++signature_index) {
       if (descriptor->signatures[signature_index].parameter_count ==
-          call.argument_count) {
+          argument_count) {
         arity_exists = true;
         break;
       }
     }
     if (!arity_exists) {
-      return lowering_failure(
-          program, call,
-          lowering_arity_error(*descriptor, call.argument_count,
-                               rewrite_source_location(call.name_span.begin)));
+      if (!arity_failure.has_value()) {
+        arity_failure_node = node_index;
+        arity_failure = lowering_diagnostic(
+            program, call,
+            lowering_arity_error(
+                *descriptor, argument_count,
+                rewrite_source_location(call.name_span.begin)));
+      }
     }
   }
 
-  // Phase 5 selects every implementation from structural types only.
+  // Phase 5 selects every implementation from dependency-available
+  // structural types only.
+  std::vector<std::uint8_t> type_available(
+      program.nodes.size(), std::uint8_t{0U});
+  std::optional<RewriteEvaluationDiagnostic> type_failure;
   for (std::size_t node_index = 0U; node_index < program.nodes.size();
        ++node_index) {
+    if (arity_failure_node.has_value() &&
+        node_index > *arity_failure_node) {
+      break;
+    }
     const RewriteNode &node = program.nodes[node_index];
     if (node.kind == RewriteNodeKind::tuple_literal) {
+      bool children_available = true;
+      for (std::size_t element_index = 0U;
+           element_index < node.element_count; ++element_index) {
+        const std::size_t child =
+            program.tuple_elements[node.first_element + element_index];
+        if (type_available[child] == std::uint8_t{0U}) {
+          children_available = false;
+          break;
+        }
+      }
+      if (!children_available) {
+        continue;
+      }
       std::vector<TypeArena> element_types;
       element_types.reserve(node.element_count);
       for (std::size_t element_index = 0U;
@@ -2644,25 +2759,70 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
       }
       lowering.nodes[node_index].structural_type =
           std::move(tuple_type.type);
+      type_available[node_index] = std::uint8_t{1U};
       continue;
     }
     if (node.kind != RewriteNodeKind::primitive_call) {
+      type_available[node_index] = std::uint8_t{1U};
       continue;
     }
     const RewriteCall &call = program.calls[node.call_index];
     const PrimitiveDescriptor &descriptor = *find_primitive(*call.primitive);
+    const std::size_t argument_count =
+        semantic_argument_count(program, call);
+    const std::optional<std::size_t> spread_operand =
+        prefix_tuple_operand(program, call);
+    if (spread_operand.has_value() &&
+        type_available[*spread_operand] == std::uint8_t{0U}) {
+      continue;
+    }
+    bool arity_exists = false;
+    for (std::size_t signature_index = 0U;
+         signature_index < descriptor.signature_count; ++signature_index) {
+      if (descriptor.signatures[signature_index].parameter_count ==
+          argument_count) {
+        arity_exists = true;
+        break;
+      }
+    }
+    if (!arity_exists) {
+      if (spread_operand.has_value() &&
+          (!arity_failure_node.has_value() ||
+           node_index < *arity_failure_node)) {
+        arity_failure_node = node_index;
+        arity_failure = lowering_diagnostic(
+            program, call,
+            lowering_arity_error(
+                descriptor, argument_count,
+                rewrite_source_location(call.name_span.begin)));
+      }
+      continue;
+    }
+    bool arguments_available = true;
+    for (std::size_t argument_index = 0U;
+         argument_index < argument_count; ++argument_index) {
+      const std::size_t argument =
+          semantic_argument_node(program, call, argument_index);
+      if (type_available[argument] == std::uint8_t{0U}) {
+        arguments_available = false;
+        break;
+      }
+    }
+    if (!arguments_available) {
+      continue;
+    }
     const PrimitiveSignature *signature = nullptr;
     if (descriptor.lifting == LiftingMode::none) {
       for (std::size_t signature_index = 0U;
            signature_index < descriptor.signature_count; ++signature_index) {
         const PrimitiveSignature &candidate =
             descriptor.signatures[signature_index];
-        bool accepted = candidate.parameter_count == call.argument_count;
+        bool accepted = candidate.parameter_count == argument_count;
         for (std::size_t argument_index = 0U;
-             accepted && argument_index < call.argument_count;
+             accepted && argument_index < argument_count;
              ++argument_index) {
           const RewriteLoweringNode &argument = lowering.nodes[
-              program.arguments[call.first_argument + argument_index]];
+              semantic_argument_node(program, call, argument_index)];
           accepted = lowering_type_accepts(descriptor, candidate,
                                             argument_index, argument);
         }
@@ -2674,12 +2834,12 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
     } else {
       std::array<ScalarType, 2> actual_types{};
       bool has_structural_argument = false;
-      if (call.argument_count <= actual_types.size()) {
+      if (argument_count <= actual_types.size()) {
         for (std::size_t argument_index = 0U;
-             argument_index < call.argument_count; ++argument_index) {
+             argument_index < argument_count; ++argument_index) {
           const RewriteLoweringNode &argument =
               lowering.nodes[
-                  program.arguments[call.first_argument + argument_index]];
+                  semantic_argument_node(program, call, argument_index)];
           if (argument.cardinality == RewriteCardinality::tuple) {
             has_structural_argument = true;
           }
@@ -2689,7 +2849,7 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
           const SignatureSelectionResult selected = select_primitive_signature(
               descriptor,
               std::span<const ScalarType>(actual_types.data(),
-                                          call.argument_count));
+                                          argument_count));
           if (selected.status == SignatureSelectionStatus::success) {
             signature = selected.signature;
           }
@@ -2697,16 +2857,21 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
       }
     }
     if (signature == nullptr) {
-      return lowering_failure(
-          program, call,
-          lowering_type_error(program, call, descriptor, lowering));
+      if (!type_failure.has_value()) {
+        type_failure = lowering_diagnostic(
+            program, call,
+            lowering_type_error(program, call, descriptor, lowering));
+      }
+      continue;
     }
     RewriteLoweringNode &lowered = lowering.nodes[node_index];
     lowered.primitive_id = descriptor.id;
     lowered.implementation = signature->implementation;
     lowered.element_type = signature->result.element;
     lowered.first_argument = call.first_argument;
-    lowered.argument_count = call.argument_count;
+    lowered.argument_count = argument_count;
+    lowered.spreads_tuple = spread_operand.has_value();
+    lowered.spread_operand = spread_operand.value_or(0U);
     lowered.primary_span = call.name_span;
     lowered.source_location = rewrite_source_location(call.name_span.begin);
     lowered.admission_point = descriptor.name;
@@ -2717,6 +2882,15 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
         signature->result.container == ContainerKind::scalar
             ? make_scalar_type(signature->result.element)
             : make_vector_type(signature->result.element);
+    type_available[node_index] = std::uint8_t{1U};
+  }
+  if (arity_failure.has_value()) {
+    return RewriteLoweringResult{
+        false, {}, std::move(*arity_failure)};
+  }
+  if (type_failure.has_value()) {
+    return RewriteLoweringResult{
+        false, {}, std::move(*type_failure)};
   }
 
   // Phase 6 computes cardinality and rejects only lengths proven unequal.
@@ -2737,9 +2911,13 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
     bool has_dynamic = false;
     std::size_t vector_count = 0U;
     for (std::size_t argument_index = 0U;
-         argument_index < call.argument_count; ++argument_index) {
+         argument_index < lowered.argument_count; ++argument_index) {
       const RewriteLoweringNode &argument = lowering.nodes[
-          program.arguments[call.first_argument + argument_index]];
+          lowered.spreads_tuple
+              ? program.tuple_elements[
+                    program.nodes[lowered.spread_operand].first_element +
+                    argument_index]
+              : program.arguments[call.first_argument + argument_index]];
       if (argument.cardinality == RewriteCardinality::scalar) {
         continue;
       }
@@ -2969,11 +3147,17 @@ bool rewrite_lowering_invariants_hold(
     }
     seen_calls[source_node.call_index] = std::uint8_t{1U};
     const RewriteCall &call = program.calls[source_node.call_index];
+    const std::optional<std::size_t> spread_operand =
+        prefix_tuple_operand(program, call);
+    const std::size_t argument_count =
+        semantic_argument_count(program, call);
     if (call.first_argument > program.arguments.size() ||
         call.argument_count >
             program.arguments.size() - call.first_argument ||
         node.first_argument != call.first_argument ||
-        node.argument_count != call.argument_count ||
+        node.argument_count != argument_count ||
+        node.spreads_tuple != spread_operand.has_value() ||
+        node.spread_operand != spread_operand.value_or(0U) ||
         !spans_equal(source_node.span, call.span) ||
         !spans_equal(node.primary_span, call.name_span) ||
         !call.primitive.has_value() ||
@@ -2995,7 +3179,7 @@ bool rewrite_lowering_invariants_hold(
          ++signature_index) {
       const PrimitiveSignature &signature =
           descriptor->signatures[signature_index];
-      if (signature.parameter_count == call.argument_count &&
+      if (signature.parameter_count == argument_count &&
           signature.implementation == node.implementation &&
           signature.result.element == node.element_type) {
         implementation_matches = true;
@@ -3010,14 +3194,18 @@ bool rewrite_lowering_invariants_hold(
     for (std::size_t position = 0U; position < node.argument_count;
          ++position) {
       const std::size_t argument =
-          lowering.arguments[node.first_argument + position];
+          semantic_argument_node(program, call, position);
       if (argument >= node_index || argument >= lowering.nodes.size() ||
           !spans_equal(
-              program.argument_spans[node.first_argument + position],
+              semantic_argument_span(program, call, position),
               program.nodes[argument].span)) {
         return false;
       }
-      ++expected_uses[argument];
+    }
+    for (std::size_t position = 0U; position < call.argument_count;
+         ++position) {
+      ++expected_uses[
+          lowering.arguments[call.first_argument + position]];
     }
     if (!borrow) {
       bool signature_accepts = false;
@@ -3027,14 +3215,14 @@ bool rewrite_lowering_invariants_hold(
         const PrimitiveSignature &signature =
             descriptor->signatures[signature_index];
         bool accepts =
-            signature.parameter_count == call.argument_count &&
+            signature.parameter_count == argument_count &&
             signature.implementation == node.implementation;
         for (std::size_t position = 0U;
-             accepts && position < call.argument_count; ++position) {
+             accepts && position < argument_count; ++position) {
           accepts = lowering_type_accepts(
               *descriptor, signature, position,
               lowering.nodes[
-                  lowering.arguments[call.first_argument + position]]);
+                  semantic_argument_node(program, call, position)]);
         }
         if (accepts) {
           signature_accepts = true;
@@ -3057,10 +3245,10 @@ bool rewrite_lowering_invariants_hold(
         bool has_dynamic = false;
         std::size_t vector_count = 0U;
         for (std::size_t position = 0U;
-             position < call.argument_count; ++position) {
+             position < argument_count; ++position) {
           const RewriteLoweringNode &argument =
               lowering.nodes[
-                  lowering.arguments[call.first_argument + position]];
+                  semantic_argument_node(program, call, position)];
           if (argument.cardinality == RewriteCardinality::scalar) {
             continue;
           }
@@ -3100,7 +3288,7 @@ bool rewrite_lowering_invariants_hold(
     } else if (*call.primitive != PrimitiveId::inc ||
                node.implementation !=
                    PrimitiveImplementation::inc_integer ||
-               call.argument_count != 1U ||
+               argument_count != 1U ||
                node.cardinality != RewriteCardinality::scalar ||
                node.element_type != ScalarType::integer ||
                node.element_count != 1U ||
@@ -3293,15 +3481,25 @@ RewriteEvaluationDiagnostic application_rewrite_diagnostic(
   diagnostic.context = call.span;
   diagnostic.related = call.name_span;
   diagnostic.arguments.assign(
-      program.argument_spans.begin() +
-          static_cast<std::ptrdiff_t>(call.first_argument),
-      program.argument_spans.begin() + static_cast<std::ptrdiff_t>(
-                                           call.first_argument +
-                                           call.argument_count));
+      semantic_argument_count(program, call), RewriteSpan{});
+  for (std::size_t position = 0U;
+       position < diagnostic.arguments.size(); ++position) {
+    diagnostic.arguments[position] =
+        semantic_argument_span(program, call, position);
+  }
+  const std::optional<std::size_t> spread_operand =
+      prefix_tuple_operand(program, call);
+  if (spread_operand.has_value()) {
+    diagnostic.has_operand = true;
+    diagnostic.operand =
+        program.argument_spans[call.first_argument];
+    diagnostic.related = diagnostic.operand;
+  }
 
   diagnostic.primary = call.name_span;
   if ((error.kind == ErrorKind::type_mismatch ||
-       error.kind == ErrorKind::shape_mismatch) &&
+       error.kind == ErrorKind::shape_mismatch ||
+       prefix_tuple_operand(program, call).has_value()) &&
       error.argument_position.has_value() &&
       *error.argument_position >= 1U &&
       *error.argument_position <= diagnostic.arguments.size()) {
@@ -3317,8 +3515,8 @@ std::optional<Error> rewrite_runtime_shape_error(
     const RewriteLoweringNode &call,
     const RewriteLoweringProgram &lowering,
     const PrimitiveDescriptor &descriptor,
-    std::span<const Value *const> arguments) {
-  if (!call.runtime_shape_check) {
+    std::span<const TypedPrimitiveArgument> arguments) {
+  if (!call.runtime_shape_check || call.spreads_tuple) {
     return std::nullopt;
   }
 
@@ -3341,7 +3539,7 @@ std::optional<Error> rewrite_runtime_shape_error(
       continue;
     }
     std::size_t actual_count = 0U;
-    if (!value_length(*arguments[position], actual_count).ok) {
+    if (!value_length(*arguments[position].owner, actual_count).ok) {
       continue;
     }
     if (!expected_count.has_value()) {
@@ -3556,6 +3754,21 @@ Error public_error_from_diagnostic(
     }
     if (!error.related_span.has_value()) {
       error.related_span = rewrite_source_span(diagnostic.related);
+    }
+    if (diagnostic.primitive_name.begin.offset !=
+        diagnostic.primitive_name.end.offset) {
+      error.primitive_span =
+          rewrite_source_span(diagnostic.primitive_name);
+    }
+    if (diagnostic.call.begin.offset != diagnostic.call.end.offset) {
+      error.call_span = rewrite_source_span(diagnostic.call);
+    }
+    if (diagnostic.has_operand) {
+      error.operand_span = rewrite_source_span(diagnostic.operand);
+    }
+    error.semantic_origins.reserve(diagnostic.arguments.size());
+    for (const RewriteSpan origin : diagnostic.arguments) {
+      error.semantic_origins.push_back(rewrite_source_span(origin));
     }
     return error;
   }
@@ -3883,8 +4096,10 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
 
   std::size_t maximum_call_arity = 0U;
   for (const RewriteCall &call : parsed.program.calls) {
-    if (call.argument_count > maximum_call_arity) {
-      maximum_call_arity = call.argument_count;
+    const std::size_t argument_count =
+        semantic_argument_count(parsed.program, call);
+    if (argument_count > maximum_call_arity) {
+      maximum_call_arity = argument_count;
     }
   }
   for (const RewriteNode &node : parsed.program.nodes) {
@@ -3893,7 +4108,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       maximum_call_arity = node.element_count;
     }
   }
-  std::vector<const Value *> arguments;
+  std::vector<TypedPrimitiveArgument> arguments;
   arguments.reserve(maximum_call_arity);
   std::vector<Value> tuple_arguments;
   tuple_arguments.reserve(maximum_call_arity);
@@ -4082,7 +4297,31 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         invalid_forward_use = true;
         break;
       }
-      arguments.push_back(&node_values[argument_node]);
+    }
+    if (!invalid_forward_use && lowered_node.spreads_tuple) {
+      const Value &operand = node_values[lowered_node.spread_operand];
+      const ValueTupleArityResult arity = value_tuple_arity(operand);
+      if (!arity.ok || arity.arity != lowered_node.argument_count) {
+        invalid_forward_use = true;
+      } else {
+        for (std::size_t position = 0U;
+             position < lowered_node.argument_count; ++position) {
+          const std::size_t element_node =
+              operand.tuple.child_indexes.storage.get()[
+                  operand.tuple.first_child + position];
+          arguments.push_back(TypedPrimitiveArgument{
+              &operand, element_node});
+        }
+      }
+    } else if (!invalid_forward_use) {
+      for (std::size_t argument_index = 0U;
+           argument_index < call.argument_count; ++argument_index) {
+        const std::size_t argument_node =
+            parsed.program.arguments[
+                call.first_argument + argument_index];
+        arguments.push_back(TypedPrimitiveArgument{
+            &node_values[argument_node], std::nullopt});
+      }
     }
     if (invalid_forward_use) {
       arguments.clear();
@@ -4124,8 +4363,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         lowered_node.operation ==
             RewriteLoweringOperation::immutable_borrow_failure) {
       bool valid_arguments = true;
-      for (const Value *argument : arguments) {
-        if (!validate_value(*argument).ok) {
+      for (const TypedPrimitiveArgument &argument : arguments) {
+        if (!validate_value(*argument.owner).ok) {
           valid_arguments = false;
           break;
         }
@@ -4159,6 +4398,12 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       applied = apply_typed_primitive(
           application_context, *descriptor, lowered_node.implementation,
           arguments, rewrite_source_location(call.name_span.begin));
+    }
+    if (!applied.ok && lowered_node.spreads_tuple &&
+        lowered_node.argument_count == 1U &&
+        applied.error.kind == ErrorKind::domain_error &&
+        !applied.error.argument_position.has_value()) {
+      applied.error.argument_position = 1U;
     }
     scalar_kernel_invocations = application_context.scalar_kernel_invocations;
     const std::span<const std::size_t> argument_nodes(
@@ -4437,7 +4682,11 @@ void append_resource_initialization(
       "{BENNU_INT, UINT8_C(0), INT64_C(0), 0.0}, "
       "BENNU_PRIMITIVE_NONE, {0U, {BENNU_INT, BENNU_INT}, BENNU_INT}, "
       "0U, {{0U, 1U, 1U}, {0U, 1U, 1U}}, "
-      "{{0U, 1U, 1U}, {0U, 1U, 1U}}};\n";
+      "{{0U, 1U, 1U}, {0U, 1U, 1U}}, "
+      "{{0U, 1U, 1U}, {0U, 1U, 1U}}, 0, "
+      "{{0U, 1U, 1U}, {0U, 1U, 1U}}, 0U, "
+      "{{{0U, 1U, 1U}, {0U, 1U, 1U}}, "
+      "{{0U, 1U, 1U}, {0U, 1U, 1U}}}};\n";
 }
 
 void append_source_location(std::string &source, SourceLocation location) {
@@ -4456,6 +4705,29 @@ void append_source_span(std::string &source, RewriteSpan span) {
   source += ", ";
   append_source_location(source, rewrite_source_location(span.end));
   source.push_back(')');
+}
+
+void append_spread_provenance_arguments(
+    std::string &source, const RewriteLoweringNode &call,
+    const RewriteLoweringProgram &program) {
+  const RewriteLoweringNode &operand =
+      program.nodes[call.spread_operand];
+  source += ", ";
+  append_source_span(source, call.primary_span);
+  source += ", ";
+  append_source_span(source, operand.source_span);
+  source += ", ";
+  append_c_unsigned(source, call.argument_count);
+  source += ", ";
+  append_source_span(
+      source, call.argument_count >= 1U
+                  ? program.tuple_element_spans[operand.first_element]
+                  : operand.source_span);
+  source += ", ";
+  append_source_span(
+      source, call.argument_count >= 2U
+                  ? program.tuple_element_spans[operand.first_element + 1U]
+                  : operand.source_span);
 }
 
 void append_scalar_node(std::string &source, std::size_t node_index,
@@ -4537,11 +4809,14 @@ void append_tuple_node(std::string &source, std::size_t node_index,
 
 void append_shape_requirement(
     std::string &source, const RewriteLoweringNode &call,
+    const RewriteLoweringProgram &program,
     const RewriteLoweringNode &argument, std::size_t argument_node,
     std::size_t argument_position, std::optional<std::size_t> static_count,
     std::optional<std::size_t> dynamic_anchor,
     std::span<const std::size_t> final_use_releases) {
-  source += "  if (!bennu_require_shape(&bennu_resources, \"";
+  source += call.spreads_tuple
+                ? "  if (!bennu_require_spread_shape(&bennu_resources, \""
+                : "  if (!bennu_require_shape(&bennu_resources, \"";
   source += call.admission_point;
   source += "\", ";
   source += c_primitive_id_name(*call.primitive_id);
@@ -4550,13 +4825,38 @@ void append_shape_requirement(
   source += ", ";
   if (static_count.has_value()) {
     append_c_unsigned(source, *static_count);
+  } else if (call.spreads_tuple) {
+    std::size_t anchor_position = 0U;
+    const RewriteLoweringNode &operand =
+        program.nodes[call.spread_operand];
+    for (; anchor_position < call.argument_count; ++anchor_position) {
+      if (program.tuple_elements[
+              operand.first_element + anchor_position] ==
+          *dynamic_anchor) {
+        break;
+      }
+    }
+    source += "((BennuValue *)bennu_values[" +
+              std::to_string(call.spread_operand) +
+              "].data)[" + std::to_string(anchor_position) + "].count";
   } else {
     source += "bennu_values[" + std::to_string(*dynamic_anchor) + "].count";
   }
-  source += ", &bennu_values[" + std::to_string(argument_node) + "], ";
+  source += ", ";
+  if (call.spreads_tuple) {
+    source += "&((BennuValue *)bennu_values[" +
+              std::to_string(call.spread_operand) +
+              "].data)[" + std::to_string(argument_position - 1U) + "]";
+  } else {
+    source += "&bennu_values[" + std::to_string(argument_node) + "]";
+  }
+  source += ", ";
   append_source_span(source, argument.source_span);
   source += ", ";
   append_source_span(source, call.source_span);
+  if (call.spreads_tuple) {
+    append_spread_provenance_arguments(source, call, program);
+  }
   source += ")) {\n";
   for (const std::size_t release : final_use_releases) {
     source += "    bennu_release(&bennu_resources, &bennu_values[" +
@@ -4564,6 +4864,18 @@ void append_shape_requirement(
   }
   source += "    goto bennu_failure;\n"
             "  }\n";
+}
+
+std::size_t lowered_semantic_argument_node(
+    const RewriteLoweringNode &call,
+    const RewriteLoweringProgram &program,
+    std::size_t position) {
+  if (!call.spreads_tuple) {
+    return program.arguments[call.first_argument + position];
+  }
+  const RewriteLoweringNode &operand =
+      program.nodes[call.spread_operand];
+  return program.tuple_elements[operand.first_element + position];
 }
 
 void append_call_shape_checks(std::string &source,
@@ -4578,7 +4890,7 @@ void append_call_shape_checks(std::string &source,
   bool has_static_anchor = false;
   for (std::size_t position = 0U; position < call.argument_count; ++position) {
     const std::size_t argument_node =
-        program.arguments[call.first_argument + position];
+        lowered_semantic_argument_node(call, program, position);
     if (program.nodes[argument_node].cardinality ==
         RewriteCardinality::static_vector) {
       has_static_anchor = true;
@@ -4589,7 +4901,7 @@ void append_call_shape_checks(std::string &source,
   std::optional<std::size_t> dynamic_anchor;
   for (std::size_t position = 0U; position < call.argument_count; ++position) {
     const std::size_t argument_node =
-        program.arguments[call.first_argument + position];
+        lowered_semantic_argument_node(call, program, position);
     const RewriteLoweringNode &argument = program.nodes[argument_node];
     if (argument.cardinality != RewriteCardinality::dynamic_vector) {
       continue;
@@ -4599,7 +4911,7 @@ void append_call_shape_checks(std::string &source,
       continue;
     }
     append_shape_requirement(
-        source, call, argument, argument_node, position + 1U,
+        source, call, program, argument, argument_node, position + 1U,
         has_static_anchor ? std::optional<std::size_t>{call.element_count}
                           : std::nullopt,
         dynamic_anchor, final_use_releases);
@@ -4612,21 +4924,29 @@ void complete_lowered_consumer_emission(
     std::vector<std::size_t> &remaining_uses,
     std::vector<std::size_t> &final_use_releases) {
   final_use_releases.clear();
-  for (std::size_t position = 0U; position < node.argument_count;
-       ++position) {
+  const std::size_t consumed_count =
+      node.spreads_tuple ? 1U : node.argument_count;
+  for (std::size_t position = 0U; position < consumed_count; ++position) {
     const std::size_t argument_node =
-        program.arguments[node.first_argument + position];
+        node.spreads_tuple
+            ? node.spread_operand
+            : program.arguments[node.first_argument + position];
     --remaining_uses[argument_node];
   }
-  for (std::size_t end = node.argument_count; end != 0U; --end) {
+  for (std::size_t end = consumed_count; end != 0U; --end) {
     const std::size_t position = end - 1U;
     const std::size_t argument_node =
-        program.arguments[node.first_argument + position];
+        node.spreads_tuple
+            ? node.spread_operand
+            : program.arguments[node.first_argument + position];
     bool later_occurrence = false;
     for (std::size_t later = position + 1U;
-         later < node.argument_count; ++later) {
-      if (program.arguments[node.first_argument + later] ==
-          argument_node) {
+         later < consumed_count; ++later) {
+      const std::size_t later_node =
+          node.spreads_tuple
+              ? node.spread_operand
+              : program.arguments[node.first_argument + later];
+      if (later_node == argument_node) {
         later_occurrence = true;
         break;
       }
@@ -4653,20 +4973,38 @@ void append_call_node(std::string &source, std::size_t node_index,
                       const RewriteLoweringProgram &program,
                       std::vector<std::size_t> &remaining_uses,
                       std::vector<std::size_t> &final_use_releases) {
-  const std::size_t left = program.arguments[node.first_argument];
-  const std::size_t right = node.argument_count == 2U
-                                ? program.arguments[node.first_argument + 1U]
-                                : 0U;
   complete_lowered_consumer_emission(
       node, program, remaining_uses, final_use_releases);
   append_call_shape_checks(source, node, program, final_use_releases);
-  source += "  if (!bennu_apply(&bennu_resources, ";
+  source += node.spreads_tuple
+                ? "  if (!bennu_apply_spread(&bennu_resources, "
+                : "  if (!bennu_apply(&bennu_resources, ";
   source += c_implementation_name(node.implementation);
-  source += ", &bennu_values[" + std::to_string(node_index) +
-            "], &bennu_values[" + std::to_string(left) + "], ";
-  source += node.argument_count == 2U
-                ? "&bennu_values[" + std::to_string(right) + "]"
-                : "NULL";
+  source += ", &bennu_values[" + std::to_string(node_index) + "], ";
+  const auto append_argument = [&source, &node, &program](
+                                   std::size_t position) {
+    if (node.spreads_tuple) {
+      source += "&((BennuValue *)bennu_values[" +
+                std::to_string(node.spread_operand) +
+                "].data)[" + std::to_string(position) + "]";
+    } else {
+      source += "&bennu_values[" +
+                std::to_string(program.arguments[
+                    node.first_argument + position]) +
+                "]";
+    }
+  };
+  if (node.argument_count == 0U) {
+    source += "NULL, NULL";
+  } else {
+    append_argument(0U);
+    source += ", ";
+    if (node.argument_count == 2U) {
+      append_argument(1U);
+    } else {
+      source += "NULL";
+    }
+  }
   source += ", ";
   append_c_unsigned(source, node.argument_count);
   source += ", \"";
@@ -4674,9 +5012,20 @@ void append_call_node(std::string &source, std::size_t node_index,
   source += "\", ";
   source += c_primitive_id_name(*node.primitive_id);
   source += ", ";
-  append_source_span(source, node.primary_span);
+  if (node.spreads_tuple && node.argument_count == 1U) {
+    const RewriteLoweringNode &operand =
+        program.nodes[node.spread_operand];
+    append_source_span(
+        source,
+        program.tuple_element_spans[operand.first_element]);
+  } else {
+    append_source_span(source, node.primary_span);
+  }
   source += ", ";
   append_source_span(source, node.source_span);
+  if (node.spreads_tuple) {
+    append_spread_provenance_arguments(source, node, program);
+  }
   source += ")) {\n";
   append_final_use_releases(source, final_use_releases, "    ");
   source += "    goto bennu_failure;\n"
@@ -4925,7 +5274,9 @@ CEmissionResult emit_rewrite_c_source_impl(
   generated += "  (void)bennu_literal;\n"
                "  (void)bennu_tuple;\n"
                "  (void)bennu_apply;\n"
+               "  (void)bennu_apply_spread;\n"
                "  (void)bennu_require_shape;\n"
+               "  (void)bennu_require_spread_shape;\n"
                "  (void)bennu_source_location;\n"
                "  (void)bennu_source_span;\n"
                "  (void)bennu_print_value;\n";
@@ -5840,6 +6191,10 @@ std::string rewrite_lowering_snapshot(const RewriteLoweringProgram &program) {
     append_size(snapshot, node.first_argument);
     snapshot.push_back('+');
     append_size(snapshot, node.argument_count);
+    if (node.spreads_tuple) {
+      snapshot.append("/spread=");
+      append_size(snapshot, node.spread_operand);
+    }
     snapshot.append("/uses=");
     append_size(snapshot, node.use_count);
     snapshot.append("/retained_root=");
@@ -8778,16 +9133,21 @@ TEST_CASE("TUP-050-DIRECT-PRESERVATION") {
   CHECK(adjacent.formatted[0] == "3");
   release_rewrite_evaluation_result(adjacent);
 
-  for (const std::string_view source :
-       std::array<std::string_view, 2>{{"add [1 2]", "add []"}}) {
-    RewriteEvaluationResult prefix =
-        evaluate_rewrite_source(source, trusted_v2);
-    REQUIRE_FALSE(prefix.ok);
-    CHECK(prefix.diagnostic.error.kind == ErrorKind::arity_error);
-    REQUIRE(prefix.diagnostic.error.arity.has_value());
-    CHECK(prefix.diagnostic.error.arity->supplied == 1U);
-    CHECK(prefix.scalar_kernel_invocations == 0U);
-  }
+  RewriteEvaluationResult prefix =
+      evaluate_rewrite_source("add [1 2]", trusted_v2);
+  REQUIRE(prefix.ok);
+  REQUIRE(prefix.formatted.size() == 1U);
+  CHECK(prefix.formatted[0] == "3");
+  CHECK(prefix.scalar_kernel_invocations == 1U);
+  release_rewrite_evaluation_result(prefix);
+
+  RewriteEvaluationResult empty_prefix =
+      evaluate_rewrite_source("add []", trusted_v2);
+  REQUIRE_FALSE(empty_prefix.ok);
+  CHECK(empty_prefix.diagnostic.error.kind == ErrorKind::arity_error);
+  REQUIRE(empty_prefix.diagnostic.error.arity.has_value());
+  CHECK(empty_prefix.diagnostic.error.arity->supplied == 0U);
+  CHECK(empty_prefix.scalar_kernel_invocations == 0U);
 
   const std::array<Value, 1> arguments{{make_int_value(4)}};
   const std::array<std::string_view, 3> parameter_sources{{
@@ -8806,6 +9166,275 @@ TEST_CASE("TUP-050-DIRECT-PRESERVATION") {
     CHECK(parameter.formatted[0] == parameter_expected[index]);
     release_rewrite_evaluation_result(parameter);
   }
+}
+
+TEST_CASE("TUP-010-STATIC-SPREAD") {
+  const RewriteEvaluationCreationData trusted_v2{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+
+  RewriteEvaluationResult agreement = evaluate_rewrite_source(
+      "add [1 2]\nadd[1 2]\ninc [5]\ninc 5", trusted_v2);
+  REQUIRE(agreement.ok);
+  REQUIRE(agreement.formatted.size() == 4U);
+  CHECK(agreement.formatted[0] == "3");
+  CHECK(agreement.formatted[1] == "3");
+  CHECK(agreement.formatted[2] == "6");
+  CHECK(agreement.formatted[3] == "6");
+  CHECK(agreement.scalar_kernel_invocations == 4U);
+  CHECK(agreement.resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(agreement);
+
+  RewriteParseResult parsed = parse_rewrite("add [1 2]");
+  REQUIRE(parsed.ok);
+  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  REQUIRE(lowered.ok);
+  CHECK(rewrite_lowering_invariants_hold(parsed.program, lowered.program));
+  REQUIRE(lowered.program.nodes.size() == 4U);
+  const RewriteLoweringNode &spread_call = lowered.program.nodes[3U];
+  CHECK(spread_call.spreads_tuple);
+  CHECK(spread_call.spread_operand == 2U);
+  CHECK(spread_call.argument_count == 2U);
+  CHECK(spread_call.implementation ==
+        PrimitiveImplementation::add_integer);
+
+  RewriteEvaluationResult singleton =
+      evaluate_rewrite_source("inc [41]", trusted_v2);
+  REQUIRE(singleton.ok);
+  REQUIRE(singleton.formatted.size() == 1U);
+  CHECK(singleton.formatted[0] == "42");
+  release_rewrite_evaluation_result(singleton);
+
+  RewriteEvaluationResult empty =
+      evaluate_rewrite_source("inc []", trusted_v2);
+  REQUIRE_FALSE(empty.ok);
+  CHECK(empty.diagnostic.error.kind == ErrorKind::arity_error);
+  REQUIRE(empty.diagnostic.error.arity.has_value());
+  CHECK(empty.diagnostic.error.arity->supplied == 0U);
+
+  RewriteEvaluationResult nested =
+      evaluate_rewrite_source("add [1 [2 3]]", trusted_v2);
+  REQUIRE_FALSE(nested.ok);
+  CHECK(nested.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(nested.diagnostic.error.argument_position == 2U);
+  REQUIRE(nested.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(nested.diagnostic.arguments[0], 6U, 1U, 6U, 7U, 1U,
+                7U));
+  CHECK(span_is(nested.diagnostic.arguments[1], 8U, 1U, 8U, 13U, 1U,
+                13U));
+  CHECK(span_is(nested.diagnostic.primary, 8U, 1U, 8U, 13U, 1U,
+                13U));
+  CHECK(span_is(nested.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(nested.diagnostic.call, 1U, 1U, 1U, 14U, 1U, 14U));
+
+  RewriteEvaluationResult computed =
+      evaluate_rewrite_source("add [inc 1 true]", trusted_v2);
+  REQUIRE_FALSE(computed.ok);
+  CHECK(computed.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(computed.diagnostic.error.argument_position == 2U);
+  REQUIRE(computed.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(computed.diagnostic.arguments[0], 6U, 1U, 6U, 11U, 1U,
+                11U));
+  CHECK(span_is(computed.diagnostic.arguments[1], 12U, 1U, 12U, 16U,
+                1U, 16U));
+  CHECK(span_is(computed.diagnostic.primary, 12U, 1U, 12U, 16U, 1U,
+                16U));
+  CHECK(computed.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult dependent = evaluate_rewrite_source(
+      "add [add[1 true]]", trusted_v2);
+  REQUIRE_FALSE(dependent.ok);
+  CHECK(dependent.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(span_is(dependent.diagnostic.primary, 12U, 1U, 12U, 16U, 1U,
+                16U));
+
+  RewriteEvaluationResult cross_root = evaluate_rewrite_source(
+      "add [1 true]\nadd [1]", trusted_v2);
+  REQUIRE_FALSE(cross_root.ok);
+  CHECK(cross_root.diagnostic.error.kind == ErrorKind::arity_error);
+  REQUIRE(cross_root.diagnostic.error.arity.has_value());
+  CHECK(cross_root.diagnostic.error.arity->supplied == 1U);
+  CHECK(cross_root.diagnostic.error.location.line == 2U);
+  CHECK(cross_root.scalar_kernel_invocations == 0U);
+
+  RewriteEvaluationResult mixed_cross_root = evaluate_rewrite_source(
+      "add [1]\ninc[1 2]", trusted_v2);
+  REQUIRE_FALSE(mixed_cross_root.ok);
+  CHECK(mixed_cross_root.diagnostic.error.kind == ErrorKind::arity_error);
+  REQUIRE(mixed_cross_root.diagnostic.error.arity.has_value());
+  CHECK(mixed_cross_root.diagnostic.error.arity->supplied == 1U);
+  CHECK(mixed_cross_root.diagnostic.error.location.line == 1U);
+  CHECK(span_is(mixed_cross_root.diagnostic.call, 1U, 1U, 1U, 8U, 1U,
+                8U));
+
+  RewriteEvaluationResult dependency_cross_root = evaluate_rewrite_source(
+      "add [add[1 true]]\nadd [1]", trusted_v2);
+  REQUIRE_FALSE(dependency_cross_root.ok);
+  CHECK(dependency_cross_root.diagnostic.error.kind ==
+        ErrorKind::arity_error);
+  REQUIRE(dependency_cross_root.diagnostic.error.arity.has_value());
+  CHECK(dependency_cross_root.diagnostic.error.arity->supplied == 1U);
+  CHECK(dependency_cross_root.diagnostic.error.location.line == 2U);
+
+  RewriteEvaluationResult domain = evaluate_rewrite_source(
+      "inc [9223372036854775807]", trusted_v2);
+  REQUIRE_FALSE(domain.ok);
+  CHECK(domain.diagnostic.error.kind == ErrorKind::domain_error);
+  CHECK(domain.diagnostic.error.argument_position == 1U);
+  CHECK(span_is(domain.diagnostic.primary, 6U, 1U, 6U, 25U, 1U, 25U));
+  CHECK(span_is(domain.diagnostic.primitive_name, 1U, 1U, 1U, 4U, 1U,
+                4U));
+  CHECK(span_is(domain.diagnostic.call, 1U, 1U, 1U, 26U, 1U, 26U));
+  CHECK(domain.resources.live_evaluation_bytes == 0U);
+
+  RewriteEvaluationResult vectors = evaluate_rewrite_source(
+      "add [iota[3] iota[3]]", trusted_v2);
+  REQUIRE(vectors.ok);
+  REQUIRE(vectors.formatted.size() == 1U);
+  CHECK(vectors.formatted[0] == "(2 4 6)");
+  CHECK(vectors.resources.live_evaluation_bytes == 24U);
+  release_rewrite_evaluation_result(vectors);
+
+  for (std::size_t ordinal = 0U; ordinal < 4U; ++ordinal) {
+    const RewriteEvaluationCreationData failure{
+        ExecutionProfile::trusted_local_v2,
+        ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                       std::nullopt},
+        AllocationFailureInjection{ordinal}};
+    RewriteEvaluationResult failed =
+        evaluate_rewrite_source("add [(1) (2)]", failure);
+    INFO(ordinal);
+    REQUIRE_FALSE(failed.ok);
+    CHECK(failed.diagnostic.error.kind == ErrorKind::resource_error);
+    REQUIRE(failed.diagnostic.error.resource.has_value());
+    CHECK(failed.diagnostic.error.resource->reason ==
+          ResourceErrorReason::allocation_unavailable);
+    CHECK(failed.resources.reservation_ordinal == ordinal + 1U);
+    CHECK(failed.resources.live_evaluation_bytes == 0U);
+    CHECK(failed.values.empty());
+    CHECK(failed.formatted.empty());
+  }
+
+  CEmissionResult emitted = emit_rewrite_c_source_impl(
+      "add [1 2]",
+      c_backend_configuration(EvaluationConfiguration{
+          trusted_v2.profile, trusted_v2.limits,
+          trusted_v2.allocation_failure}),
+      nullptr, nullptr);
+  REQUIRE(emitted.ok);
+  CHECK(emitted.source.find(
+            "&((BennuValue *)bennu_values[2].data)[0]") !=
+        std::string::npos);
+  CHECK(emitted.source.find(
+            "&((BennuValue *)bennu_values[2].data)[1]") !=
+        std::string::npos);
+  const std::size_t apply_position =
+      emitted.source.find("BENNU_IMPL_ADD_INT");
+  const std::size_t release_position = emitted.source.find(
+      "bennu_release(&bennu_resources, &bennu_values[2]);",
+      apply_position);
+  REQUIRE(apply_position != std::string::npos);
+  REQUIRE(release_position != std::string::npos);
+  CHECK(apply_position < release_position);
+}
+
+TEST_CASE("TUP-011-SPREAD-RUNTIME") {
+  const RewriteEvaluationCreationData trusted_v2{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult vectors = evaluate_rewrite_source(
+      "add [iota[3] iota[3]]", trusted_v2);
+  REQUIRE(vectors.ok);
+  REQUIRE(vectors.formatted.size() == 1U);
+  CHECK(vectors.formatted[0] == "(2 4 6)");
+  CHECK(vectors.resources.live_evaluation_bytes == 24U);
+  release_rewrite_evaluation_result(vectors);
+}
+
+TEST_CASE("TUP-013-PROVENANCE") {
+  const RewriteEvaluationCreationData trusted_v2{
+      ExecutionProfile::trusted_local_v2,
+      ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                     std::nullopt},
+      AllocationFailureInjection{std::nullopt}};
+  RewriteEvaluationResult computed =
+      evaluate_rewrite_source("add [inc 1 true]", trusted_v2);
+  REQUIRE_FALSE(computed.ok);
+  CHECK(computed.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(computed.diagnostic.error.argument_position == 2U);
+  REQUIRE(computed.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(computed.diagnostic.arguments[0], 6U, 1U, 6U, 11U,
+                1U, 11U));
+  CHECK(span_is(computed.diagnostic.primary, 12U, 1U, 12U, 16U, 1U,
+                16U));
+  CHECK(span_is(computed.diagnostic.primitive_name, 1U, 1U, 1U, 4U,
+                1U, 4U));
+  CHECK(span_is(computed.diagnostic.call, 1U, 1U, 1U, 17U, 1U, 17U));
+  REQUIRE(computed.diagnostic.has_operand);
+  CHECK(span_is(computed.diagnostic.operand, 5U, 1U, 5U, 17U, 1U,
+                17U));
+
+  constexpr std::string_view runtime_source =
+      "add [inc 9223372036854775806 1]";
+  RewriteEvaluationResult runtime =
+      evaluate_rewrite_source(runtime_source, trusted_v2);
+  REQUIRE_FALSE(runtime.ok);
+  CHECK(runtime.diagnostic.error.kind == ErrorKind::domain_error);
+  REQUIRE(runtime.diagnostic.has_operand);
+  CHECK(span_is(runtime.diagnostic.primitive_name, 1U, 1U, 1U, 4U,
+                1U, 4U));
+  CHECK(span_is(runtime.diagnostic.call, 1U, 1U, 1U, 32U, 1U, 32U));
+  CHECK(span_is(runtime.diagnostic.operand, 5U, 1U, 5U, 32U, 1U,
+                32U));
+  REQUIRE(runtime.diagnostic.arguments.size() == 2U);
+  CHECK(span_is(runtime.diagnostic.arguments[0], 6U, 1U, 6U, 29U,
+                1U, 29U));
+  CHECK(span_is(runtime.diagnostic.arguments[1], 30U, 1U, 30U, 31U,
+                1U, 31U));
+
+  ProgramResult public_runtime =
+      evaluate_source(runtime_source);
+  REQUIRE_FALSE(public_runtime.ok);
+  const Error &public_error = public_runtime.error;
+  REQUIRE(public_error.primitive_span.has_value());
+  REQUIRE(public_error.call_span.has_value());
+  REQUIRE(public_error.operand_span.has_value());
+  REQUIRE(public_error.semantic_origins.size() == 2U);
+  const auto source_span_is = [](const SourceSpan &span,
+                                 std::size_t begin,
+                                 std::size_t end) {
+    return span.begin.offset == begin && span.begin.line == 1U &&
+           span.begin.column == begin && span.end.offset == end &&
+           span.end.line == 1U && span.end.column == end;
+  };
+  CHECK(source_span_is(*public_error.primitive_span, 1U, 4U));
+  CHECK(source_span_is(*public_error.call_span, 1U, 32U));
+  CHECK(source_span_is(*public_error.operand_span, 5U, 32U));
+  CHECK(source_span_is(public_error.semantic_origins[0], 6U, 29U));
+  CHECK(source_span_is(public_error.semantic_origins[1], 30U, 31U));
+
+  CEmissionResult emitted = emit_rewrite_c_source_impl(
+      runtime_source, c_backend_configuration(
+                          trusted_local_evaluation_configuration()),
+      nullptr, nullptr);
+  REQUIRE(emitted.ok);
+  CHECK(emitted.source.find("bennu_apply_spread") != std::string::npos);
+  CHECK(emitted.source.find("failure_semantic_origins[2]") !=
+        std::string::npos);
+  CHECK(emitted.source.find(
+            "bennu_source_location(6U, 1U, 6U), "
+            "bennu_source_location(29U, 1U, 29U)") !=
+        std::string::npos);
+  CHECK(emitted.source.find(
+            "bennu_source_location(30U, 1U, 30U), "
+            "bennu_source_location(31U, 1U, 31U)") !=
+        std::string::npos);
 }
 
 TEST_CASE("rewrite evaluator uses one deterministic allocation seam") {

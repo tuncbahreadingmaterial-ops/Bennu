@@ -17,3 +17,10 @@ Anka-difference decision is recorded in
 [`doc/decisions/issue-50-tuple-literals.md`](decisions/issue-50-tuple-literals.md).
 This append exists to satisfy Issue #50's accepted compatibility-diary
 requirement; the complete decision remains in the issue-owned append-only file.
+
+## 2026-07-25 — Issue #51 static prefix tuple spreading
+
+Issue #51's static expansion, semantic provenance, immutable child borrowing,
+transactional release, alternatives, evidence, and deliberate Anka differences
+are recorded in
+[`doc/decisions/issue-51-static-tuple-spreading.md`](decisions/issue-51-static-tuple-spreading.md).

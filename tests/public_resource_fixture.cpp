@@ -709,6 +709,37 @@ constexpr std::string_view tuple_multi_root_assertions = R"bennu_assert(
         bennu_probe_release_count != releases_before + 1U ||
         bennu_probe_release_order[releases_before] != allocations_before)bennu_assert";
 
+constexpr std::string_view tuple_spread_fault_assertions = R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_ALLOCATION ||
+        snapshot.profile != BENNU_PROFILE_TRUSTED_LOCAL_V2 ||
+        snapshot.failure_requested_elements != 1U ||
+        snapshot.failure_requested_bytes != 8U ||
+        strcmp(snapshot.failure_admission_point, "add") != 0 ||
+        snapshot.failure_primary_span.begin.offset != 1U ||
+        snapshot.failure_primary_span.end.offset != 4U ||
+        snapshot.reservation_ordinal != 4U ||
+        bennu_probe_total_allocations != allocations_before + 3U ||
+        bennu_probe_release_count != releases_before + 3U)bennu_assert";
+
+constexpr std::string_view tuple_spread_provenance_assertions =
+    R"bennu_assert(
+        snapshot.failure != BENNU_FAILURE_DOMAIN ||
+        snapshot.failure_primitive_span.begin.offset != 1U ||
+        snapshot.failure_primitive_span.end.offset != 4U ||
+        snapshot.failure_context_span.begin.offset != 1U ||
+        snapshot.failure_context_span.end.offset != 32U ||
+        snapshot.failure_has_operand_span == 0 ||
+        snapshot.failure_operand_span.begin.offset != 5U ||
+        snapshot.failure_operand_span.end.offset != 32U ||
+        snapshot.failure_semantic_origin_count != 2U ||
+        snapshot.failure_semantic_origins[0].begin.offset != 6U ||
+        snapshot.failure_semantic_origins[0].end.offset != 29U ||
+        snapshot.failure_semantic_origins[1].begin.offset != 30U ||
+        snapshot.failure_semantic_origins[1].end.offset != 31U ||
+        bennu_probe_total_allocations != allocations_before + 1U ||
+        bennu_probe_release_count != releases_before + 1U ||
+        !bennu_failure_context_valid(&snapshot))bennu_assert";
+
 bool tuple_error_matches(
     const bennu::ProgramResult &result, bennu::ResourceErrorReason reason,
     std::size_t elements, std::size_t bytes, std::string_view admission,
@@ -723,7 +754,7 @@ bool tuple_error_matches(
 }
 
 int tuple_issue50_mode(int argument_count, char **arguments) {
-  if (argument_count != 13) {
+  if (argument_count != 17) {
     return 60;
   }
   constexpr std::string_view source = "[(1 2) [3]]\n";
@@ -777,8 +808,45 @@ int tuple_issue50_mode(int argument_count, char **arguments) {
       return static_cast<int>(62U + ordinal);
     }
   }
+  const bennu::EvaluationConfiguration spread_failure{
+      bennu::ExecutionProfile::trusted_local_v2,
+      bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                            std::nullopt},
+      bennu::AllocationFailureInjection{3U}};
+  bennu::ProgramResult failed_spread =
+      bennu::evaluate_source("add [(1) (2)]\n", spread_failure);
+  if (!tuple_error_matches(
+          failed_spread, bennu::ResourceErrorReason::allocation_unavailable,
+          1U, 8U, "add", 1U) ||
+      failed_spread.error.resource->allocation_ordinal != 3U) {
+    destroy_program(failed_spread);
+    return 66;
+  }
 
-  const std::array<bennu::EvaluationConfiguration, 5> configurations{{
+  constexpr std::string_view provenance_source =
+      "add [inc 9223372036854775806 1]\n";
+  bennu::ProgramResult provenance =
+      bennu::evaluate_source(provenance_source);
+  if (provenance.ok ||
+      provenance.error.kind != bennu::ErrorKind::domain_error ||
+      !provenance.error.primitive_span.has_value() ||
+      provenance.error.primitive_span->begin.offset != 1U ||
+      provenance.error.primitive_span->end.offset != 4U ||
+      !provenance.error.call_span.has_value() ||
+      provenance.error.call_span->begin.offset != 1U ||
+      provenance.error.call_span->end.offset != 32U ||
+      !provenance.error.operand_span.has_value() ||
+      provenance.error.operand_span->begin.offset != 5U ||
+      provenance.error.operand_span->end.offset != 32U ||
+      provenance.error.semantic_origins.size() != 2U ||
+      provenance.error.semantic_origins[0].begin.offset != 6U ||
+      provenance.error.semantic_origins[0].end.offset != 29U ||
+      provenance.error.semantic_origins[1].begin.offset != 30U ||
+      provenance.error.semantic_origins[1].end.offset != 31U) {
+    return 67;
+  }
+
+  const std::array<bennu::EvaluationConfiguration, 7> configurations{{
       tuple_limit,
       {bennu::ExecutionProfile::trusted_local_v2,
        bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
@@ -793,15 +861,23 @@ int tuple_issue50_mode(int argument_count, char **arguments) {
                              std::nullopt},
        bennu::AllocationFailureInjection{2U}},
       tuple_limit,
+      spread_failure,
+      {bennu::ExecutionProfile::trusted_local_v2,
+       bennu::ResourceLimits{std::nullopt, std::nullopt, std::nullopt,
+                             std::nullopt},
+       bennu::AllocationFailureInjection{std::nullopt}},
   }};
-  const std::array<std::string_view, 5> sources{{
-      "[1 2]\n", source, source, source, "[1]\n[2 3]\n"}};
-  const std::array<std::string_view, 5> assertions{{
+  const std::array<std::string_view, 7> sources{{
+      "[1 2]\n", source, source, source, "[1]\n[2 3]\n",
+      "add [(1) (2)]\n", provenance_source}};
+  const std::array<std::string_view, 7> assertions{{
       tuple_limit_assertions,
       tuple_fault_vector_assertions,
       tuple_fault_inner_assertions,
       tuple_fault_outer_assertions,
       tuple_multi_root_assertions,
+      tuple_spread_fault_assertions,
+      tuple_spread_provenance_assertions,
   }};
   for (std::size_t index = 0U; index < configurations.size(); ++index) {
     const std::size_t path = 3U + index * 2U;
