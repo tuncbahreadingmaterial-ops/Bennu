@@ -383,7 +383,7 @@ int run_file(std::string_view path,
     return 1;
   }
 
-  const bennu::RunnerEvaluationResult result =
+  bennu::RunnerEvaluationResult result =
       bennu::evaluate_runner_source(loaded.source, arguments);
   if (!result.ok) {
     if (result.error.kind == bennu::ErrorKind::argument_error &&
@@ -395,6 +395,7 @@ int run_file(std::string_view path,
     } else {
       write_diagnostic(path, result.error);
     }
+    (void)bennu::destroy_runner_evaluation_result(result);
     return 1;
   }
 
@@ -402,6 +403,10 @@ int run_file(std::string_view path,
   for (const std::string &formatted : result.formatted) {
     pending_output += formatted;
     pending_output.push_back('\n');
+  }
+  if (!bennu::destroy_runner_evaluation_result(result)) {
+    std::cerr << "error: invalid runner evaluation result during cleanup\n";
+    return 1;
   }
   const bennu_cli::OutputPublicationResult published =
       bennu_cli::publish_stdout(std::cout, pending_output);

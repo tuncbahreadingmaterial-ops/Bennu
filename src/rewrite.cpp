@@ -9275,6 +9275,33 @@ TEST_CASE("runner scalar text failures preserve structured argument context") {
   CHECK(static_failure.error.location.line == 3U);
 }
 
+TEST_CASE("runner result teardown releases vector and nested tuple roots") {
+  constexpr std::string_view source =
+      "iota[3]\n"
+      "[1 [2 true]]\n";
+  RunnerEvaluationResult result = evaluate_runner_source(source, {});
+
+  REQUIRE(result.ok);
+  REQUIRE(result.values.size() == 2U);
+  CHECK(result.values[0].container == ContainerKind::vector);
+  CHECK(result.values[0].vector.integers != nullptr);
+  CHECK(result.values[0].vector.accounting_active);
+  CHECK(result.values[1].container == ContainerKind::tuple);
+  CHECK(result.values[1].tuple.nodes.size == 4U);
+  CHECK(result.values[1].tuple.reservations.size == 1U);
+  CHECK(result.values[1].tuple.root_reservation.accounting_active);
+  CHECK(result.values[1]
+            .tuple.reservations.storage.get()[0]
+            .accounting_active);
+
+  CHECK(destroy_runner_evaluation_result(result));
+  CHECK(result.values.empty());
+  CHECK(result.formatted.empty());
+  CHECK(destroy_runner_evaluation_result(result));
+  CHECK(result.values.empty());
+  CHECK(result.formatted.empty());
+}
+
 } // namespace
 
 ValueResult evaluate_expression(std::string_view source) {
@@ -9376,6 +9403,20 @@ RunnerEvaluationResult evaluate_runner_source(
   return RunnerEvaluationResult{
       true, std::move(values), std::move(formatted),
       make_error(ErrorKind::none, SourceLocation{1U, 1U, 1U})};
+}
+
+bool destroy_runner_evaluation_result(RunnerEvaluationResult &result) {
+  bool destroyed = true;
+  for (Value &value : result.values) {
+    if (!destroy_value(value).ok) {
+      destroyed = false;
+    }
+  }
+  if (destroyed) {
+    result.values.clear();
+  }
+  result.formatted.clear();
+  return destroyed;
 }
 
 CEmissionResult emit_c_source(std::string_view source) {

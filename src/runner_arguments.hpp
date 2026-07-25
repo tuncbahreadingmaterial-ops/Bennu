@@ -19,6 +19,7 @@ struct RunnerEvaluationResult {
 
 RunnerEvaluationResult evaluate_runner_source(
     std::string_view source, std::span<const std::string_view> arguments);
+bool destroy_runner_evaluation_result(RunnerEvaluationResult &result);
 
 } // namespace bennu
 
