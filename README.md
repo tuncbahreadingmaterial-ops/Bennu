@@ -48,6 +48,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+For cost-scaled local checks, review the focused, review, full, strict,
+sanitizer, and isolated-QA tiers in
+[the validation ladder](doc/validation-ladder.md).
+
 On Windows, use `build\bennu.exe`; native output names normally use `.exe`.
 
 Start the REPL:

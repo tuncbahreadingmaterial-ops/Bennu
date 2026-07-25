@@ -15,6 +15,24 @@
 - Return errors explicitly. `tl::optional` and `tl::expected` may be used when optional- or expected-style results are appropriate.
 - Prefer direct data flow, contiguous and simple data layouts, visible ownership and allocation, and shallow abstractions. Complexity must buy a concrete language or product capability.
 
+# Validation ladder
+
+Use the repository's CTest validation ladder for implementation work. The exact
+commands and label taxonomy are documented in `doc/validation-ladder.md`.
+
+1. During implementation and fixes, run the `tier.focused` invariant baseline,
+   the affected `area.*` labels, and focused `bennu_tests` cases.
+2. Before implementation handoff, run `tier.review` plus the affected-area
+   tests. Do not repeatedly run complete validation when the diff is still
+   changing.
+3. After review findings are resolved, run `tier.full` in the ordinary Release
+   build and the applicable `tier.strict` and `tier.sanitize` configurations.
+4. Final isolated QA runs `tier.qa` and every acceptance-criterion-specific
+   scenario. Focused or review validation never substitutes for final QA.
+5. Report the exact build directory, configuration, commands, selected labels,
+   and results so later agents do not repeat equivalent validation without a
+   concrete reason.
+
 # Issue workflow
 
 If the user asks for issue workflow:

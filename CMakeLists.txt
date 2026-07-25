@@ -626,4 +626,109 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/publish-future-release.sh"
     )
   endif()
+
+  # Keep validation selection data-driven and visible to CTest. The focused
+  # tier is a fast invariant baseline that must be paired with affected-area
+  # tests. The review tier adds the complete unit executable and workflow
+  # contracts. Full and QA always contain every test registered above.
+  set(bennu_focused_validation_tests
+    architecture.doctest_topology
+    architecture.obsolete_surface
+    docs.smoke
+    spec.traceability
+    stdout.unit
+  )
+  set(bennu_review_validation_tests
+    ${bennu_focused_validation_tests}
+    spec.traceability_bounded_once_negative
+    spec.traceability_tuple_negative
+    unit.doctest
+    unit.structural_host_allocation_refusal
+    workflow.checkout_contract
+    workflow.checkout_contract_negative
+    workflow.main_contract
+    workflow.main_contract_negative
+  )
+  set(bennu_platform_validation_tests
+    cli.emit_c_unwritable_atomic
+    cli.run_unreadable_file
+    cli.stdout_failure
+    cli.windows_long_paths
+    cli.windows_unicode_paths
+    release.linux_compatibility
+    release.linux_package
+    release.windows_version_resource
+    unit.structural_host_allocation_refusal
+  )
+  set(bennu_instrumentation_incompatible_tests
+    release.linux_compatibility
+    release.linux_package
+  )
+
+  get_property(bennu_registered_tests DIRECTORY PROPERTY TESTS)
+  foreach(bennu_test_name IN LISTS bennu_registered_tests)
+    set(bennu_test_labels tier.full tier.qa)
+
+    if(bennu_test_name MATCHES "^unit[.]" OR
+       bennu_test_name STREQUAL "stdout.unit")
+      list(APPEND bennu_test_labels area.core kind.unit)
+    else()
+      list(APPEND bennu_test_labels kind.contract)
+    endif()
+
+    if(bennu_test_name MATCHES "^architecture[.]")
+      list(APPEND bennu_test_labels area.architecture)
+    endif()
+    if(bennu_test_name MATCHES "^cli[.]")
+      list(APPEND bennu_test_labels area.cli)
+    endif()
+    if(bennu_test_name MATCHES "^docs[.]")
+      list(APPEND bennu_test_labels area.docs)
+    endif()
+    if(bennu_test_name MATCHES "^public[.]")
+      list(APPEND bennu_test_labels area.public)
+    endif()
+    if(bennu_test_name MATCHES "^release[.]")
+      list(APPEND bennu_test_labels area.release)
+    endif()
+    if(bennu_test_name MATCHES "^spec[.]")
+      list(APPEND bennu_test_labels area.spec)
+    endif()
+    if(bennu_test_name MATCHES "^tuple[.]")
+      list(APPEND bennu_test_labels area.cli area.public area.tuple)
+    endif()
+    if(bennu_test_name MATCHES "^workflow[.]")
+      list(APPEND bennu_test_labels area.workflow)
+    endif()
+
+    list(FIND bennu_focused_validation_tests
+      "${bennu_test_name}" bennu_focused_test_index)
+    if(NOT bennu_focused_test_index EQUAL -1)
+      list(APPEND bennu_test_labels tier.focused tier.review)
+    else()
+      list(FIND bennu_review_validation_tests
+        "${bennu_test_name}" bennu_review_test_index)
+      if(NOT bennu_review_test_index EQUAL -1)
+        list(APPEND bennu_test_labels tier.review)
+      endif()
+    endif()
+
+    list(FIND bennu_platform_validation_tests
+      "${bennu_test_name}" bennu_platform_test_index)
+    if(NOT bennu_platform_test_index EQUAL -1)
+      list(APPEND bennu_test_labels scope.platform)
+    endif()
+
+    list(FIND bennu_instrumentation_incompatible_tests
+      "${bennu_test_name}" bennu_incompatible_test_index)
+    if(bennu_incompatible_test_index EQUAL -1)
+      list(APPEND bennu_test_labels tier.sanitize tier.strict)
+    else()
+      list(APPEND bennu_test_labels capability.default_binary)
+    endif()
+
+    list(REMOVE_DUPLICATES bennu_test_labels)
+    set_property(TEST "${bennu_test_name}" PROPERTY LABELS
+      "${bennu_test_labels}")
+  endforeach()
 endif()
