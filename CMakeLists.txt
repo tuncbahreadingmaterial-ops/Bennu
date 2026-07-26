@@ -469,6 +469,12 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/documentation_smoke.cmake"
   )
   add_test(
+    NAME docs.decision_record_policy
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/decision_record_policy.cmake"
+  )
+  add_test(
     NAME cli.build_native
     COMMAND
       "${CMAKE_COMMAND}"
@@ -673,6 +679,7 @@ if(BUILD_TESTING)
   set(bennu_focused_validation_tests
     architecture.doctest_topology
     architecture.obsolete_surface
+    docs.decision_record_policy
     docs.smoke
     spec.traceability
     stdout.unit
@@ -734,6 +741,9 @@ if(BUILD_TESTING)
     endif()
     if(bennu_test_name MATCHES "^docs[.]")
       list(APPEND bennu_test_labels area.docs)
+    endif()
+    if(bennu_test_name STREQUAL "docs.decision_record_policy")
+      list(APPEND bennu_test_labels area.spec area.workflow)
     endif()
     if(bennu_test_name MATCHES "^public[.]")
       list(APPEND bennu_test_labels area.public)
