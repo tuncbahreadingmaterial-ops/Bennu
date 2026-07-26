@@ -936,6 +936,12 @@ TEST_CASE("PARG-012-EMIT-C parameter slots are value independent") {
         std::string::npos);
   CHECK(emitted.source.find("bennu_bind_arguments(argc, argv)") !=
         std::string::npos);
+  CHECK(emitted.source.find(
+            "\nint bennu_bind_arguments(int argc, char **argv)") !=
+        std::string::npos);
+  CHECK(emitted.source.find(
+            "\nstatic int bennu_bind_arguments(int argc, char **argv)") ==
+        std::string::npos);
   CHECK(emitted.source.find("bennu_parameters[3]") != std::string::npos);
   CHECK(emitted.source.find("BENNU_IMPL_IOTA_INT") != std::string::npos);
   CHECK(emitted.source.find("BENNU_IMPL_ADD_DOUBLE") != std::string::npos);

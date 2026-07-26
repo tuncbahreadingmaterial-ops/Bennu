@@ -5915,7 +5915,7 @@ void append_argument_adapter(std::string &source,
     }
     source += "};\n";
   }
-  source += "\nstatic int bennu_bind_arguments(int argc, char **argv) {\n"
+  source += "\nint bennu_bind_arguments(int argc, char **argv) {\n"
             "  size_t bennu_supplied = 0U;\n"
             "  (void)bennu_decode_argument;\n"
             "  (void)argv;\n"
