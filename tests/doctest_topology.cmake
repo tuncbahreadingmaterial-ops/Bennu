@@ -142,7 +142,7 @@ set(runtime_literal_end ")bennu_c\"")
 set(runtime_literal_limit 15000)
 set(runtime_literal_count 0)
 set(runtime_literal_remainder "${runtime_source_text}")
-while(TRUE)
+while(1)
   string(FIND "${runtime_literal_remainder}" "${runtime_literal_begin}"
     runtime_literal_begin_at)
   if(runtime_literal_begin_at EQUAL -1)
