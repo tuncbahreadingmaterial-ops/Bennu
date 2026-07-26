@@ -10,6 +10,7 @@ file(READ "${workflow}" text)
 file(READ
   "${BENNU_SOURCE_DIR}/tools/release/verify-clean-windows-package.ps1"
   windows_package_verifier)
+string(REPLACE "\r\n" "\n" windows_package_verifier "${windows_package_verifier}")
 
 function(require_text expected description)
   string(FIND "${text}" "${expected}" found_at)
@@ -74,6 +75,22 @@ string(FIND "${windows_package_verifier}"
 if(windows_help_version_line EQUAL -1)
   message(FATAL_ERROR
     "clean Windows package help contract is missing bennu --version")
+endif()
+set(canonical_run_help
+  "  run <source> [-- <arguments...>]\n          Run a Bennu source file")
+string(FIND "${windows_package_verifier}"
+  "${canonical_run_help}"
+  windows_canonical_run_help_at)
+if(windows_canonical_run_help_at EQUAL -1)
+  message(FATAL_ERROR
+    "clean Windows package help contract is missing the canonical run syntax")
+endif()
+string(FIND "${windows_package_verifier}"
+  "  run     Run a Bennu source file"
+  windows_stale_run_help_at)
+if(NOT windows_stale_run_help_at EQUAL -1)
+  message(FATAL_ERROR
+    "clean Windows package help contract retains the pre-argument run syntax")
 endif()
 
 set(publisher "${BENNU_SOURCE_DIR}/tools/release/publish-future-release.sh")
