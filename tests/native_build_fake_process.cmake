@@ -93,13 +93,17 @@ endif()
 file(READ "${trace}" explicit_trace)
 if(WIN32)
   if(NOT explicit_trace MATCHES "/std:c11" OR
-     NOT explicit_trace MATCHES "3:9:program.c" OR
+     NOT explicit_trace MATCHES "/fp:strict" OR
+     NOT explicit_trace MATCHES "4:9:program.c" OR
      NOT explicit_trace MATCHES "/Fe:program.exe" OR
      NOT explicit_trace MATCHES "/Fo:program.exe.obj")
     message(FATAL_ERROR "MSVC fake compiler argument boundaries mismatch: ${explicit_trace}")
   endif()
 else()
   if(NOT explicit_trace MATCHES "-std=c11" OR
+     NOT explicit_trace MATCHES "-frounding-math" OR
+     NOT explicit_trace MATCHES "-ffp-contract=off" OR
+     NOT explicit_trace MATCHES "-fno-fast-math" OR
      NOT explicit_trace MATCHES "native with spaces .*\\$\\(touch sentinel\\).*bennu-build.tmp.*program")
     message(FATAL_ERROR "GCC fake compiler argument boundaries mismatch: ${explicit_trace}")
   endif()
@@ -192,6 +196,9 @@ if(UNIX)
     endif()
     file(READ "${relative_trace}" relative_path_trace)
     if(NOT relative_path_trace MATCHES "-std=c11" OR
+       NOT relative_path_trace MATCHES "-frounding-math" OR
+       NOT relative_path_trace MATCHES "-ffp-contract=off" OR
+       NOT relative_path_trace MATCHES "-fno-fast-math" OR
        NOT relative_path_trace MATCHES
            "relative PATH ${selection}.*bennu-build.tmp.*program")
       message(FATAL_ERROR

@@ -20,6 +20,11 @@ enum class PrimitiveId : std::uint8_t {
   is_negative = 11,
   less_than = 12,
   greater_than = 13,
+  dec = 14,
+  neg = 15,
+  abs = 16,
+  sub = 17,
+  mul = 18,
 };
 
 } // namespace bennu

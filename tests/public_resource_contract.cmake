@@ -8,6 +8,12 @@
 # TEST-ID: PUBLIC-PROFILE-LIMIT-DIAGNOSTIC-MATRIX
 # TEST-ID: TUP-018-REGRESSION-PLATFORMS
 # TEST-ID: ISSUE54-RESOURCE-CROSS-BACKEND
+# TEST-ID: CHECKED-ARITHMETIC-GENERATED-NATIVE-EXACT-BITS
+# TEST-ID: CHECKED-ARITHMETIC-HOSTILE-FP-TRAP-RESTORATION
+# TEST-ID: CHECKED-ARITHMETIC-GENERATED-NATIVE-STRUCTURED-OVERFLOW
+# TEST-ID: CHECKED-ARITHMETIC-GENERATED-NATIVE-RESOURCE-MATRIX
+# TEST-ID: CHECKED-ARITHMETIC-DIRECT-RESOURCE-MATRIX
+# TEST-ID: CHECKED-ARITHMETIC-STANDARD-FENV-NATIVE
 foreach(required BENNU_EXECUTABLE BENNU_PUBLIC_RESOURCE_FIXTURE BENNU_C_COMPILER
                  BENNU_C_COMPILER_ID BENNU_EXECUTABLE_SUFFIX BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
@@ -68,6 +74,8 @@ set(context_probe_emitted
   "${work_directory}/generated-runtime-context-probe${BENNU_EXECUTABLE_SUFFIX}")
 set(context_probe_native
   "${work_directory}/generated-runtime-context-probe-native${BENNU_EXECUTABLE_SUFFIX}")
+set(standard_fenv_probe_native
+  "${work_directory}/generated-runtime-standard-fenv-probe-native${BENNU_EXECUTABLE_SUFFIX}")
 set(size_probe_c "${work_directory}/generated-runtime-size-probe.c")
 set(size_probe_emitted
   "${work_directory}/generated-runtime-size-probe${BENNU_EXECUTABLE_SUFFIX}")
@@ -144,6 +152,7 @@ execute_process(
           "${issue54_allocation_c}" "${issue54_allocation_native}"
           "${parameter_profile_c}" "${parameter_profile_native}"
           "${parameter_allocation_c}" "${parameter_allocation_native}"
+          "${standard_fenv_probe_native}"
   RESULT_VARIABLE fixture_exit OUTPUT_VARIABLE fixture_stdout
   ERROR_VARIABLE fixture_stderr)
 if(NOT "${fixture_exit}" STREQUAL "0" OR NOT fixture_stdout STREQUAL "" OR
@@ -162,14 +171,15 @@ foreach(c_file profile refusal iota lifted late context_probe size_probe
   set(executable "${${c_file}_emitted}")
   if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /W4 /WX
+      COMMAND "${BENNU_C_COMPILER}" /nologo /std:c11 /fp:strict /W4 /WX
               "${source}" "/Fe:${executable}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
       ERROR_VARIABLE compile_stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
               -pedantic-errors
               "${source}" -o "${executable}"
       WORKING_DIRECTORY "${work_directory}"
@@ -249,6 +259,29 @@ function(check_generated_context_probe executable)
   endif()
 endfunction()
 
+function(check_standard_fenv_probe executable)
+  execute_process(
+    COMMAND "${executable}"
+    RESULT_VARIABLE run_exit OUTPUT_VARIABLE run_stdout
+    ERROR_VARIABLE run_stderr)
+  string(REPLACE "\r\n" "\n" run_stdout "${run_stdout}")
+  string(REPLACE "\r\n" "\n" run_stderr "${run_stderr}")
+  string(CONCAT expected_once
+    "1.7976931348623157e308\n"
+    "1.0\n"
+    "1.0000000000000004\n"
+    "1e-323\n"
+    "5e-324\n")
+  set(expected_stdout "${expected_once}${expected_once}${expected_once}")
+  if(NOT "${run_exit}" STREQUAL "0" OR
+     NOT run_stdout STREQUAL expected_stdout OR NOT run_stderr STREQUAL "")
+    message(FATAL_ERROR
+      "CHECKED-ARITHMETIC-STANDARD-FENV native probe mismatch\n"
+      "exit: ${run_exit}\nstdout: [${run_stdout}]\n"
+      "stderr: [${run_stderr}]\nexpected: [${expected_stdout}]")
+  endif()
+endfunction()
+
 # TEST-ID: PUBLIC-RESOURCE-BOUNDED-REFUSAL
 function(check_profile_refusal name executable invocation)
   set(expected_file "${refusal_expected}")
@@ -325,6 +358,7 @@ check_allocation_failure(issue54-allocation-emitted
 check_allocation_failure(issue54-allocation-native
   "${issue54_allocation_native}"
   "bennu-source:1:1: ResourceError: greater_than resource request failed: allocation_unavailable\n")
+check_standard_fenv_probe("${standard_fenv_probe_native}")
 check_allocation_failure(size-probe-emitted "${size_probe_emitted}"
   "bennu-source:1:1: ResourceError: iota resource request failed: size_overflow\n")
 check_allocation_failure(size-probe-native "${size_probe_native}"
