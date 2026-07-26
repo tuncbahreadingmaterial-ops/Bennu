@@ -708,7 +708,8 @@ static BennuScalar bennu_project(const BennuValue *value, size_t index) {
   }
   return result;
 }
-
+)bennu_c";
+  source += R"bennu_c(
 static double bennu_int_to_double(int64_t value) {
   const int negative = value < INT64_C(0);
   const uint64_t magnitude =
