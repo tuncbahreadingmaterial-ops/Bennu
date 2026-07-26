@@ -1,4 +1,5 @@
 # TEST-ID: DOCS-SMOKE
+# TEST-ID: CHECKED-ARITHMETIC-DOCS-CONTRACT
 foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR)
   if(NOT DEFINED ${required})
     message(FATAL_ERROR "${required} is required")
@@ -6,13 +7,33 @@ foreach(required BENNU_EXECUTABLE BENNU_SOURCE_DIR)
 endforeach()
 
 file(READ "${BENNU_SOURCE_DIR}/README.md" readme)
+file(READ
+  "${BENNU_SOURCE_DIR}/doc/decisions/issue-54-boolean-predicates-ordering.md"
+  issue54_decision)
 file(READ "${BENNU_SOURCE_DIR}/VERSION" product_version)
 string(REGEX REPLACE "\n$" "" product_version "${product_version}")
 foreach(required_text IN ITEMS
-    "inc" "add" "equals" "not" "iota"
+    "- `inc`: increment an `Int` or `Double` scalar or vector"
+    "- `dec`: decrement an `Int` or `Double` scalar or vector"
+    "- `neg`: negate an `Int` or `Double` scalar or vector"
+    "- `abs`: take the absolute value of an `Int` or `Double` scalar or vector"
+    "- `add`: add numeric arguments element by element"
+    "- `sub`: subtract numeric arguments element by element"
+    "- `mul`: multiply numeric arguments element by element"
+    "- `equals`: compare `Bool`, `Int`, or `Double` arguments element by element"
+    "- `not`: negate `Bool` arguments element by element"
+    "- `iota`: construct the `Int` vector"
     "examples/rewrite.bennu" "trusted-local-v2" "Tuple literals"
     "run example.bennu --" "bennu_argument_error"
     "Deliberate differences from Anka"
+    "`odd[-3]` is true" "`less_than[left right]`"
+    "`greater_than[left right]`" "Bool ordering and Bool/numeric conversions"
+    "Unlike Anka's host-`int` arithmetic"
+    "Bennu's integer arithmetic is checked"
+    "against signed Int64 before any potentially overflowing host operation"
+    "binary64 round-to-nearest, ties-to-even"
+    "canonicalizes every NaN" "preserves gradual underflow"
+    "rounding, trap, flush-to-zero, excess-precision, or NaN-payload behavior"
     "`${product_version}`;" "VERSION does not authorize a release"
     "CLOSED NOT_PLANNED by the owner"
     "not Authenticode or Apple Developer ID/notarization"
@@ -24,6 +45,17 @@ foreach(required_text IN ITEMS
   string(FIND "${readme}" "${required_text}" found_at)
   if(found_at EQUAL -1)
     message(FATAL_ERROR "README is missing shipped rewrite text: ${required_text}")
+  endif()
+endforeach()
+
+foreach(required_decision_text IN ITEMS
+    "Issue #54 conformance evidence correction"
+    "negative odd parity" "written operand order"
+    "Bool ordering or Bool/numeric conversion")
+  string(FIND "${issue54_decision}" "${required_decision_text}" found_at)
+  if(found_at EQUAL -1)
+    message(FATAL_ERROR
+      "Issue #54 decision evidence is missing: ${required_decision_text}")
   endif()
 endforeach()
 

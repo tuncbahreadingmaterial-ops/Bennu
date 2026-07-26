@@ -57,7 +57,7 @@ if(MSVC)
   )
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set_source_files_properties(src/primitive.cpp PROPERTIES
-    COMPILE_OPTIONS "-frounding-math;-fno-fast-math"
+    COMPILE_OPTIONS "-frounding-math;-ffp-contract=off;-fno-fast-math"
   )
 endif()
 
@@ -200,6 +200,7 @@ if(BUILD_TESTING)
     ${bennu_implementation_sources}
     tests/application_section16_conformance.cpp
     tests/doctest_main.cpp
+    tests/issue54_primitives.cpp
     tests/public_cutover_conformance.cpp
     tests/tuple_foundation_conformance.cpp
   )
@@ -396,6 +397,17 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_emission_contract.cmake"
   )
   add_test(
+    NAME cli.parameterized_c_artifacts
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/parameterized_c_artifacts.cmake"
+  )
+  add_test(
     NAME cli.public_path_error_matrix
     COMMAND
       "${CMAKE_COMMAND}"
@@ -426,6 +438,16 @@ if(BUILD_TESTING)
       "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
       "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/tuple_literal_contract.cmake"
+  )
+  add_test(
+    NAME fanout.strict_c_native
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/fanout_contract.cmake"
   )
   add_test(
     NAME cli.emit_c_negative_atomic
@@ -686,7 +708,6 @@ if(BUILD_TESTING)
     ${bennu_default_binary_only_tests}
   )
   set(bennu_sanitizer_incompatible_tests
-    ${bennu_default_binary_only_tests}
     unit.structural_host_allocation_refusal
   )
 
@@ -707,7 +728,8 @@ if(BUILD_TESTING)
     if(bennu_test_name MATCHES "^cli[.]")
       list(APPEND bennu_test_labels area.cli)
     endif()
-    if(bennu_test_name STREQUAL "cli.runner_arguments")
+    if(bennu_test_name STREQUAL "cli.runner_arguments" OR
+       bennu_test_name STREQUAL "cli.parameterized_c_artifacts")
       list(APPEND bennu_test_labels area.public area.spec)
     endif()
     if(bennu_test_name MATCHES "^docs[.]")
@@ -724,6 +746,9 @@ if(BUILD_TESTING)
     endif()
     if(bennu_test_name MATCHES "^tuple[.]")
       list(APPEND bennu_test_labels area.cli area.public area.tuple)
+    endif()
+    if(bennu_test_name MATCHES "^fanout[.]")
+      list(APPEND bennu_test_labels area.cli area.public area.tuple area.spec)
     endif()
     if(bennu_test_name MATCHES "^workflow[.]")
       list(APPEND bennu_test_labels area.workflow)
@@ -753,14 +778,15 @@ if(BUILD_TESTING)
       list(APPEND bennu_test_labels tier.strict)
     endif()
 
+    list(FIND bennu_default_binary_only_tests
+      "${bennu_test_name}" bennu_default_binary_only_test_index)
     list(FIND bennu_sanitizer_incompatible_tests
       "${bennu_test_name}" bennu_sanitizer_incompatible_test_index)
-    if(bennu_sanitizer_incompatible_test_index EQUAL -1)
+    if(bennu_default_binary_only_test_index EQUAL -1 AND
+       bennu_sanitizer_incompatible_test_index EQUAL -1)
       list(APPEND bennu_test_labels tier.sanitize)
     endif()
 
-    list(FIND bennu_default_binary_only_tests
-      "${bennu_test_name}" bennu_default_binary_only_test_index)
     if(NOT bennu_default_binary_only_test_index EQUAL -1)
       list(APPEND bennu_test_labels capability.default_binary)
     endif()

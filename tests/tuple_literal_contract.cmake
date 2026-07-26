@@ -67,7 +67,7 @@ if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
   set(strict_compile_script "${work_directory}/strict-compile.cmd")
   file(WRITE "${strict_compile_script}"
        "@call \"${vs_dev_command}\" -arch=x64 -host_arch=x64 >nul\r\n"
-       "@\"${native_c_compiler}\" /nologo /std:c11 /W4 /WX /TC \"${native_emitted_c}\" /Fe:\"${native_emitted_executable}\"\r\n")
+       "@\"${native_c_compiler}\" /nologo /std:c11 /fp:strict /W4 /WX /TC \"${native_emitted_c}\" /Fe:\"${native_emitted_executable}\"\r\n")
   execute_process(
     COMMAND cmd.exe /d /c "${strict_compile_script}"
     WORKING_DIRECTORY "${work_directory}"
@@ -75,7 +75,8 @@ if(BENNU_C_COMPILER_ID STREQUAL "MSVC")
     ERROR_VARIABLE compile_stderr)
 else()
   execute_process(
-    COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+    COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+            -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
             -pedantic-errors "${emitted_c}" -o "${emitted_executable}"
     WORKING_DIRECTORY "${work_directory}"
     RESULT_VARIABLE compile_exit OUTPUT_VARIABLE compile_stdout
@@ -94,14 +95,15 @@ function(strict_compile_tuple input output label)
     set(script "${work_directory}/${label}-strict-compile.cmd")
     file(WRITE "${script}"
          "@call \"${vs_dev_command}\" -arch=x64 -host_arch=x64 >nul\r\n"
-         "@\"${native_c_compiler}\" /nologo /std:c11 /W4 /WX /TC \"${native_input}\" /Fe:\"${native_output}\"\r\n")
+         "@\"${native_c_compiler}\" /nologo /std:c11 /fp:strict /W4 /WX /TC \"${native_input}\" /Fe:\"${native_output}\"\r\n")
     execute_process(
       COMMAND cmd.exe /d /c "${script}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
   else()
     execute_process(
-      COMMAND "${BENNU_C_COMPILER}" -std=c11 -Wall -Wextra -Werror
+      COMMAND "${BENNU_C_COMPILER}" -std=c11 -frounding-math
+              -ffp-contract=off -fno-fast-math -Wall -Wextra -Werror
               -pedantic-errors "${input}" -o "${output}"
       WORKING_DIRECTORY "${work_directory}"
       RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)

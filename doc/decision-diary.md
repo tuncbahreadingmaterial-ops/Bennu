@@ -24,3 +24,11 @@ Issue #51's static expansion, semantic provenance, immutable child borrowing,
 transactional release, alternatives, evidence, and deliberate Anka differences
 are recorded in
 [`doc/decisions/issue-51-static-tuple-spreading.md`](decisions/issue-51-static-tuple-spreading.md).
+
+## 2026-07-25 — Issue #53 explicit sequential fan-out implementation
+
+Issue #53's parser arenas, operand-dependent lowering, borrowed operand
+ownership, preadmitted profile-v2 table, sequential evaluator/generated-C
+control flow, failure cleanup, alternatives, evidence, and deliberate Anka
+differences are recorded in
+[`doc/decisions/issue-44-explicit-sequential-fanout.md`](decisions/issue-44-explicit-sequential-fanout.md).

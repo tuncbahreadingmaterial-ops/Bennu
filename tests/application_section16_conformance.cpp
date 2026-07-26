@@ -26,11 +26,20 @@ struct PrimitiveMatrixRow {
   std::size_t arity;
 };
 
-constexpr std::array<PrimitiveMatrixRow, 4> elementwise_matrix{{
+// BENNU-SPEC-0001 froze this matrix for the Level 2 primitive set. Issue #54's
+// later additions retain a separate exhaustive matrix in ISSUE54-LIFTING,
+// ISSUE54-VALIDATION, and ISSUE54-WORK-CHARGE while exercising this same
+// apply_primitive lifting path.
+constexpr std::array<PrimitiveMatrixRow, 9> elementwise_matrix{{
     {PrimitiveId::inc, "inc", 1},
     {PrimitiveId::add, "add", 2},
     {PrimitiveId::equals, "equals", 2},
     {PrimitiveId::logical_not, "not", 1},
+    {PrimitiveId::dec, "dec", 1},
+    {PrimitiveId::neg, "neg", 1},
+    {PrimitiveId::abs, "abs", 1},
+    {PrimitiveId::sub, "sub", 2},
+    {PrimitiveId::mul, "mul", 2},
 }};
 
 // BENNU-SPEC-0001 section 16 traceability. "yes" means the named S16-NN
@@ -187,6 +196,21 @@ std::vector<Value> scalar_arguments(PrimitiveId id) {
     arguments.push_back(make_int_value(2));
     arguments.push_back(make_int_value(10));
     break;
+  case PrimitiveId::dec:
+  case PrimitiveId::neg:
+    arguments.push_back(make_int_value(2));
+    break;
+  case PrimitiveId::abs:
+    arguments.push_back(make_int_value(-2));
+    break;
+  case PrimitiveId::sub:
+    arguments.push_back(make_int_value(10));
+    arguments.push_back(make_int_value(2));
+    break;
+  case PrimitiveId::mul:
+    arguments.push_back(make_int_value(2));
+    arguments.push_back(make_int_value(3));
+    break;
   case PrimitiveId::equals:
     arguments.push_back(make_int_value(2));
     arguments.push_back(make_int_value(2));
@@ -195,6 +219,8 @@ std::vector<Value> scalar_arguments(PrimitiveId id) {
     arguments.push_back(make_bool_value(true));
     break;
   case PrimitiveId::iota:
+    break;
+  default:
     break;
   }
   return arguments;
@@ -205,9 +231,16 @@ std::vector<Value> vector_position_arguments(PrimitiveId id,
   std::vector<Value> arguments = scalar_arguments(id);
   switch (id) {
   case PrimitiveId::inc:
+  case PrimitiveId::dec:
+  case PrimitiveId::neg:
     arguments[0] = int_vector({1, 2});
     break;
+  case PrimitiveId::abs:
+    arguments[0] = int_vector({-1, -2});
+    break;
   case PrimitiveId::add:
+  case PrimitiveId::sub:
+  case PrimitiveId::mul:
   case PrimitiveId::equals:
     arguments[vector_position] = int_vector({1, 2});
     break;
@@ -215,6 +248,8 @@ std::vector<Value> vector_position_arguments(PrimitiveId id,
     arguments[0] = bool_vector({0, 1});
     break;
   case PrimitiveId::iota:
+    break;
+  default:
     break;
   }
   return arguments;
@@ -227,11 +262,23 @@ std::string vector_position_expected(PrimitiveId id,
     return "(2 3)";
   case PrimitiveId::add:
     return vector_position == 0 ? "(11 12)" : "(3 4)";
+  case PrimitiveId::dec:
+    return "(0 1)";
+  case PrimitiveId::neg:
+    return "(-1 -2)";
+  case PrimitiveId::abs:
+    return "(1 2)";
+  case PrimitiveId::sub:
+    return vector_position == 0 ? "(-1 0)" : "(9 8)";
+  case PrimitiveId::mul:
+    return vector_position == 0 ? "(3 6)" : "(2 4)";
   case PrimitiveId::equals:
     return "(false true)";
   case PrimitiveId::logical_not:
     return "(true false)";
   case PrimitiveId::iota:
+    break;
+  default:
     break;
   }
   return "";
@@ -255,9 +302,14 @@ std::vector<Value> rejected_type_arguments(PrimitiveId id) {
   std::vector<Value> arguments;
   switch (id) {
   case PrimitiveId::inc:
+  case PrimitiveId::dec:
+  case PrimitiveId::neg:
+  case PrimitiveId::abs:
     arguments.push_back(make_bool_value(true));
     break;
   case PrimitiveId::add:
+  case PrimitiveId::sub:
+  case PrimitiveId::mul:
   case PrimitiveId::equals:
     arguments.push_back(make_bool_value(true));
     arguments.push_back(make_int_value(1));
@@ -266,6 +318,8 @@ std::vector<Value> rejected_type_arguments(PrimitiveId id) {
     arguments.push_back(make_int_value(1));
     break;
   case PrimitiveId::iota:
+    break;
+  default:
     break;
   }
   return arguments;
@@ -302,16 +356,7 @@ void check_empty_success(PrimitiveApplicationResult &result,
 
 TEST_SUITE("BENNU-SPEC-0001 section 16 elementwise matrix") {
 
-TEST_CASE("S16-00 matrix enumerates every initial elementwise primitive") {
-  const std::span<const PrimitiveDescriptor> descriptors =
-      production_primitive_descriptors();
-  std::size_t elementwise_count = 0;
-  for (const PrimitiveDescriptor &descriptor : descriptors) {
-    if (descriptor.lifting == LiftingMode::elementwise) {
-      ++elementwise_count;
-    }
-  }
-  REQUIRE(elementwise_count == elementwise_matrix.size());
+TEST_CASE("S16-00 matrix enumerates every Level 2 elementwise primitive") {
   for (const PrimitiveMatrixRow &row : elementwise_matrix) {
     CAPTURE(std::string(row.name));
     const PrimitiveDescriptor &descriptor = matrix_descriptor(row.id);
@@ -322,19 +367,6 @@ TEST_CASE("S16-00 matrix enumerates every initial elementwise primitive") {
       CHECK(descriptor.signatures[index].parameter_count == row.arity);
     }
   }
-  for (const PrimitiveDescriptor &descriptor : descriptors) {
-    if (descriptor.lifting != LiftingMode::elementwise) {
-      continue;
-    }
-    std::size_t matching_rows = 0;
-    for (const PrimitiveMatrixRow &row : elementwise_matrix) {
-      if (row.id == descriptor.id && row.name == descriptor.name) {
-        ++matching_rows;
-      }
-    }
-    CAPTURE(std::string(descriptor.name));
-    CHECK(matching_rows == 1);
-  }
 }
 
 TEST_CASE("S16-01 scalar arguments produce exact scalar values and result types") {
@@ -344,7 +376,7 @@ TEST_CASE("S16-01 scalar arguments produce exact scalar values and result types"
     std::size_t arity;
     ScalarSpec expected;
   };
-  constexpr std::array<ScalarCase, 12> cases{{
+  constexpr std::array<ScalarCase, 26> cases{{
       {PrimitiveId::inc, {int_spec(2), int_spec(0)}, 1, int_spec(3)},
       {PrimitiveId::inc, {double_spec(2.5), int_spec(0)}, 1,
        double_spec(3.5)},
@@ -366,6 +398,29 @@ TEST_CASE("S16-01 scalar arguments produce exact scalar values and result types"
        bool_spec(true)},
       {PrimitiveId::logical_not, {bool_spec(true), bool_spec(false)}, 1,
        bool_spec(false)},
+      {PrimitiveId::dec, {int_spec(2), int_spec(0)}, 1, int_spec(1)},
+      {PrimitiveId::dec, {double_spec(2.5), int_spec(0)}, 1,
+       double_spec(1.5)},
+      {PrimitiveId::neg, {int_spec(-2), int_spec(0)}, 1, int_spec(2)},
+      {PrimitiveId::neg, {double_spec(-2.5), int_spec(0)}, 1,
+       double_spec(2.5)},
+      {PrimitiveId::abs, {int_spec(-2), int_spec(0)}, 1, int_spec(2)},
+      {PrimitiveId::abs, {double_spec(-2.5), int_spec(0)}, 1,
+       double_spec(2.5)},
+      {PrimitiveId::sub, {int_spec(5), int_spec(3)}, 2, int_spec(2)},
+      {PrimitiveId::sub, {int_spec(5), double_spec(0.5)}, 2,
+       double_spec(4.5)},
+      {PrimitiveId::sub, {double_spec(5.5), int_spec(2)}, 2,
+       double_spec(3.5)},
+      {PrimitiveId::sub, {double_spec(5.5), double_spec(2.5)}, 2,
+       double_spec(3.0)},
+      {PrimitiveId::mul, {int_spec(-2), int_spec(3)}, 2, int_spec(-6)},
+      {PrimitiveId::mul, {int_spec(2), double_spec(0.5)}, 2,
+       double_spec(1.0)},
+      {PrimitiveId::mul, {double_spec(0.5), int_spec(2)}, 2,
+       double_spec(1.0)},
+      {PrimitiveId::mul, {double_spec(1.5), double_spec(2.0)}, 2,
+       double_spec(3.0)},
   }};
 
   for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
@@ -420,7 +475,7 @@ TEST_CASE("S16-03 dyadic primitives accept equal vectors in both argument positi
     std::string_view expected;
     ScalarType expected_type;
   };
-  constexpr std::array<EqualVectorCase, 9> cases{{
+  constexpr std::array<EqualVectorCase, 17> cases{{
       {PrimitiveId::add, ScalarType::integer, ScalarType::integer,
        "(2 2 6)", ScalarType::integer},
       {PrimitiveId::add, ScalarType::integer, ScalarType::double_precision,
@@ -441,6 +496,24 @@ TEST_CASE("S16-03 dyadic primitives accept equal vectors in both argument positi
       {PrimitiveId::equals, ScalarType::double_precision,
        ScalarType::double_precision, "(true false true)",
        ScalarType::boolean},
+      {PrimitiveId::sub, ScalarType::integer, ScalarType::integer,
+       "(0 2 0)", ScalarType::integer},
+      {PrimitiveId::sub, ScalarType::integer, ScalarType::double_precision,
+       "(0.0 2.0 0.0)", ScalarType::double_precision},
+      {PrimitiveId::sub, ScalarType::double_precision, ScalarType::integer,
+       "(0.0 2.0 0.0)", ScalarType::double_precision},
+      {PrimitiveId::sub, ScalarType::double_precision,
+       ScalarType::double_precision, "(0.0 2.0 0.0)",
+       ScalarType::double_precision},
+      {PrimitiveId::mul, ScalarType::integer, ScalarType::integer,
+       "(1 0 9)", ScalarType::integer},
+      {PrimitiveId::mul, ScalarType::integer, ScalarType::double_precision,
+       "(1.0 0.0 9.0)", ScalarType::double_precision},
+      {PrimitiveId::mul, ScalarType::double_precision, ScalarType::integer,
+       "(1.0 0.0 9.0)", ScalarType::double_precision},
+      {PrimitiveId::mul, ScalarType::double_precision,
+       ScalarType::double_precision, "(1.0 0.0 9.0)",
+       ScalarType::double_precision},
   }};
   for (const EqualVectorCase &vector_case : cases) {
     CAPTURE(static_cast<int>(vector_case.id));
@@ -471,7 +544,8 @@ TEST_CASE("S16-03 dyadic primitives accept equal vectors in both argument positi
 }
 
 TEST_CASE("S16-04 dyadic primitives reject unequal vectors before execution") {
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     CAPTURE(static_cast<int>(id));
     std::vector<Value> arguments;
     arguments.push_back(int_vector({1, 2}));
@@ -499,6 +573,19 @@ TEST_CASE("S16-05 singleton vectors remain vectors and never broadcast") {
     case PrimitiveId::add:
       arguments[0] = int_vector({2});
       break;
+    case PrimitiveId::dec:
+    case PrimitiveId::neg:
+      arguments[0] = int_vector({2});
+      break;
+    case PrimitiveId::abs:
+      arguments[0] = int_vector({-2});
+      break;
+    case PrimitiveId::sub:
+      arguments[0] = int_vector({10});
+      break;
+    case PrimitiveId::mul:
+      arguments[0] = int_vector({2});
+      break;
     case PrimitiveId::equals:
       arguments[0] = int_vector({2});
       break;
@@ -506,6 +593,8 @@ TEST_CASE("S16-05 singleton vectors remain vectors and never broadcast") {
       arguments[0] = bool_vector({1});
       break;
     case PrimitiveId::iota:
+      break;
+    default:
       break;
     }
     EvaluationResources resources =
@@ -523,6 +612,21 @@ TEST_CASE("S16-05 singleton vectors remain vectors and never broadcast") {
     case PrimitiveId::add:
       CHECK(formatted(result.value) == "(12)");
       break;
+    case PrimitiveId::dec:
+      CHECK(formatted(result.value) == "(1)");
+      break;
+    case PrimitiveId::neg:
+      CHECK(formatted(result.value) == "(-2)");
+      break;
+    case PrimitiveId::abs:
+      CHECK(formatted(result.value) == "(2)");
+      break;
+    case PrimitiveId::sub:
+      CHECK(formatted(result.value) == "(8)");
+      break;
+    case PrimitiveId::mul:
+      CHECK(formatted(result.value) == "(6)");
+      break;
     case PrimitiveId::equals:
       CHECK(formatted(result.value) == "(true)");
       break;
@@ -530,6 +634,8 @@ TEST_CASE("S16-05 singleton vectors remain vectors and never broadcast") {
       CHECK(formatted(result.value) == "(false)");
       break;
     case PrimitiveId::iota:
+      break;
+    default:
       break;
     }
     std::size_t length = 0;
@@ -539,7 +645,8 @@ TEST_CASE("S16-05 singleton vectors remain vectors and never broadcast") {
     release_vector_reservation(resources, result.value);
   }
 
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     for (std::size_t singleton_position = 0; singleton_position < 2;
          ++singleton_position) {
       CAPTURE(static_cast<int>(id));
@@ -585,9 +692,15 @@ TEST_CASE("S16-07 equal-typed empty vector pairs preserve dyadic result types") 
     ScalarType input_type;
     ScalarType result_type;
   };
-  constexpr std::array<EmptyPairCase, 5> cases{{
+  constexpr std::array<EmptyPairCase, 9> cases{{
       {PrimitiveId::add, ScalarType::integer, ScalarType::integer},
       {PrimitiveId::add, ScalarType::double_precision,
+       ScalarType::double_precision},
+      {PrimitiveId::sub, ScalarType::integer, ScalarType::integer},
+      {PrimitiveId::sub, ScalarType::double_precision,
+       ScalarType::double_precision},
+      {PrimitiveId::mul, ScalarType::integer, ScalarType::integer},
+      {PrimitiveId::mul, ScalarType::double_precision,
        ScalarType::double_precision},
       {PrimitiveId::equals, ScalarType::boolean, ScalarType::boolean},
       {PrimitiveId::equals, ScalarType::integer, ScalarType::boolean},
@@ -616,8 +729,9 @@ TEST_CASE("S16-07 equal-typed empty vector pairs preserve dyadic result types") 
   }
 }
 
-TEST_CASE("S16-08 mixed numeric typed empties promote for add and equals in both positions") {
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+TEST_CASE("S16-08 mixed numeric typed empties promote for every numeric dyad in both positions") {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     for (std::size_t int_position = 0; int_position < 2; ++int_position) {
       CAPTURE(static_cast<int>(id));
       CAPTURE(int_position);
@@ -640,7 +754,8 @@ TEST_CASE("S16-08 mixed numeric typed empties promote for add and equals in both
 }
 
 TEST_CASE("S16-09 empty and nonempty vectors mismatch for each dyadic primitive and order") {
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     for (std::size_t empty_position = 0; empty_position < 2; ++empty_position) {
       CAPTURE(static_cast<int>(id));
       CAPTURE(empty_position);
@@ -694,7 +809,8 @@ TEST_CASE("S16-10 exact overloads win and retain their declared result types") {
 }
 
 TEST_CASE("S16-11 Int-to-Double promotion works in scalar and every vector position") {
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     for (std::size_t int_position = 0; int_position < 2; ++int_position) {
       CAPTURE(static_cast<int>(id));
       CAPTURE(int_position);
@@ -727,8 +843,15 @@ TEST_CASE("S16-11 Int-to-Double promotion works in scalar and every vector posit
       CHECK(vector_result.value.vector.element_type ==
             (id == PrimitiveId::equals ? ScalarType::boolean
                                        : ScalarType::double_precision));
-      CHECK(formatted(vector_result.value) ==
-            (id == PrimitiveId::equals ? "(true false)" : "(2.0 3.0)"));
+      std::string expected = "(2.0 3.0)";
+      if (id == PrimitiveId::equals) {
+        expected = "(true false)";
+      } else if (id == PrimitiveId::sub) {
+        expected = int_position == 0 ? "(0.0 1.0)" : "(0.0 -1.0)";
+      } else if (id == PrimitiveId::mul) {
+        expected = "(1.0 2.0)";
+      }
+      CHECK(formatted(vector_result.value) == expected);
       CHECK(vector_context.scalar_kernel_invocations == 2);
       release_vector_reservation(vector_resources, vector_result.value);
     }
@@ -797,7 +920,8 @@ TEST_CASE("S16-13 every primitive rejects unsupported element-type combinations"
     CHECK(resources.work_units == 0);
   }
 
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     std::vector<Value> reversed;
     reversed.push_back(make_int_value(1));
     reversed.push_back(make_bool_value(true));
@@ -893,7 +1017,8 @@ TEST_CASE("S16-15 every primitive rejects missing and excess arity without execu
 }
 
 TEST_CASE("S16-16 type validation precedes shape validation for every dyadic primitive") {
-  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::equals}) {
+  for (const PrimitiveId id : {PrimitiveId::add, PrimitiveId::sub,
+                               PrimitiveId::mul, PrimitiveId::equals}) {
     CAPTURE(static_cast<int>(id));
     std::vector<Value> arguments;
     arguments.push_back(int_vector({1, 2}));
@@ -911,28 +1036,41 @@ TEST_CASE("S16-16 type validation precedes shape validation for every dyadic pri
   }
 }
 
-TEST_CASE("S16-17 add shape validation precedes integer domain validation") {
-  std::vector<Value> arguments;
-  arguments.push_back(int_vector({INT64_MAX}));
-  arguments.push_back(int_vector({1, 2}));
-  EvaluationResources resources = make_trusted_local_resources({std::nullopt});
-  PrimitiveApplicationContext context{resources, 0};
-  const PrimitiveApplicationResult result = apply_primitive(
-      context, matrix_descriptor(PrimitiveId::add), arguments, matrix_location);
-  CHECK_FALSE(result.ok);
-  CHECK(result.error.kind == ErrorKind::shape_mismatch);
-  CHECK_FALSE(result.error.domain.has_value());
-  CHECK(context.scalar_kernel_invocations == 0);
-  CHECK(resources.work_units == 0);
+TEST_CASE("S16-17 checked dyad shape validation precedes integer domain validation") {
+  for (const PrimitiveId id :
+       {PrimitiveId::add, PrimitiveId::sub, PrimitiveId::mul}) {
+    std::vector<Value> arguments;
+    arguments.push_back(int_vector(
+        {id == PrimitiveId::add ? INT64_MAX : INT64_MIN}));
+    arguments.push_back(id == PrimitiveId::mul ? int_vector({-1, 1})
+                                               : int_vector({1, 2}));
+    EvaluationResources resources =
+        make_trusted_local_resources({std::nullopt});
+    PrimitiveApplicationContext context{resources, 0};
+    const PrimitiveApplicationResult result = apply_primitive(
+        context, matrix_descriptor(id), arguments, matrix_location);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.kind == ErrorKind::shape_mismatch);
+    CHECK_FALSE(result.error.domain.has_value());
+    CHECK(context.scalar_kernel_invocations == 0);
+    CHECK(resources.work_units == 0);
+  }
 }
 
-TEST_CASE("S16-18 resource preflight precedes domain checks for inc and add") {
-  for (const PrimitiveId id : {PrimitiveId::inc, PrimitiveId::add}) {
+TEST_CASE("S16-18 resource preflight precedes every checked arithmetic domain check") {
+  for (const PrimitiveId id :
+       {PrimitiveId::inc, PrimitiveId::dec, PrimitiveId::neg,
+        PrimitiveId::abs, PrimitiveId::add, PrimitiveId::sub,
+        PrimitiveId::mul}) {
     CAPTURE(static_cast<int>(id));
     std::vector<Value> arguments;
-    arguments.push_back(int_vector({INT64_MAX}));
-    if (id == PrimitiveId::add) {
+    arguments.push_back(int_vector(
+        {id == PrimitiveId::inc || id == PrimitiveId::add ? INT64_MAX
+                                                           : INT64_MIN}));
+    if (id == PrimitiveId::add || id == PrimitiveId::sub) {
       arguments.push_back(int_vector({1}));
+    } else if (id == PrimitiveId::mul) {
+      arguments.push_back(int_vector({-1}));
     }
     EvaluationResources resources = make_bounded_resources(
         ResourceLimits{0, std::nullopt, std::nullopt}, {std::nullopt});
@@ -948,13 +1086,24 @@ TEST_CASE("S16-18 resource preflight precedes domain checks for inc and add") {
   }
 }
 
-TEST_CASE("S16-19 inc and add report the lowest deterministic domain-failure index") {
-  for (const PrimitiveId id : {PrimitiveId::inc, PrimitiveId::add}) {
+TEST_CASE("S16-19 checked arithmetic reports the lowest deterministic domain-failure index") {
+  for (const PrimitiveId id :
+       {PrimitiveId::inc, PrimitiveId::dec, PrimitiveId::neg,
+        PrimitiveId::abs, PrimitiveId::add, PrimitiveId::sub,
+        PrimitiveId::mul}) {
     CAPTURE(static_cast<int>(id));
     std::vector<Value> arguments;
-    arguments.push_back(int_vector({0, INT64_MAX, INT64_MAX}));
-    if (id == PrimitiveId::add) {
+    if (id == PrimitiveId::inc || id == PrimitiveId::add) {
+      arguments.push_back(int_vector({0, INT64_MAX, INT64_MAX}));
+    } else if (id == PrimitiveId::mul) {
+      arguments.push_back(int_vector({1, INT64_MIN, INT64_MIN}));
+    } else {
+      arguments.push_back(int_vector({0, INT64_MIN, INT64_MIN}));
+    }
+    if (id == PrimitiveId::add || id == PrimitiveId::sub) {
       arguments.push_back(int_vector({0, 1, 1}));
+    } else if (id == PrimitiveId::mul) {
+      arguments.push_back(int_vector({1, -1, -1}));
     }
     EvaluationResources resources =
         make_trusted_local_resources({std::nullopt});
@@ -1055,9 +1204,14 @@ TEST_CASE("S16-22 every primitive is pointwise-consistent across deterministic s
       std::vector<Value> vector_args;
       switch (row.id) {
       case PrimitiveId::inc:
+      case PrimitiveId::dec:
+      case PrimitiveId::neg:
+      case PrimitiveId::abs:
         vector_args.push_back(int_vector(left_ints));
         break;
       case PrimitiveId::add:
+      case PrimitiveId::sub:
+      case PrimitiveId::mul:
       case PrimitiveId::equals:
         vector_args.push_back(int_vector(left_ints));
         vector_args.push_back(int_vector(right_ints));
@@ -1066,6 +1220,8 @@ TEST_CASE("S16-22 every primitive is pointwise-consistent across deterministic s
         vector_args.push_back(bool_vector(left_bools));
         break;
       case PrimitiveId::iota:
+        break;
+      default:
         break;
       }
 

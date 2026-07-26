@@ -5,17 +5,30 @@ scalars and homogeneous rank-1 vectors. The public evaluator, REPL, file runner,
 C11 emitter, and native builder all use the same rewrite grammar and typed
 semantics.
 
-The initial public primitives are exactly:
+The public primitives are exactly:
 
 - `inc`: increment an `Int` or `Double` scalar or vector;
+- `dec`: decrement an `Int` or `Double` scalar or vector;
+- `neg`: negate an `Int` or `Double` scalar or vector;
+- `abs`: take the absolute value of an `Int` or `Double` scalar or vector;
 - `add`: add numeric arguments element by element;
+- `sub`: subtract numeric arguments element by element;
+- `mul`: multiply numeric arguments element by element;
 - `equals`: compare `Bool`, `Int`, or `Double` arguments element by element;
-- `not`: negate `Bool` arguments element by element; and
+- `not_equals`: the elementwise logical complement of `equals`;
+- `not`: negate `Bool` arguments element by element;
+- `and` and `or`: ordinary eager `Bool` logic element by element;
+- `odd` and `even`: classify `Int` values by remainder modulo two;
+- `is_positive` and `is_negative`: compare `Int` or `Double` values strictly
+  against zero;
+- `less_than` and `greater_than`: strict numeric ordering in written operand
+  order; and
 - `iota`: construct the `Int` vector `1` through `n`, or an empty `Int` vector
   when `n <= 0`.
 
-General calls use brackets, such as `add[1 2.5]` and `inc[iota[3]]`. Unary
-calls also support right-associative prefix syntax: `inc 5` and `inc inc 5`.
+General calls use brackets, such as `sub[10 2.5]` and `mul[2 iota[3]]`. Unary
+calls also support right-associative prefix syntax, such as `neg -5` and
+`abs neg 5`.
 Scalars are `Bool`, signed 64-bit `Int`, or IEEE 754 binary64 `Double` values.
 Vector literals are homogeneous, for example `(1 2 3)`, `(1.0 2.5)`, and
 `(false true)`. Typed empty vectors are `Bool()`, `Int()`, and `Double()`.
@@ -27,10 +40,18 @@ structural values. A tuple inside an adjacent call remains one argument, so
 Elementwise calls broadcast scalars over vectors and require all vector
 arguments to have equal lengths. A singleton vector remains a vector and does
 not broadcast. Exact overloads win; the only implicit conversion is
-`Int -> Double`. Integer overflow is a structured domain error. Output is
-canonical, including `true`/`false`, visible `.0` for integral-valued Doubles,
-`-0.0`, `inf`, `-inf`, `nan`, parenthesized vectors, and bracketed tuples.
-Every complete program is evaluated before runner output is published.
+`Int -> Double`. The Int overloads of `inc`, `dec`, `neg`, `abs`, `add`, `sub`,
+and `mul` use checked signed-64-bit arithmetic; integer overflow is a structured
+domain error. Output is canonical, including `true`/`false`, visible `.0` for
+integral-valued Doubles, `-0.0`, `inf`, `-inf`, `nan`, parenthesized vectors,
+and bracketed tuples.
+Every complete program is evaluated before runner output is published. Numeric
+predicates use the same overload resolution: all-`Int` arguments stay exact,
+while mixed `Int`/`Double` arguments compare after `Int -> Double` conversion.
+Both signed zeros are neither positive nor negative and are equal for ordering;
+NaN is unordered, so both strict ordering predicates and both sign predicates
+return `false` when the relevant operand is NaN. Infinities use ordinary IEEE
+ordering.
 
 The CLI defaults to the `trusted-local-v2` execution profile with
 `max_vector_bytes`, `max_live_evaluation_bytes`, `max_work_units`, and
@@ -120,7 +141,7 @@ Emit deterministic, self-contained standard C11 and run it:
 
 ```sh
 ./build/bennu emit-c examples/rewrite.bennu -o rewrite.c
-cc -std=c11 rewrite.c -o rewrite
+cc -std=c11 -frounding-math -ffp-contract=off -fno-fast-math rewrite.c -o rewrite
 ./rewrite
 ```
 
@@ -149,6 +170,20 @@ spelling. It requires parentheses for homogeneous rank-1 literals and an
 explicit type for empty vectors. The initial language has no variables, user
 functions, trains, effects, reductions, multidimensional arrays, `length`, or
 `divide`.
+
+Issue #54 deliberately does not copy three Anka predicate details. Bennu defines
+parity mathematically, so `odd[-3]` is true rather than rejecting negative odd
+integers. Ordering preserves written operand order: `less_than[left right]`
+means `left < right`, and `greater_than[left right]` means `left > right`.
+Ordering remains numeric-only; Bool ordering and Bool/numeric conversions are
+rejected instead of adding comparison or conversion overloads.
+
+Unlike Anka's host-`int` arithmetic, Bennu's integer arithmetic is checked
+against signed Int64 before any potentially overflowing host operation. Bennu
+also fixes Double arithmetic to binary64 round-to-nearest, ties-to-even,
+canonicalizes every NaN, preserves gradual underflow, and restores any
+floating-point environment it changes rather than inheriting ambient host
+rounding, trap, flush-to-zero, excess-precision, or NaN-payload behavior.
 
 ## Version and release provenance
 
