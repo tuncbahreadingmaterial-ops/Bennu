@@ -101,7 +101,8 @@ Usage: bennu <command> [arguments]
 
 Commands:
   repl    Start an interactive Bennu session
-  run     Run a Bennu source file
+  run <source> [-- <arguments...>]
+          Run a Bennu source file
   emit-c  Emit C source for a Bennu source file
   build   Build a Bennu source file
 "@.Replace("`r`n", "`n") + "`n"
