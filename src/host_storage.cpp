@@ -3,6 +3,7 @@
 #include "host_storage_internal.hpp"
 
 #include <array>
+#include <atomic>
 #include <mutex>
 #include <new>
 
@@ -47,6 +48,7 @@ struct HostAllocationBucket {
 
 std::array<HostAllocationBucket, host_allocation_bucket_count>
     host_allocation_buckets{};
+std::atomic<std::size_t> registered_host_allocations{0U};
 
 std::size_t host_allocation_bucket_index(const void *payload) {
   const std::uintptr_t address =
@@ -124,7 +126,12 @@ bool register_host_allocation(
   }
   record->next = bucket.records;
   bucket.records = record;
+  registered_host_allocations.fetch_add(1U, std::memory_order_relaxed);
   return true;
+}
+
+std::size_t registered_host_allocation_count() {
+  return registered_host_allocations.load(std::memory_order_relaxed);
 }
 
 HostAllocationSnapshot find_host_allocation(

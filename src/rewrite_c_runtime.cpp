@@ -565,6 +565,38 @@ static int bennu_tuple(BennuResources *resources, BennuValue *result,
   return 1;
 }
 
+static int bennu_fanout(BennuResources *resources, BennuValue *result,
+                        BennuValue **empty_elements, size_t count,
+                        const char *admission_point,
+                        BennuSourceSpan primary_span,
+                        BennuSourceSpan context_span) {
+  if (!bennu_tuple(resources, result, empty_elements, count,
+                   admission_point, primary_span, context_span)) {
+    return 0;
+  }
+  result->cleanup_index = 0U;
+  return 1;
+}
+
+static void bennu_tuple_transfer(BennuValue *result, size_t index,
+                                 BennuValue *child) {
+  BennuValue *table = (BennuValue *)result->data;
+  size_t nested_index = 0U;
+  table[index] = *child;
+  table[index].parent = result;
+  table[index].parent_index = index;
+  if (table[index].container == BENNU_TUPLE) {
+    BennuValue *nested = (BennuValue *)table[index].data;
+    for (nested_index = 0U; nested_index < table[index].count;
+         ++nested_index) {
+      nested[nested_index].parent = &table[index];
+      nested[nested_index].parent_index = nested_index;
+    }
+  }
+  (void)memset(child, 0, sizeof(*child));
+  result->cleanup_index += 1U;
+}
+
 static void bennu_release(BennuResources *resources, BennuValue *value) {
   BennuValue *current = value;
   while (current != NULL) {

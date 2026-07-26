@@ -52,6 +52,7 @@ HostAllocationSnapshot find_host_allocation(
 HostAllocationSnapshot remove_host_allocation(
     const void *payload, HostAllocationPurpose purpose,
     const void *element_type);
+std::size_t registered_host_allocation_count();
 bool claim_host_array_elements(
     const void *payload, const void *element_type,
     std::size_t expected_capacity, std::size_t current_size,

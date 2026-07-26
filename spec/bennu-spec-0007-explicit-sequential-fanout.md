@@ -59,8 +59,8 @@ execution. The initial construct has these fixed boundaries:
 
 This specification defines syntax, spans, static and dynamic ordering,
 ownership, cleanup, provenance, profile-v2 events, backend agreement, and the
-required implementation test plan. It is specification-only and changes no
-parser, evaluator, emitted-C, or native behavior by itself.
+required implementation test plan. Issue #53 implements this contract across
+the parser, evaluator, emitted-C, and native surfaces.
 
 ## 3. Source grammar and branch boundaries
 
@@ -912,7 +912,7 @@ journeys are Linux x64, Windows x64, and macOS arm64. Strict C11 means
 GCC/Clang-compatible `-std=c11 -Wall -Wextra -Werror -pedantic-errors` and
 Windows MSVC `/std:c11 /W4 /WX` where applicable.
 
-| Plan ID | Normative requirement | Required future evidence |
+| Plan ID | Normative requirement | Required implementation evidence |
 | --- | --- | --- |
 | `FAN-001-GRAMMAR` | Sections 3 and 14 exact keyword, brackets, braces, separators, branch boundaries, one-or-more count, and structural reasons/spans. | Parser fixtures cover compact/multiline LF/CRLF forms, one/many branches, nested ordinary expressions, every invalid table row, missing/mismatched delimiters, bars/punctuation, and unique flat operand/branch ranges with exact spans. |
 | `FAN-002-PLACEHOLDER` | Section 4 branch-local exactly-one `_`, primitive-call ancestor path, root restriction, and no owned placement. | Static fixtures cover zero/one/two occurrences, each legal direct/prefix/nested-call position, tuple/vector/aggregate retention attempts, bare roots, scope isolation between branches, `_` outside fan-out, and exact reason/count/span. |
@@ -930,7 +930,7 @@ Windows MSVC `/std:c11 /W4 /WX` where applicable.
 | `FAN-014-NESTING-BOUNDARY` | Section 12 sibling composition and static rejection of lexical nested fan-out. | Parser/analysis fixtures cover nesting in operand and deep branch calls, sibling fan-outs in tuples/roots, fan-out under ordinary direct/prefix calls, exact inner-keyword error/context, and zero runtime work on rejection. |
 | `FAN-015-ATOMIC-OUTPUT` | Complete tuple publication and existing program-level output transaction. | Runner/C/native programs combine earlier roots with operand, table, branch, later-root, and formatting failures; assert nonzero status, exact structured failure, zero stdout, and complete cleanup. Existing short-write/flush remains the sole publication-prefix exception. |
 | `FAN-016-STRICT-C-NATIVE` | Section 15 portable flat lowering and backend agreement. | Deterministic emitted bytes, strict C11 compilation, native success/error/fault runs, generated-source inspection for sequential control flow/no runtime overload/no reference counting/no host recursion/no `sizeof` charge, and differential event/result comparison. |
-| `FAN-017-REGRESSION-PLATFORMS` | Unchanged ordinary calls, tuples, profiles, parameters, and supported targets. | Complete Release, strict/no-exceptions, sanitizer, and Linux/Windows/macOS suites retain existing behavior; fan-out corpus agrees across evaluator, CLI, emitted C, and native; current parser continues rejecting the syntax until Issue #53 implements it. |
+| `FAN-017-REGRESSION-PLATFORMS` | Unchanged ordinary calls, tuples, profiles, parameters, and supported targets. | Complete Release, strict/no-exceptions, sanitizer, and Linux/Windows/macOS suites retain existing behavior; the fan-out corpus agrees across evaluator, CLI, emitted C, and native. |
 
 No one surface substitutes for another. Public C++ tests establish ownership and
 structured data; analyzer tests establish complete static validation; evaluator
