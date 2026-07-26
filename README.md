@@ -26,16 +26,20 @@ The public primitives are exactly:
 - `iota`: construct the `Int` vector `1` through `n`, or an empty `Int` vector
   when `n <= 0`.
 
-General calls use brackets, such as `sub[10 2.5]` and `mul[2 iota[3]]`. Unary
-calls also support right-associative prefix syntax, such as `neg -5` and
-`abs neg 5`.
+General calls use adjacent brackets, such as `sub[10 2.5]` and
+`mul[2 iota[3]]`. Primitive names also support right-associative prefix syntax,
+such as `neg -5`, `abs neg 5`, and `add [1 2]`.
 Scalars are `Bool`, signed 64-bit `Int`, or IEEE 754 binary64 `Double` values.
 Vector literals are homogeneous, for example `(1 2 3)`, `(1.0 2.5)`, and
 `(false true)`. Typed empty vectors are `Bool()`, `Int()`, and `Double()`.
 Tuple literals use square brackets in expression position: `[]`, `[1]`,
 `[1 2.5 true]`, and `[1 [2 3]]`. Tuples are ordered, heterogeneous, immutable
-structural values. A tuple inside an adjacent call remains one argument, so
-`inc[[1 2]]` reports a type error; tuple spreading is not yet part of Bennu.
+structural values. Prefix application statically spreads a tuple operand by
+exactly one level, so `add [1 2]` supplies two arguments and evaluates to `3`.
+A tuple inside an adjacent direct call remains one argument, so `inc[[1 2]]`
+reports a type error. Spreading is limited to primitive-name prefix
+application: it is not recursive, and there is no explicit mixed-argument
+spread syntax.
 
 Elementwise calls broadcast scalars over vectors and require all vector
 arguments to have equal lengths. A singleton vector remains a vector and does
