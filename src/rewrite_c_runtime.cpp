@@ -676,7 +676,8 @@ static int bennu_finite_double_grammar(const char *spelling) {
   return spelling[index] == '\0' &&
          (has_fraction != 0 || has_exponent != 0);
 }
-
+)bennu_c";
+  source += R"bennu_c(
 static BennuArgumentDecode bennu_decode_int_argument(
     const char *spelling, BennuValue *result) {
   const int negative = spelling != NULL && spelling[0] == '-';

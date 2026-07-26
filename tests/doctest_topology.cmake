@@ -128,3 +128,49 @@ foreach(implementation IN ITEMS application native_builder rewrite)
   require_text("${source_text}" "TEST_CASE("
     "embedded doctest cases in ${implementation}.cpp")
 endforeach()
+
+set(runtime_source
+  "${BENNU_SOURCE_DIR}/src/rewrite_c_runtime.cpp")
+file(READ "${runtime_source}" runtime_source_text)
+set(runtime_literal_begin "R\"bennu_c(")
+set(runtime_literal_end ")bennu_c\"")
+set(runtime_literal_limit 15000)
+set(runtime_literal_count 0)
+set(runtime_literal_remainder "${runtime_source_text}")
+string(LENGTH "${runtime_literal_remainder}"
+  runtime_literal_remainder_length)
+while(runtime_literal_remainder_length GREATER 0)
+  string(FIND "${runtime_literal_remainder}" "${runtime_literal_begin}"
+    runtime_literal_begin_at)
+  if(runtime_literal_begin_at EQUAL -1)
+    break()
+  endif()
+  string(LENGTH "${runtime_literal_begin}" runtime_literal_begin_length)
+  math(EXPR runtime_literal_content_at
+    "${runtime_literal_begin_at} + ${runtime_literal_begin_length}")
+  string(SUBSTRING "${runtime_literal_remainder}"
+    ${runtime_literal_content_at} -1 runtime_literal_after_begin)
+  string(FIND "${runtime_literal_after_begin}" "${runtime_literal_end}"
+    runtime_literal_end_at)
+  if(runtime_literal_end_at EQUAL -1)
+    message(FATAL_ERROR
+      "unterminated generated-runtime raw literal after chunk "
+      "${runtime_literal_count}")
+  endif()
+  if(runtime_literal_end_at GREATER runtime_literal_limit)
+    message(FATAL_ERROR
+      "generated-runtime raw literal ${runtime_literal_count} has "
+      "${runtime_literal_end_at} bytes; limit is ${runtime_literal_limit}")
+  endif()
+  math(EXPR runtime_literal_count "${runtime_literal_count} + 1")
+  string(LENGTH "${runtime_literal_end}" runtime_literal_end_length)
+  math(EXPR runtime_literal_next_at
+    "${runtime_literal_end_at} + ${runtime_literal_end_length}")
+  string(SUBSTRING "${runtime_literal_after_begin}"
+    ${runtime_literal_next_at} -1 runtime_literal_remainder)
+  string(LENGTH "${runtime_literal_remainder}"
+    runtime_literal_remainder_length)
+endwhile()
+if(runtime_literal_count EQUAL 0)
+  message(FATAL_ERROR "generated runtime has no raw literal chunks")
+endif()
