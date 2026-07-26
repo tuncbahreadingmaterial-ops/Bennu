@@ -71,6 +71,19 @@ BENNU-SPEC-0005 sections 8.4 and 12.2 runner argument records and raw-text omiss
 BENNU-SPEC-0005 sections 11.2 and 12.3 runner transactional stdout|tests/runner_arguments_contract.cmake|PARG-015-ATOMIC-STDOUT
 BENNU-SPEC-0005 sections 4.2 and 15 zero-input compatibility and program-only rejection|tests/public_cutover_conformance.cpp|PARG-017-REGRESSION
 BENNU-SPEC-0005 section 17 target-native runner argument boundary matrix|tests/runner_arguments_contract.cmake|PARG-018-PLATFORMS
+BENNU-SPEC-0005 sections 8 and 9 emitted C11 count-first argument records and portable scalar decoding|tests/parameterized_c_artifacts.cmake|PARG-005-ARGUMENT-ERROR
+BENNU-SPEC-0005 section 9 exact emitted and native Bool Int and binary64 text corpus|tests/parameterized_c_artifacts.cmake|PARG-006-TEXT-GRAMMAR
+BENNU-SPEC-0005 sections 3.3 3.4 and 11.2 empty declarations and declared-but-unreferenced zero-root artifact binding|tests/parameterized_c_artifacts.cmake|PARG-008-ZERO-ROOTS
+BENNU-SPEC-0005 sections 6.3 and 11.4 emitted parameter-driven iota and dynamic shape|tests/parameterized_c_artifacts.cmake|PARG-009-DYNAMIC-IOTA-SHAPE
+BENNU-SPEC-0005 section 11.1 generated and native parameter-driven dynamic failure order|tests/parameterized_c_artifacts.cmake|PARG-010-RUNTIME-ORDER
+BENNU-SPEC-0005 sections 11 and 12 deterministic value-independent strict-C11 parameter lowering|tests/parameterized_c_artifacts.cmake|PARG-012-EMIT-C
+BENNU-SPEC-0005 section 12.1 native direct-argv equivalence|tests/parameterized_c_artifacts.cmake|PARG-013-NATIVE
+BENNU-SPEC-0005 sections 8.4 and 12.2 generated raw-text-free argument diagnostics|tests/parameterized_c_artifacts.cmake|PARG-014-DIAGNOSTICS
+BENNU-SPEC-0005 sections 11.2 and 12.3 generated and native transactional stdout|tests/parameterized_c_artifacts.cmake|PARG-015-ATOMIC-STDOUT
+BENNU-SPEC-0005 sections 11.3 and 13.2 hosted argc boundary conversion including zero negative and maximum int counts|tests/parameterized_c_artifacts.cmake|PARG-016-REPRESENTABILITY
+BENNU-SPEC-0005 sections 6.2 and 13.2 allocation-free parameter count index span literal and generated table representability preflight|src/rewrite.cpp|PARG-016-REPRESENTABILITY
+BENNU-SPEC-0005 section 15 header-absent and empty-header generated and native artifact regression including extra-argument rejection|tests/parameterized_c_artifacts.cmake|PARG-017-REGRESSION
+BENNU-SPEC-0005 section 17 target-native strict-C11 and native-build argument matrix|tests/parameterized_c_artifacts.cmake|PARG-018-PLATFORMS
 BENNU-SPEC-0006 section 4 structural type arena equality ownership notation and overflow|tests/tuple_foundation_conformance.cpp|TUP-002-TYPES
 BENNU-SPEC-0006 sections 5.1 5.4 and 5.6 flat values validation and queries|tests/tuple_foundation_conformance.cpp|TUP-003-VALUES
 BENNU-SPEC-0006 sections 5.2 5.3 and 5.5 unique transfer borrow lifetime detachment and reverse cleanup|tests/tuple_foundation_conformance.cpp|TUP-004-MOVE-CLEANUP

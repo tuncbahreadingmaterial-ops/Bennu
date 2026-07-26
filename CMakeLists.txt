@@ -388,6 +388,17 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/c_emission_contract.cmake"
   )
   add_test(
+    NAME cli.parameterized_c_artifacts
+    COMMAND
+      "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/parameterized_c_artifacts.cmake"
+  )
+  add_test(
     NAME cli.public_path_error_matrix
     COMMAND
       "${CMAKE_COMMAND}"
@@ -691,7 +702,8 @@ if(BUILD_TESTING)
     if(bennu_test_name MATCHES "^cli[.]")
       list(APPEND bennu_test_labels area.cli)
     endif()
-    if(bennu_test_name STREQUAL "cli.runner_arguments")
+    if(bennu_test_name STREQUAL "cli.runner_arguments" OR
+       bennu_test_name STREQUAL "cli.parameterized_c_artifacts")
       list(APPEND bennu_test_labels area.public area.spec)
     endif()
     if(bennu_test_name MATCHES "^docs[.]")

@@ -102,6 +102,12 @@ typedef enum BennuLimitKind {
   BENNU_LIMIT_MAX_TUPLE_TABLE_BYTES = 4
 } BennuLimitKind;
 
+typedef enum BennuArgumentDecode {
+  BENNU_ARGUMENT_DECODE_OK = 0,
+  BENNU_ARGUMENT_DECODE_INVALID_LITERAL = 1,
+  BENNU_ARGUMENT_DECODE_OUT_OF_RANGE = 2
+} BennuArgumentDecode;
+
 typedef struct BennuSourceLocation {
   size_t offset;
   size_t line;
@@ -615,6 +621,209 @@ static BennuValue bennu_scalar_double_bits(uint64_t bits) {
   result.double_precision =
       bennu_normalize_double(bennu_double_from_bits(bits));
   return result;
+}
+
+static int bennu_ascii_digit(char byte) {
+  return byte >= '0' && byte <= '9';
+}
+
+static int bennu_canonical_integer_grammar(const char *spelling) {
+  size_t index = 0U;
+  if (spelling == NULL) {
+    return 0;
+  }
+  if (spelling[index] == '-') {
+    ++index;
+  }
+  if (spelling[index] == '\0') {
+    return 0;
+  }
+  if (spelling[index] == '0') {
+    return index == 0U && spelling[index + 1U] == '\0';
+  }
+  if (spelling[index] < '1' || spelling[index] > '9') {
+    return 0;
+  }
+  do {
+    ++index;
+  } while (bennu_ascii_digit(spelling[index]));
+  return spelling[index] == '\0';
+}
+
+static int bennu_finite_double_grammar(const char *spelling) {
+  size_t index = 0U;
+  size_t integer_begin = 0U;
+  size_t fraction_begin = 0U;
+  size_t exponent_begin = 0U;
+  int has_fraction = 0;
+  int has_exponent = 0;
+  if (spelling == NULL) {
+    return 0;
+  }
+  if (spelling[index] == '-') {
+    ++index;
+  }
+  integer_begin = index;
+  while (bennu_ascii_digit(spelling[index])) {
+    ++index;
+  }
+  if (integer_begin == index ||
+      (spelling[integer_begin] == '0' &&
+       index != integer_begin + 1U)) {
+    return 0;
+  }
+  if (spelling[index] == '.') {
+    has_fraction = 1;
+    ++index;
+    fraction_begin = index;
+    while (bennu_ascii_digit(spelling[index])) {
+      ++index;
+    }
+    if (fraction_begin == index) {
+      return 0;
+    }
+  }
+  if (spelling[index] == 'e' || spelling[index] == 'E') {
+    has_exponent = 1;
+    ++index;
+    if (spelling[index] == '+' || spelling[index] == '-') {
+      ++index;
+    }
+    exponent_begin = index;
+    while (bennu_ascii_digit(spelling[index])) {
+      ++index;
+    }
+    if (exponent_begin == index) {
+      return 0;
+    }
+  }
+  return spelling[index] == '\0' &&
+         (has_fraction != 0 || has_exponent != 0);
+}
+)bennu_c";
+  source += R"bennu_c(
+static BennuArgumentDecode bennu_decode_int_argument(
+    const char *spelling, BennuValue *result) {
+  const int negative = spelling != NULL && spelling[0] == '-';
+  const size_t first_digit = negative != 0 ? 1U : 0U;
+  const uint64_t limit =
+      negative != 0
+          ? UINT64_C(9223372036854775808)
+          : UINT64_C(9223372036854775807);
+  uint64_t magnitude = UINT64_C(0);
+  size_t index = first_digit;
+  if (!bennu_canonical_integer_grammar(spelling)) {
+    return BENNU_ARGUMENT_DECODE_INVALID_LITERAL;
+  }
+  while (spelling[index] != '\0') {
+    const uint64_t digit = (uint64_t)(spelling[index] - '0');
+    if (magnitude > (limit - digit) / UINT64_C(10)) {
+      return BENNU_ARGUMENT_DECODE_OUT_OF_RANGE;
+    }
+    magnitude = magnitude * UINT64_C(10) + digit;
+    ++index;
+  }
+  if (negative != 0) {
+    result->integer =
+        magnitude == UINT64_C(9223372036854775808)
+            ? INT64_MIN
+            : -(int64_t)magnitude;
+  } else {
+    result->integer = (int64_t)magnitude;
+  }
+  *result = bennu_scalar_int(result->integer);
+  return BENNU_ARGUMENT_DECODE_OK;
+}
+
+static BennuArgumentDecode bennu_decode_double_argument(
+    const char *spelling, BennuValue *result) {
+  char *end = NULL;
+  double converted = 0.0;
+  uint64_t bits = UINT64_C(0);
+  if (spelling != NULL && strcmp(spelling, "inf") == 0) {
+    *result = bennu_scalar_double_bits(UINT64_C(0x7ff0000000000000));
+    return BENNU_ARGUMENT_DECODE_OK;
+  }
+  if (spelling != NULL && strcmp(spelling, "-inf") == 0) {
+    *result = bennu_scalar_double_bits(UINT64_C(0xfff0000000000000));
+    return BENNU_ARGUMENT_DECODE_OK;
+  }
+  if (spelling != NULL && strcmp(spelling, "nan") == 0) {
+    *result = bennu_scalar_double_bits(UINT64_C(0x7ff8000000000000));
+    return BENNU_ARGUMENT_DECODE_OK;
+  }
+  if (!bennu_finite_double_grammar(spelling)) {
+    return BENNU_ARGUMENT_DECODE_INVALID_LITERAL;
+  }
+  converted = strtod(spelling, &end);
+  bits = bennu_double_bits(converted);
+  if (end == NULL || *end != '\0' ||
+      (bits & UINT64_C(0x7ff0000000000000)) ==
+          UINT64_C(0x7ff0000000000000)) {
+    return BENNU_ARGUMENT_DECODE_OUT_OF_RANGE;
+  }
+  /*
+   * A finite subnormal or signed zero is accepted. The supported C11
+   * libraries perform one correctly rounded conversion; lexical
+   * prevalidation prevents strtod extensions and partial parses.
+   */
+  *result = bennu_scalar_double_bits(bits);
+  return BENNU_ARGUMENT_DECODE_OK;
+}
+
+static BennuArgumentDecode bennu_decode_argument(
+    BennuType type, const char *spelling, BennuValue *result) {
+  if (type == BENNU_BOOL) {
+    if (spelling != NULL && strcmp(spelling, "true") == 0) {
+      *result = bennu_scalar_bool(UINT8_C(1));
+      return BENNU_ARGUMENT_DECODE_OK;
+    }
+    if (spelling != NULL && strcmp(spelling, "false") == 0) {
+      *result = bennu_scalar_bool(UINT8_C(0));
+      return BENNU_ARGUMENT_DECODE_OK;
+    }
+    return BENNU_ARGUMENT_DECODE_INVALID_LITERAL;
+  }
+  if (type == BENNU_INT) {
+    return bennu_decode_int_argument(spelling, result);
+  }
+  return bennu_decode_double_argument(spelling, result);
+}
+
+static int bennu_report_argument_error(
+    const char *reason, size_t required_count, size_t supplied_count,
+    size_t position, const char *parameter_name, const char *expected_type,
+    const BennuSourceSpan *declaration_span) {
+  int written = 0;
+  if (declaration_span == NULL) {
+    written = fprintf(
+        stderr,
+        "bennu_argument_error reason=%s required_count=%" PRIuMAX
+        " supplied_count=%" PRIuMAX " position=%" PRIuMAX
+        " parameter_name=- expected_type=- declaration_span=-"
+        " actual_container=- actual_type=-"
+        " invalid_value_invariant=-\n",
+        reason, (uintmax_t)required_count, (uintmax_t)supplied_count,
+        (uintmax_t)position);
+  } else {
+    written = fprintf(
+        stderr,
+        "bennu_argument_error reason=%s required_count=%" PRIuMAX
+        " supplied_count=%" PRIuMAX " position=%" PRIuMAX
+        " parameter_name=%s expected_type=%s declaration_span=%" PRIuMAX
+        ":%" PRIuMAX ":%" PRIuMAX "-%" PRIuMAX ":%" PRIuMAX ":%" PRIuMAX
+        " actual_container=- actual_type=-"
+        " invalid_value_invariant=-\n",
+        reason, (uintmax_t)required_count, (uintmax_t)supplied_count,
+        (uintmax_t)position, parameter_name, expected_type,
+        (uintmax_t)declaration_span->begin.offset,
+        (uintmax_t)declaration_span->begin.line,
+        (uintmax_t)declaration_span->begin.column,
+        (uintmax_t)declaration_span->end.offset,
+        (uintmax_t)declaration_span->end.line,
+        (uintmax_t)declaration_span->end.column);
+  }
+  return written < 0 ? 0 : 1;
 }
 
 static int bennu_literal_bool(BennuResources *resources, BennuValue *result,

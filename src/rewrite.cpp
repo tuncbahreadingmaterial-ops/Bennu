@@ -4502,8 +4502,219 @@ RewriteEvaluationResult evaluate_rewrite_source(
                                       nullptr, nullptr, nullptr, nullptr);
 }
 
+enum class ParameterMetadataPreflightFailure {
+  none,
+  host_argument_count,
+  declaration_count,
+  extra_argument_position,
+  parameter_index,
+  source_coordinate,
+  parameter_name_bytes,
+  value_slots,
+  name_table,
+  type_table,
+  span_table,
+};
+
+struct ParameterMetadataPreflightInput {
+  std::size_t declaration_count;
+  bool has_parameter_index;
+  std::size_t maximum_parameter_index;
+  std::size_t maximum_source_coordinate;
+  std::size_t maximum_parameter_name_bytes;
+};
+
+struct ParameterMetadataRepresentation {
+  std::uintmax_t c_size_maximum;
+  std::uintmax_t c_unsigned_literal_maximum;
+  std::uintmax_t value_slot_bytes;
+  std::uintmax_t name_table_slot_bytes;
+  std::uintmax_t type_table_slot_bytes;
+  std::uintmax_t source_span_bytes;
+};
+
+struct ParameterMetadataPreflightResult {
+  bool ok;
+  ParameterMetadataPreflightFailure failure;
+};
+
+struct GeneratedCSourceLocationLayout {
+  std::size_t offset;
+  std::size_t line;
+  std::size_t column;
+};
+
+struct GeneratedCSourceSpanLayout {
+  GeneratedCSourceLocationLayout begin;
+  GeneratedCSourceLocationLayout end;
+};
+
+struct GeneratedCValueLayout {
+  int container;
+  int type;
+  std::size_t count;
+  std::uint8_t boolean;
+  std::int64_t integer;
+  double double_precision;
+  void *data;
+  void *parent;
+  std::size_t parent_index;
+  std::size_t cleanup_index;
+};
+
+ParameterMetadataRepresentation host_parameter_metadata_representation() {
+  return ParameterMetadataRepresentation{
+      std::numeric_limits<std::size_t>::max(),
+      std::numeric_limits<std::uintmax_t>::max(),
+      sizeof(GeneratedCValueLayout),
+      sizeof(const char *),
+      sizeof(const char *),
+      sizeof(GeneratedCSourceSpanLayout)};
+}
+
+ParameterMetadataPreflightResult parameter_metadata_preflight(
+    ParameterMetadataPreflightInput input,
+    ParameterMetadataRepresentation representation) {
+  if (std::numeric_limits<std::size_t>::digits >
+      std::numeric_limits<std::uintmax_t>::digits) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::declaration_count};
+  }
+  const std::uintmax_t maximum_count_from_argc =
+      static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) - 1U;
+  if (maximum_count_from_argc > representation.c_size_maximum) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::host_argument_count};
+  }
+  const std::uintmax_t declaration_count =
+      static_cast<std::uintmax_t>(input.declaration_count);
+  const std::uintmax_t representable_maximum =
+      std::min(representation.c_size_maximum,
+               representation.c_unsigned_literal_maximum);
+  if (declaration_count > representable_maximum) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::declaration_count};
+  }
+  if (declaration_count >= representable_maximum) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::extra_argument_position};
+  }
+  if (input.has_parameter_index) {
+    const std::uintmax_t maximum_parameter_index =
+        static_cast<std::uintmax_t>(input.maximum_parameter_index);
+    if (maximum_parameter_index >= declaration_count ||
+        maximum_parameter_index >= representable_maximum) {
+      return ParameterMetadataPreflightResult{
+          false, ParameterMetadataPreflightFailure::parameter_index};
+    }
+  }
+  if (static_cast<std::uintmax_t>(input.maximum_source_coordinate) >
+      representable_maximum) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::source_coordinate};
+  }
+  const std::uintmax_t maximum_parameter_name_bytes =
+      static_cast<std::uintmax_t>(input.maximum_parameter_name_bytes);
+  if (maximum_parameter_name_bytes >= representation.c_size_maximum) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::parameter_name_bytes};
+  }
+  const auto table_fits =
+      [declaration_count, &representation](std::uintmax_t width) {
+        return width != 0U &&
+               declaration_count <=
+                   representation.c_size_maximum / width;
+      };
+  if (!table_fits(representation.value_slot_bytes)) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::value_slots};
+  }
+  if (!table_fits(representation.name_table_slot_bytes)) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::name_table};
+  }
+  if (!table_fits(representation.type_table_slot_bytes)) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::type_table};
+  }
+  if (!table_fits(representation.source_span_bytes)) {
+    return ParameterMetadataPreflightResult{
+        false, ParameterMetadataPreflightFailure::span_table};
+  }
+  return ParameterMetadataPreflightResult{
+      true, ParameterMetadataPreflightFailure::none};
+}
+
+void include_parameter_metadata_position(std::size_t &maximum,
+                                         RewritePosition position) {
+  maximum = std::max(maximum, position.offset);
+  maximum = std::max(maximum, position.line);
+  maximum = std::max(maximum, position.column);
+}
+
+ParameterMetadataPreflightInput parameter_metadata_input(
+    const RewriteParameterHeader &header) {
+  ParameterMetadataPreflightInput input{
+      header.declarations.size(),
+      !header.declarations.empty(),
+      header.declarations.empty() ? 0U : header.declarations.size() - 1U,
+      0U,
+      0U};
+  include_parameter_metadata_position(input.maximum_source_coordinate,
+                                      header.span.begin);
+  include_parameter_metadata_position(input.maximum_source_coordinate,
+                                      header.span.end);
+  for (const RewriteParameterDeclaration &declaration :
+       header.declarations) {
+    input.maximum_parameter_name_bytes =
+        std::max(input.maximum_parameter_name_bytes,
+                 declaration.name.size());
+    include_parameter_metadata_position(input.maximum_source_coordinate,
+                                        declaration.span.begin);
+    include_parameter_metadata_position(input.maximum_source_coordinate,
+                                        declaration.span.end);
+  }
+  return input;
+}
+
+std::optional<RewriteEvaluationDiagnostic>
+parameter_metadata_preflight_diagnostic(
+    RewriteSpan header_span, ParameterMetadataPreflightInput input,
+    ParameterMetadataRepresentation representation) {
+  const ParameterMetadataPreflightResult preflight =
+      parameter_metadata_preflight(input, representation);
+  if (preflight.ok) {
+    return std::nullopt;
+  }
+  RewriteEvaluationDiagnostic diagnostic =
+      empty_rewrite_evaluation_diagnostic();
+  diagnostic.stage = RewriteEvaluationStage::resource_admission;
+  diagnostic.primary = header_span;
+  diagnostic.context = header_span;
+  diagnostic.related = header_span;
+  Error error = make_error(
+      ErrorKind::resource_error,
+      rewrite_source_location(header_span.begin));
+  error.resource = ResourceErrorContext{
+      ResourceErrorReason::size_overflow,
+      input.declaration_count,
+      std::nullopt,
+      "c-emitter-parameter-metadata",
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt,
+      std::nullopt};
+  diagnostic.error = std::move(error);
+  return diagnostic;
+}
+
 void append_c_unsigned(std::string &source, std::size_t value) {
-  std::array<char, 32> digits{};
+  std::array<char,
+             static_cast<std::size_t>(
+                 std::numeric_limits<std::size_t>::digits10) +
+                 3U>
+      digits{};
   const std::to_chars_result converted =
       std::to_chars(digits.data(), digits.data() + digits.size(), value);
   source.append(digits.data(), converted.ptr);
@@ -4755,6 +4966,157 @@ void append_source_span(std::string &source, RewriteSpan span) {
   source.push_back(')');
 }
 
+std::string_view public_scalar_type_name(ScalarType type) {
+  if (type == ScalarType::boolean) {
+    return "Bool";
+  }
+  if (type == ScalarType::integer) {
+    return "Int";
+  }
+  return "Double";
+}
+
+void append_c_source_location_initializer(std::string &source,
+                                          RewritePosition position) {
+  source += "{";
+  append_c_unsigned(source, position.offset);
+  source += ", ";
+  append_c_unsigned(source, position.line);
+  source += ", ";
+  append_c_unsigned(source, position.column);
+  source += "}";
+}
+
+void append_c_source_span_initializer(std::string &source, RewriteSpan span) {
+  source += "{";
+  append_c_source_location_initializer(source, span.begin);
+  source += ", ";
+  append_c_source_location_initializer(source, span.end);
+  source += "}";
+}
+
+void append_argument_adapter(std::string &source,
+                             const RewriteProgram &program) {
+  const std::size_t parameter_count =
+      program.parameter_header.declarations.size();
+  if (parameter_count != 0U) {
+    source += "static BennuValue bennu_parameters[" +
+              std::to_string(parameter_count) + "] = {{0}};\n";
+    source += "static const char *bennu_parameter_names[" +
+              std::to_string(parameter_count) + "] = {";
+    for (std::size_t index = 0U; index < parameter_count; ++index) {
+      if (index != 0U) {
+        source += ", ";
+      }
+      source += "\"";
+      source += program.parameter_header.declarations[index].name;
+      source += "\"";
+    }
+    source += "};\n";
+    source += "static const char *bennu_parameter_type_names[" +
+              std::to_string(parameter_count) + "] = {";
+    for (std::size_t index = 0U; index < parameter_count; ++index) {
+      if (index != 0U) {
+        source += ", ";
+      }
+      source += "\"";
+      source += public_scalar_type_name(
+          program.parameter_header.declarations[index].type);
+      source += "\"";
+    }
+    source += "};\n";
+    source += "static const BennuSourceSpan bennu_parameter_spans[" +
+              std::to_string(parameter_count) + "] = {";
+    for (std::size_t index = 0U; index < parameter_count; ++index) {
+      if (index != 0U) {
+        source += ", ";
+      }
+      append_c_source_span_initializer(
+          source, program.parameter_header.declarations[index].span);
+    }
+    source += "};\n";
+  }
+  source += "\nstatic int bennu_bind_arguments(int argc, char **argv) {\n"
+            "  size_t bennu_supplied = 0U;\n"
+            "  (void)bennu_decode_argument;\n"
+            "  (void)argv;\n"
+            "  if (argc > 1) {\n"
+            "    const uintmax_t bennu_host_count = "
+            "(uintmax_t)(argc - 1);\n"
+            "    if (bennu_host_count > (uintmax_t)SIZE_MAX) {\n"
+            "      (void)fputs(\"InternalError\\n\", stderr);\n"
+            "      return 0;\n"
+            "    }\n"
+            "    bennu_supplied = (size_t)bennu_host_count;\n"
+            "  }\n";
+  if (parameter_count != 0U) {
+    source += "  if (bennu_supplied < ";
+    append_c_unsigned(source, parameter_count);
+    source += ") {\n";
+    source +=
+        "    const size_t bennu_position = bennu_supplied + 1U;\n"
+        "    (void)bennu_report_argument_error(\n"
+        "        \"missing\", ";
+    append_c_unsigned(source, parameter_count);
+    source +=
+        ", bennu_supplied, bennu_position,\n"
+        "        bennu_parameter_names[bennu_supplied],\n"
+        "        bennu_parameter_type_names[bennu_supplied],\n"
+        "        &bennu_parameter_spans[bennu_supplied]);\n"
+        "    return 0;\n"
+        "  }\n";
+  }
+  source += "  if (bennu_supplied > ";
+  append_c_unsigned(source, parameter_count);
+  source +=
+      ") {\n"
+      "    (void)bennu_report_argument_error(\n"
+      "        \"extra\", ";
+  append_c_unsigned(source, parameter_count);
+  source += ", bennu_supplied, ";
+  append_c_unsigned(source, parameter_count + 1U);
+  source +=
+      ", NULL, NULL, NULL);\n"
+      "    return 0;\n"
+      "  }\n"
+      "  if (setlocale(LC_NUMERIC, \"C\") == NULL) {\n"
+      "    (void)fputs(\"InternalError\\n\", stderr);\n"
+      "    return 0;\n"
+      "  }\n";
+  for (std::size_t index = 0U; index < parameter_count; ++index) {
+    source += "  {\n"
+              "    const BennuArgumentDecode bennu_decoded =\n"
+              "        bennu_decode_argument(";
+    source += c_type_name(program.parameter_header.declarations[index].type);
+    source += ", argv == NULL ? NULL : argv[";
+    append_c_unsigned(source, index + 1U);
+    source += "], &bennu_parameters[";
+    append_c_unsigned(source, index);
+    source +=
+        "]);\n"
+        "    if (bennu_decoded != BENNU_ARGUMENT_DECODE_OK) {\n"
+        "      (void)bennu_report_argument_error(\n"
+        "          bennu_decoded == BENNU_ARGUMENT_DECODE_OUT_OF_RANGE\n"
+        "              ? \"out_of_range\" : \"invalid_literal\",\n"
+        "          ";
+    append_c_unsigned(source, parameter_count);
+    source += ", bennu_supplied, ";
+    append_c_unsigned(source, index + 1U);
+    source += ", bennu_parameter_names[";
+    append_c_unsigned(source, index);
+    source += "],\n          bennu_parameter_type_names[";
+    append_c_unsigned(source, index);
+    source += "], &bennu_parameter_spans[";
+    append_c_unsigned(source, index);
+    source += "]);\n"
+              "      return 0;\n"
+              "    }\n"
+              "  }\n";
+  }
+  source += "  return 1;\n"
+            "}\n\n";
+}
+
 void append_spread_provenance_arguments(
     std::string &source, const RewriteLoweringNode &call,
     const RewriteLoweringProgram &program) {
@@ -4793,6 +5155,14 @@ void append_scalar_node(std::string &source, std::size_t node_index,
     append_c_double_bits(source, node.double_precision);
     source += ");\n";
   }
+}
+
+void append_parameter_node(std::string &source, std::size_t node_index,
+                           const RewriteLoweringNode &node) {
+  source += "  bennu_values[" + std::to_string(node_index) +
+            "] = bennu_parameters[";
+  append_c_unsigned(source, node.parameter_index);
+  source += "];\n";
 }
 
 void append_vector_node(std::string &source, std::size_t node_index,
@@ -5155,6 +5525,8 @@ void append_lowered_rewrite_nodes(std::string &source,
     const RewriteLoweringNode &node = lowering.nodes[index];
     if (node.kind == RewriteNodeKind::scalar_literal) {
       append_scalar_node(source, index, node);
+    } else if (node.kind == RewriteNodeKind::parameter_reference) {
+      append_parameter_node(source, index, node);
     } else if (node.kind == RewriteNodeKind::vector_literal) {
       append_vector_node(source, index, node);
     } else if (node.kind == RewriteNodeKind::tuple_literal) {
@@ -5208,21 +5580,15 @@ CEmissionResult emit_rewrite_c_source_impl(
     return CEmissionResult{
         false, {}, public_error_from_diagnostic(source, diagnostic)};
   }
-  if (parsed.program.parameter_header.present) {
-    RewriteEvaluationDiagnostic diagnostic =
-        empty_rewrite_evaluation_diagnostic();
-    diagnostic.stage = RewriteEvaluationStage::parse;
-    diagnostic.primary = parsed.program.parameter_header.keyword_span;
-    diagnostic.context = parsed.program.parameter_header.span;
-    diagnostic.related = parsed.program.parameter_header.keyword_span;
-    diagnostic.rewrite = RewriteDiagnostic{
-        RewriteParseError::none,
-        diagnostic.primary,
-        diagnostic.context,
-        diagnostic.related,
-        ParameterErrorReason::unsupported_parameterized_surface};
+  std::optional<RewriteEvaluationDiagnostic> parameter_metadata_diagnostic =
+      parameter_metadata_preflight_diagnostic(
+          parsed.program.parameter_header.span,
+          parameter_metadata_input(parsed.program.parameter_header),
+          host_parameter_metadata_representation());
+  if (parameter_metadata_diagnostic.has_value()) {
     return CEmissionResult{
-        false, {}, public_error_from_diagnostic(source, diagnostic)};
+        false, {},
+        public_error_from_diagnostic(source, *parameter_metadata_diagnostic)};
   }
   RewriteResolutionResult resolution =
       prepared ? RewriteResolutionResult{
@@ -5317,6 +5683,7 @@ CEmissionResult emit_rewrite_c_source_impl(
   std::string generated;
   append_rewrite_c_runtime(generated);
   append_literal_arrays(generated, lowering);
+  append_argument_adapter(generated, parsed.program);
   generated += "static int bennu_execute(BennuResources *snapshot) {\n";
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
@@ -5395,7 +5762,10 @@ CEmissionResult emit_rewrite_c_source_impl(
   }
   generated += "}\n\n"
                "#ifndef BENNU_CUSTOM_MAIN\n"
-               "int main(void) {\n"
+               "int main(int argc, char **argv) {\n"
+               "  if (!bennu_bind_arguments(argc, argv)) {\n"
+               "    return 1;\n"
+               "  }\n"
                "  return bennu_execute(NULL);\n"
                "}\n"
                "#endif\n";
@@ -6768,6 +7138,104 @@ TEST_CASE("PARG-004-PARAMETER-LOWERING-METADATA") {
   CHECK(span_is(lowered_reference.source_span, 24U, 2U, 6U, 25U, 2U, 7U));
   CHECK(span_is(lowered_reference.declaration_name_span, 12U, 1U, 12U, 13U,
                 1U, 13U));
+}
+
+TEST_CASE("PARG-016-REPRESENTABILITY") {
+  const ParameterMetadataRepresentation host =
+      host_parameter_metadata_representation();
+  const ParameterMetadataPreflightInput ordinary{
+      3U, true, 2U, 40U, 7U};
+  CHECK(parameter_metadata_preflight(ordinary, host).ok);
+
+  ParameterMetadataRepresentation constrained = host;
+  constrained.c_size_maximum =
+      static_cast<std::uintmax_t>(std::numeric_limits<int>::max()) - 2U;
+  CHECK(parameter_metadata_preflight(
+            ParameterMetadataPreflightInput{0U, false, 0U, 0U, 0U},
+            constrained)
+            .failure ==
+        ParameterMetadataPreflightFailure::host_argument_count);
+
+  constrained = host;
+  constrained.c_unsigned_literal_maximum = 2U;
+  CHECK(parameter_metadata_preflight(
+            ParameterMetadataPreflightInput{3U, true, 2U, 2U, 1U},
+            constrained)
+            .failure ==
+        ParameterMetadataPreflightFailure::declaration_count);
+  CHECK(parameter_metadata_preflight(
+            ParameterMetadataPreflightInput{2U, true, 1U, 2U, 1U},
+            constrained)
+            .failure ==
+        ParameterMetadataPreflightFailure::extra_argument_position);
+
+  CHECK(parameter_metadata_preflight(
+            ParameterMetadataPreflightInput{3U, true, 3U, 40U, 7U}, host)
+            .failure ==
+        ParameterMetadataPreflightFailure::parameter_index);
+
+  constrained = host;
+  constrained.c_unsigned_literal_maximum = 39U;
+  CHECK(parameter_metadata_preflight(ordinary, constrained).failure ==
+        ParameterMetadataPreflightFailure::source_coordinate);
+
+  CHECK(parameter_metadata_preflight(
+            ParameterMetadataPreflightInput{
+                3U, true, 2U, 40U,
+                std::numeric_limits<std::size_t>::max()},
+            host)
+            .failure ==
+        ParameterMetadataPreflightFailure::parameter_name_bytes);
+
+  constrained = host;
+  constrained.value_slot_bytes =
+      std::numeric_limits<std::uintmax_t>::max();
+  CHECK(parameter_metadata_preflight(ordinary, constrained).failure ==
+        ParameterMetadataPreflightFailure::value_slots);
+  constrained = host;
+  constrained.name_table_slot_bytes =
+      std::numeric_limits<std::uintmax_t>::max();
+  CHECK(parameter_metadata_preflight(ordinary, constrained).failure ==
+        ParameterMetadataPreflightFailure::name_table);
+  constrained = host;
+  constrained.type_table_slot_bytes =
+      std::numeric_limits<std::uintmax_t>::max();
+  CHECK(parameter_metadata_preflight(ordinary, constrained).failure ==
+        ParameterMetadataPreflightFailure::type_table);
+  constrained = host;
+  constrained.source_span_bytes =
+      std::numeric_limits<std::uintmax_t>::max();
+  CHECK(parameter_metadata_preflight(ordinary, constrained).failure ==
+        ParameterMetadataPreflightFailure::span_table);
+
+  RewriteParseResult parsed = parse_rewrite("parameters[n Int]\n");
+  REQUIRE(parsed.ok);
+  const ParameterMetadataPreflightInput one_past{
+      std::numeric_limits<std::size_t>::max(),
+      true,
+      std::numeric_limits<std::size_t>::max() - 1U,
+      parsed.program.parameter_header.span.end.offset,
+      1U};
+  std::optional<RewriteEvaluationDiagnostic> diagnostic =
+      parameter_metadata_preflight_diagnostic(
+          parsed.program.parameter_header.span, one_past, host);
+  REQUIRE(diagnostic.has_value());
+  Error error =
+      public_error_from_diagnostic(parsed.program.source, *diagnostic);
+  CHECK(error.kind == ErrorKind::resource_error);
+  REQUIRE(error.resource.has_value());
+  CHECK(error.resource->reason == ResourceErrorReason::size_overflow);
+  CHECK(error.resource->requested_elements ==
+        std::optional<std::size_t>{
+            std::numeric_limits<std::size_t>::max()});
+  CHECK(error.resource->profile == "c-emitter-parameter-metadata");
+  CHECK(error.location.offset ==
+        parsed.program.parameter_header.span.begin.offset);
+  REQUIRE(error.primary_span.has_value());
+  CHECK(error.primary_span->begin.offset ==
+        parsed.program.parameter_header.span.begin.offset);
+  CHECK(error.primary_span->end.offset ==
+        parsed.program.parameter_header.span.end.offset);
 }
 
 TEST_CASE("typed lowering applies whole-program phase precedence") {
