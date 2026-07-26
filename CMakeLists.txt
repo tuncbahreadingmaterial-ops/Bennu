@@ -419,6 +419,16 @@ if(BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/tuple_literal_contract.cmake"
   )
   add_test(
+    NAME fanout.strict_c_native
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBENNU_EXECUTABLE=$<TARGET_FILE:bennu>"
+      "-DBENNU_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DBENNU_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DBENNU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+      "-DBENNU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/fanout_contract.cmake"
+  )
+  add_test(
     NAME cli.emit_c_negative_atomic
     COMMAND
       "${CMAKE_COMMAND}"
@@ -707,6 +717,9 @@ if(BUILD_TESTING)
     endif()
     if(bennu_test_name MATCHES "^tuple[.]")
       list(APPEND bennu_test_labels area.cli area.public area.tuple)
+    endif()
+    if(bennu_test_name MATCHES "^fanout[.]")
+      list(APPEND bennu_test_labels area.cli area.public area.tuple area.spec)
     endif()
     if(bennu_test_name MATCHES "^workflow[.]")
       list(APPEND bennu_test_labels area.workflow)

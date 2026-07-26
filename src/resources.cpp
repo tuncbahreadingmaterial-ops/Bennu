@@ -1,6 +1,7 @@
 #include "bennu/resources.hpp"
 
 #include "host_storage_internal.hpp"
+#include "preadmitted_tuple.hpp"
 
 #include "doctest/doctest.h"
 
@@ -2097,6 +2098,595 @@ TupleConstructionResult make_tuple_value(
   result.tuple.root_reservation = std::move(reserved.reservation);
   return TupleConstructionResult{true, std::move(result), ValueInvariant::none,
                                  no_error()};
+}
+
+TupleAssemblyAdmissionResult preadmit_tuple_assembly(
+    EvaluationResources &resources, std::size_t element_count,
+    std::size_t node_count, std::size_t edge_count,
+    std::size_t vector_payload_count, std::size_t nested_reservation_count,
+    SourceLocation location, std::string_view producer_name) {
+  EvaluationResourceState *resource_state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
+  std::unique_lock<std::mutex> transaction;
+  if (resource_state != nullptr) {
+    transaction =
+        std::unique_lock<std::mutex>(resource_state->transaction_mutex);
+  }
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources, resource_state);
+  TupleReservationResult reserved = reserve_tuple_table_locked(
+      resources, element_count, location, producer_name, resource_state);
+  if (!reserved.ok) {
+    return TupleAssemblyAdmissionResult{
+        false,
+        PreadmittedTupleAssembly{
+            make_int_value(0), HostArray<Value>{}, 0U, 0U, 0U, 0U, 0U,
+            0U},
+        std::move(reserved.error)};
+  }
+  finish_resource_record_sync(&record_sync);
+  if (transaction.owns_lock()) {
+    transaction.unlock();
+  }
+
+  Value value = make_int_value(0);
+  value.container = ContainerKind::tuple;
+  value.scalar = ScalarValue{ScalarType::boolean, false, 0, 0.0};
+  value.tuple.root_reservation = std::move(reserved.reservation);
+  HostArray<Value> fixed_slots;
+  HostResourceErrorReason allocated = HostResourceErrorReason::none;
+  if (edge_count < element_count) {
+    allocated = HostResourceErrorReason::size_overflow;
+  }
+  if (node_count != 0U || edge_count != 0U ||
+      vector_payload_count != 0U || nested_reservation_count != 0U ||
+      element_count != 0U) {
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(value.tuple.nodes, node_count,
+                                      std::nullopt);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(value.tuple.child_indexes, edge_count,
+                                      std::nullopt);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(value.tuple.vector_payloads,
+                                      vector_payload_count, std::nullopt);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated = allocate_host_array(value.tuple.reservations,
+                                      nested_reservation_count,
+                                      std::nullopt);
+    }
+    if (allocated == HostResourceErrorReason::none) {
+      allocated =
+          allocate_host_array(fixed_slots, element_count, std::nullopt);
+    }
+  }
+  if (allocated != HostResourceErrorReason::none ||
+      !host_array_has_capacity(value.tuple.nodes, node_count) ||
+      !host_array_has_capacity(value.tuple.child_indexes, edge_count) ||
+      !host_array_has_capacity(value.tuple.vector_payloads,
+                               vector_payload_count) ||
+      !host_array_has_capacity(value.tuple.reservations,
+                               nested_reservation_count) ||
+      !host_array_has_capacity(fixed_slots, element_count)) {
+    const std::optional<std::size_t> table_ordinal =
+        value.tuple.root_reservation.allocation_ordinal;
+    const std::size_t canonical_bytes =
+        value.tuple.root_reservation.canonical_bytes;
+    value.tuple.root_reservation.lifetime_observer =
+        ResourceLifetimeObserver{};
+    static_cast<void>(
+        release_tuple_table(resources, value.tuple.root_reservation));
+    Error error = make_resource_failure(
+        execution_profile_name(resources.profile),
+        allocated == HostResourceErrorReason::size_overflow
+            ? ResourceErrorReason::size_overflow
+            : ResourceErrorReason::allocation_unavailable,
+        location, producer_name, element_count, canonical_bytes,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        element_count == 0U ? std::nullopt : table_ordinal);
+    return TupleAssemblyAdmissionResult{
+        false,
+        PreadmittedTupleAssembly{
+            make_int_value(0), HostArray<Value>{}, 0U, 0U, 0U, 0U, 0U,
+            0U},
+        std::move(error)};
+  }
+
+  const auto initialize_metadata = [&]() {
+    for (std::size_t index = 0U; index < node_count; ++index) {
+      const HostResourceErrorReason pushed = host_array_push(
+          value.tuple.nodes,
+          ValueNode{ContainerKind::scalar,
+                    ScalarValue{ScalarType::boolean, false, 0, 0.0},
+                    0U, 0U, 0U, 0U});
+      if (pushed != HostResourceErrorReason::none) {
+        return pushed;
+      }
+    }
+    for (std::size_t index = 0U; index < edge_count; ++index) {
+      const HostResourceErrorReason pushed =
+          host_array_push(value.tuple.child_indexes, std::size_t{0U});
+      if (pushed != HostResourceErrorReason::none) {
+        return pushed;
+      }
+    }
+    for (std::size_t index = 0U; index < vector_payload_count; ++index) {
+      Value empty = make_int_value(0);
+      const HostResourceErrorReason pushed = host_array_push(
+          value.tuple.vector_payloads, std::move(empty.vector));
+      if (pushed != HostResourceErrorReason::none) {
+        return pushed;
+      }
+    }
+    for (std::size_t index = 0U; index < nested_reservation_count;
+         ++index) {
+      const HostResourceErrorReason pushed = host_array_push(
+          value.tuple.reservations, TupleTableReservation{});
+      if (pushed != HostResourceErrorReason::none) {
+        return pushed;
+      }
+    }
+    for (std::size_t index = 0U; index < element_count; ++index) {
+      const HostResourceErrorReason pushed =
+          host_array_push(fixed_slots, make_int_value(0));
+      if (pushed != HostResourceErrorReason::none) {
+        return pushed;
+      }
+    }
+    return HostResourceErrorReason::none;
+  };
+  allocated = initialize_metadata();
+  if (allocated != HostResourceErrorReason::none) {
+    const std::optional<std::size_t> table_ordinal =
+        value.tuple.root_reservation.allocation_ordinal;
+    const std::size_t canonical_bytes =
+        value.tuple.root_reservation.canonical_bytes;
+    reset_host_array(fixed_slots);
+    reset_host_array(value.tuple.nodes);
+    reset_host_array(value.tuple.child_indexes);
+    reset_host_array(value.tuple.vector_payloads);
+    reset_host_array(value.tuple.reservations);
+    value.tuple.root_reservation.lifetime_observer =
+        ResourceLifetimeObserver{};
+    static_cast<void>(
+        release_tuple_table(resources, value.tuple.root_reservation));
+    Error error = make_resource_failure(
+        execution_profile_name(resources.profile),
+        allocated == HostResourceErrorReason::size_overflow
+            ? ResourceErrorReason::size_overflow
+            : ResourceErrorReason::allocation_unavailable,
+        location, producer_name, element_count, canonical_bytes,
+        std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        element_count == 0U ? std::nullopt : table_ordinal);
+    return TupleAssemblyAdmissionResult{
+        false,
+        PreadmittedTupleAssembly{
+            make_int_value(0), HostArray<Value>{}, 0U, 0U, 0U, 0U, 0U,
+            0U},
+        std::move(error)};
+  }
+
+  observe_tuple_admission(value.tuple.root_reservation);
+  return TupleAssemblyAdmissionResult{
+      true,
+      PreadmittedTupleAssembly{
+          std::move(value), std::move(fixed_slots), element_count, 0U,
+          0U, 0U, 0U, 0U},
+      no_error()};
+}
+
+namespace {
+
+bool vector_fields_empty(const VectorValue &vector) {
+  return vector.element_type == ScalarType::boolean &&
+         vector.booleans.get() == nullptr &&
+         vector.boolean_count == 0U &&
+         vector.integers.get() == nullptr &&
+         vector.integer_count == 0U &&
+         vector.doubles.get() == nullptr &&
+         vector.double_count == 0U &&
+         vector.canonical_bytes == 0U &&
+         !vector.accounting_active &&
+         vector.accounting_owner.token == 0U &&
+         !vector.allocation_ordinal.has_value() &&
+         vector.lifetime_observer.context == nullptr &&
+         vector.lifetime_observer.record == nullptr;
+}
+
+bool tuple_fields_empty(const TupleValue &tuple) {
+  return host_array_metadata_valid(tuple.nodes) &&
+         host_array_metadata_valid(tuple.child_indexes) &&
+         host_array_metadata_valid(tuple.vector_payloads) &&
+         host_array_metadata_valid(tuple.reservations) &&
+         tuple.nodes.size == 0U &&
+         tuple.child_indexes.size == 0U &&
+         tuple.root_index == 0U &&
+         tuple.vector_payloads.size == 0U &&
+         tuple.reservations.size == 0U &&
+         tuple.root_reservation.storage.get() == nullptr &&
+         tuple.root_reservation.element_count == 0U &&
+         tuple.root_reservation.canonical_bytes == 0U &&
+         !tuple.root_reservation.accounting_active &&
+         tuple.root_reservation.accounting_owner.token == 0U &&
+         !tuple.root_reservation.allocation_ordinal.has_value() &&
+         tuple.root_reservation.lifetime_observer.context == nullptr &&
+         tuple.root_reservation.lifetime_observer.record == nullptr &&
+         tuple.first_child == 0U && tuple.child_count == 0U;
+}
+
+bool tuple_range_valid(std::size_t first, std::size_t count,
+                       std::size_t edge_count) {
+  return first <= edge_count && count <= edge_count - first;
+}
+
+bool preadmitted_value_layout_safe(const Value &value) {
+  if (!value.claimed) {
+    return false;
+  }
+  if (value.container == ContainerKind::scalar) {
+    return vector_fields_empty(value.vector) &&
+           tuple_fields_empty(value.tuple);
+  }
+  if (value.container == ContainerKind::vector) {
+    return tuple_fields_empty(value.tuple);
+  }
+  if (value.container != ContainerKind::tuple ||
+      !vector_fields_empty(value.vector) ||
+      !host_array_metadata_valid(value.tuple.nodes) ||
+      !host_array_metadata_valid(value.tuple.child_indexes) ||
+      !host_array_metadata_valid(value.tuple.vector_payloads) ||
+      !host_array_metadata_valid(value.tuple.reservations) ||
+      value.tuple.root_index != value.tuple.nodes.size ||
+      !tuple_range_valid(value.tuple.first_child,
+                         value.tuple.child_count,
+                         value.tuple.child_indexes.size)) {
+    return false;
+  }
+  for (std::size_t node_index = 0U;
+       node_index < value.tuple.nodes.size; ++node_index) {
+    const ValueNode &node =
+        value.tuple.nodes.storage.get()[node_index];
+    if (node.container == ContainerKind::tuple) {
+      if (!tuple_range_valid(node.first_child, node.child_count,
+                             value.tuple.child_indexes.size) ||
+          node.tuple_reservation_index >=
+              value.tuple.reservations.size) {
+        return false;
+      }
+      for (std::size_t offset = 0U; offset < node.child_count;
+           ++offset) {
+        if (value.tuple.child_indexes.storage.get()[
+                node.first_child + offset] >= node_index) {
+          return false;
+        }
+      }
+    } else if (node.container == ContainerKind::vector) {
+      if (node.vector_payload_index >=
+          value.tuple.vector_payloads.size) {
+        return false;
+      }
+    } else if (node.container != ContainerKind::scalar) {
+      return false;
+    }
+  }
+  for (std::size_t offset = 0U;
+       offset < value.tuple.child_count; ++offset) {
+    if (value.tuple.child_indexes.storage.get()[
+            value.tuple.first_child + offset] >=
+        value.tuple.nodes.size) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool preadmitted_value_counts(
+    const Value &value, std::size_t &node_count,
+    std::size_t &edge_count, std::size_t &vector_payload_count,
+    std::size_t &reservation_count) {
+  if (!preadmitted_value_layout_safe(value)) {
+    return false;
+  }
+  node_count = 1U;
+  edge_count = 0U;
+  vector_payload_count =
+      value.container == ContainerKind::vector ? 1U : 0U;
+  reservation_count = 0U;
+  if (value.container != ContainerKind::tuple) {
+    return true;
+  }
+  if (value.tuple.nodes.size ==
+          std::numeric_limits<std::size_t>::max() ||
+      value.tuple.reservations.size ==
+          std::numeric_limits<std::size_t>::max()) {
+    return false;
+  }
+  node_count += value.tuple.nodes.size;
+  edge_count = value.tuple.child_indexes.size;
+  vector_payload_count = value.tuple.vector_payloads.size;
+  reservation_count = value.tuple.reservations.size + 1U;
+  return true;
+}
+
+bool preadmitted_assembly_storage_safe(
+    const PreadmittedTupleAssembly &assembly) {
+  return assembly.value.claimed &&
+         assembly.value.container == ContainerKind::tuple &&
+         assembly.transferred_count <= assembly.element_count &&
+         assembly.transferred_count <= assembly.fixed_slots.size &&
+         assembly.fixed_slots.size == assembly.element_count &&
+         host_array_metadata_valid(assembly.fixed_slots) &&
+         host_array_metadata_valid(assembly.value.tuple.nodes) &&
+         host_array_metadata_valid(
+             assembly.value.tuple.child_indexes) &&
+         host_array_metadata_valid(
+             assembly.value.tuple.vector_payloads) &&
+         host_array_metadata_valid(
+             assembly.value.tuple.reservations) &&
+         assembly.value.tuple.child_indexes.size >=
+             assembly.element_count &&
+         assembly.transferred_node_count <=
+             assembly.value.tuple.nodes.size &&
+         assembly.transferred_edge_count <=
+             assembly.value.tuple.child_indexes.size -
+                 assembly.element_count &&
+         assembly.transferred_vector_payload_count <=
+             assembly.value.tuple.vector_payloads.size &&
+         assembly.transferred_reservation_count <=
+             assembly.value.tuple.reservations.size;
+}
+
+} // namespace
+
+TupleAssemblyOperationResult transfer_preadmitted_tuple_element(
+    PreadmittedTupleAssembly &assembly, Value &element) {
+  if (!preadmitted_assembly_storage_safe(assembly) ||
+      assembly.transferred_count == assembly.element_count) {
+    return TupleAssemblyOperationResult{
+        false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+  }
+
+  std::size_t node_count = 0U;
+  std::size_t edge_count = 0U;
+  std::size_t vector_payload_count = 0U;
+  std::size_t reservation_count = 0U;
+  if (!preadmitted_value_counts(
+          element, node_count, edge_count, vector_payload_count,
+          reservation_count)) {
+    return TupleAssemblyOperationResult{
+        false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+  }
+  const std::size_t nested_edge_capacity =
+      assembly.value.tuple.child_indexes.size - assembly.element_count;
+  const bool has_capacity =
+      node_count <= assembly.value.tuple.nodes.size -
+                        assembly.transferred_node_count &&
+      edge_count <=
+          nested_edge_capacity - assembly.transferred_edge_count &&
+      vector_payload_count <=
+          assembly.value.tuple.vector_payloads.size -
+              assembly.transferred_vector_payload_count &&
+      reservation_count <=
+          assembly.value.tuple.reservations.size -
+              assembly.transferred_reservation_count;
+  if (!has_capacity) {
+    return TupleAssemblyOperationResult{
+        false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+  }
+
+  assembly.fixed_slots.storage.get()[assembly.transferred_count] =
+      move_value(element);
+  ++assembly.transferred_count;
+  assembly.transferred_node_count += node_count;
+  assembly.transferred_edge_count += edge_count;
+  assembly.transferred_vector_payload_count += vector_payload_count;
+  assembly.transferred_reservation_count += reservation_count;
+  return TupleAssemblyOperationResult{
+      true, make_int_value(0), ValueInvariant::none};
+}
+
+TupleAssemblyOperationResult publish_preadmitted_tuple(
+    PreadmittedTupleAssembly &assembly) {
+  Value &result = assembly.value;
+  const bool complete =
+      preadmitted_assembly_storage_safe(assembly) &&
+      assembly.transferred_count == assembly.element_count &&
+      assembly.transferred_node_count == result.tuple.nodes.size &&
+      assembly.transferred_edge_count + assembly.element_count ==
+          result.tuple.child_indexes.size &&
+      assembly.transferred_vector_payload_count ==
+          result.tuple.vector_payloads.size &&
+      assembly.transferred_reservation_count ==
+          result.tuple.reservations.size;
+  if (!complete) {
+    return TupleAssemblyOperationResult{
+        false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+  }
+
+  std::size_t expected_nodes = 0U;
+  std::size_t expected_edges = 0U;
+  std::size_t expected_payloads = 0U;
+  std::size_t expected_reservations = 0U;
+  for (const Value &slot : host_array_span(assembly.fixed_slots)) {
+    std::size_t slot_nodes = 0U;
+    std::size_t slot_edges = 0U;
+    std::size_t slot_payloads = 0U;
+    std::size_t slot_reservations = 0U;
+    if (!preadmitted_value_counts(
+            slot, slot_nodes, slot_edges, slot_payloads,
+            slot_reservations) ||
+        slot_nodes > result.tuple.nodes.size - expected_nodes ||
+        slot_edges >
+            result.tuple.child_indexes.size -
+                assembly.element_count - expected_edges ||
+        slot_payloads >
+            result.tuple.vector_payloads.size - expected_payloads ||
+        slot_reservations >
+            result.tuple.reservations.size -
+                expected_reservations) {
+      return TupleAssemblyOperationResult{
+          false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+    }
+    expected_nodes += slot_nodes;
+    expected_edges += slot_edges;
+    expected_payloads += slot_payloads;
+    expected_reservations += slot_reservations;
+  }
+  if (expected_nodes != result.tuple.nodes.size ||
+      expected_edges + assembly.element_count !=
+          result.tuple.child_indexes.size ||
+      expected_payloads != result.tuple.vector_payloads.size ||
+      expected_reservations != result.tuple.reservations.size) {
+    return TupleAssemblyOperationResult{
+        false, make_int_value(0), ValueInvariant::invalid_tuple_range};
+  }
+
+  std::size_t node_cursor = 0U;
+  std::size_t edge_cursor = 0U;
+  std::size_t payload_cursor = 0U;
+  std::size_t reservation_cursor = 0U;
+  const std::size_t root_edge_begin =
+      result.tuple.child_indexes.size - assembly.element_count;
+  for (std::size_t position = 0U; position < assembly.element_count;
+       ++position) {
+    Value &slot = assembly.fixed_slots.storage.get()[position];
+    Value moved = move_value(slot);
+    if (moved.container != ContainerKind::tuple) {
+      const std::size_t payload_index = payload_cursor;
+      if (moved.container == ContainerKind::vector) {
+        result.tuple.vector_payloads.storage.get()[payload_cursor] =
+            std::move(moved.vector);
+        ++payload_cursor;
+      }
+      result.tuple.child_indexes.storage.get()[
+          root_edge_begin + position] = node_cursor;
+      result.tuple.nodes.storage.get()[node_cursor] =
+          ValueNode{moved.container, moved.scalar, 0U, 0U, 0U,
+                    payload_index};
+      ++node_cursor;
+      moved.claimed = false;
+      continue;
+    }
+
+    const std::size_t node_offset = node_cursor;
+    const std::size_t edge_offset = edge_cursor;
+    const std::size_t payload_offset = payload_cursor;
+    const std::size_t reservation_offset = reservation_cursor;
+    for (const ValueNode &source_node :
+         host_array_span(moved.tuple.nodes)) {
+      ValueNode transferred = source_node;
+      if (transferred.container == ContainerKind::tuple) {
+        transferred.first_child += edge_offset;
+        transferred.tuple_reservation_index += reservation_offset;
+      } else if (transferred.container == ContainerKind::vector) {
+        transferred.vector_payload_index += payload_offset;
+      }
+      result.tuple.nodes.storage.get()[node_cursor] = transferred;
+      ++node_cursor;
+    }
+    for (const std::size_t child_index :
+         host_array_span(moved.tuple.child_indexes)) {
+      result.tuple.child_indexes.storage.get()[edge_cursor] =
+          child_index + node_offset;
+      ++edge_cursor;
+    }
+    for (VectorValue &payload :
+         host_array_span(moved.tuple.vector_payloads)) {
+      result.tuple.vector_payloads.storage.get()[payload_cursor] =
+          std::move(payload);
+      ++payload_cursor;
+    }
+    for (TupleTableReservation &reservation :
+         host_array_span(moved.tuple.reservations)) {
+      result.tuple.reservations.storage.get()[reservation_cursor] =
+          std::move(reservation);
+      ++reservation_cursor;
+    }
+    const std::size_t root_reservation_index = reservation_cursor;
+    result.tuple.reservations.storage.get()[reservation_cursor] =
+        std::move(moved.tuple.root_reservation);
+    ++reservation_cursor;
+    result.tuple.child_indexes.storage.get()[root_edge_begin + position] =
+        node_cursor;
+    result.tuple.nodes.storage.get()[node_cursor] =
+        ValueNode{ContainerKind::tuple,
+                  moved.scalar,
+                  moved.tuple.first_child + edge_offset,
+                  moved.tuple.child_count,
+                  root_reservation_index,
+                  0U};
+    ++node_cursor;
+    moved.claimed = false;
+  }
+
+  result.tuple.first_child = root_edge_begin;
+  result.tuple.child_count = assembly.element_count;
+  result.tuple.root_index = result.tuple.nodes.size;
+  Value published = move_value(result);
+  reset_host_array(assembly.fixed_slots);
+  assembly.element_count = 0U;
+  assembly.transferred_count = 0U;
+  assembly.transferred_node_count = 0U;
+  assembly.transferred_edge_count = 0U;
+  assembly.transferred_vector_payload_count = 0U;
+  assembly.transferred_reservation_count = 0U;
+  return TupleAssemblyOperationResult{
+      true, std::move(published), ValueInvariant::none};
+}
+
+ValueReleaseResult release_preadmitted_tuple_assembly(
+    EvaluationResources &resources, PreadmittedTupleAssembly &assembly) {
+  const bool safe = preadmitted_assembly_storage_safe(assembly);
+  if (!safe) {
+    return ValueReleaseResult{
+        false, ValueInvariant::invalid_tuple_range};
+  }
+  for (std::size_t index = 0U;
+       index < assembly.transferred_count; ++index) {
+    if (!preadmitted_value_layout_safe(
+            assembly.fixed_slots.storage.get()[index])) {
+      return ValueReleaseResult{
+          false, ValueInvariant::invalid_tuple_range};
+    }
+  }
+  for (std::size_t end = assembly.transferred_count; end != 0U; --end) {
+    destroy_proven_value(
+        assembly.fixed_slots.storage.get()[end - 1U]);
+  }
+  reset_host_array(assembly.fixed_slots);
+  reset_host_array(assembly.value.tuple.nodes);
+  reset_host_array(assembly.value.tuple.child_indexes);
+  reset_host_array(assembly.value.tuple.vector_payloads);
+  reset_host_array(assembly.value.tuple.reservations);
+  release_proven_tuple_reservation(
+      assembly.value.tuple.root_reservation);
+  assembly.value = make_int_value(0);
+  assembly.element_count = 0U;
+  assembly.transferred_count = 0U;
+  assembly.transferred_node_count = 0U;
+  assembly.transferred_edge_count = 0U;
+  assembly.transferred_vector_payload_count = 0U;
+  assembly.transferred_reservation_count = 0U;
+  EvaluationResourceState *resource_state =
+      acquire_validated_resource_state(resources);
+  ResourceStatePin resource_pin = pin_resource_state(resource_state);
+  if (resource_state == nullptr) {
+    return ValueReleaseResult{
+        false, ValueInvariant::none,
+        ValueReleaseError::resource_context_mismatch};
+  }
+  const std::lock_guard<std::mutex> transaction(
+      resource_state->transaction_mutex);
+  ResourceRecordSync record_sync{};
+  ResourceRecordSyncGuard record_sync_guard =
+      begin_resource_record_sync(record_sync, resources,
+                                 resource_state);
+  return ValueReleaseResult{true, ValueInvariant::none};
 }
 
 TupleConstructionResult execute_tuple_construction(

@@ -4,6 +4,7 @@
 #include "bennu/primitive.hpp"
 #include "bennu/resources.hpp"
 #include "bennu/value.hpp"
+#include "preadmitted_tuple.hpp"
 #include "runner_arguments.hpp"
 #include "rewrite_c_runtime.hpp"
 #include "typed_application.hpp"
@@ -64,6 +65,9 @@ enum class RewriteTokenKind {
   right_bracket,
   left_parenthesis,
   right_parenthesis,
+  left_brace,
+  right_brace,
+  placeholder,
   horizontal_space,
   line_terminator,
   malformed_literal,
@@ -478,6 +482,14 @@ RewriteTokens tokenize_rewrite(std::string_view source) {
       result.tokens.push_back(token);
       continue;
     }
+    if (byte == '_') {
+      ++index;
+      ++position.offset;
+      ++position.column;
+      result.tokens.push_back(
+          make_token(RewriteTokenKind::placeholder, begin, position));
+      continue;
+    }
     if (is_uppercase(byte)) {
       do {
         ++index;
@@ -528,6 +540,12 @@ RewriteTokens tokenize_rewrite(std::string_view source) {
     case ')':
       kind = RewriteTokenKind::right_parenthesis;
       break;
+    case '{':
+      kind = RewriteTokenKind::left_brace;
+      break;
+    case '}':
+      kind = RewriteTokenKind::right_brace;
+      break;
     default:
       break;
     }
@@ -548,6 +566,8 @@ enum class RewriteNodeKind {
   parameter_reference,
   unresolved_name,
   primitive_call,
+  placeholder,
+  fanout,
 };
 
 enum class RewriteCallSyntax {
@@ -571,6 +591,18 @@ enum class RewriteParseError {
   invalid_vector_element,
   trailing_input,
   unknown_primitive,
+  expected_fanout_open,
+  expected_fanout_operand,
+  expected_fanout_branch,
+  expected_branch_open,
+  expected_branch_body,
+  expected_branch_close,
+  missing_fanout_close,
+  unexpected_fanout_token,
+  nested_fanout,
+  branch_root_not_primitive_call,
+  placeholder_count,
+  placeholder_owned_position,
 };
 
 struct RewriteNode {
@@ -597,6 +629,26 @@ struct RewriteCall {
   std::size_t first_argument;
   std::size_t argument_count;
   std::optional<PrimitiveId> primitive;
+};
+
+struct RewriteFanoutBranch {
+  RewriteSpan span;
+  RewriteSpan opening_span;
+  RewriteSpan closing_span;
+  RewriteSpan body_span;
+  RewriteSpan placeholder_span;
+  std::size_t root;
+};
+
+struct RewriteFanout {
+  RewriteSpan keyword_span;
+  RewriteSpan opening_span;
+  RewriteSpan closing_span;
+  RewriteSpan span;
+  RewriteSpan operand_span;
+  std::size_t operand;
+  std::size_t first_branch;
+  std::size_t branch_count;
 };
 
 struct RewriteDiagnostic {
@@ -638,6 +690,8 @@ struct RewriteProgram {
   std::vector<RewriteSpan> vector_element_spans;
   std::vector<std::size_t> tuple_elements;
   std::vector<RewriteSpan> tuple_element_spans;
+  std::vector<RewriteFanout> fanouts;
+  std::vector<RewriteFanoutBranch> fanout_branches;
 };
 
 struct RewriteParseResult {
@@ -650,6 +704,8 @@ enum class RewriteContextKind {
   bracket_call,
   tuple_literal,
   prefix_call,
+  fanout,
+  fanout_branch,
 };
 
 struct RewritePendingArgument {
@@ -667,6 +723,8 @@ struct RewriteContext {
   std::size_t argument_count;
   std::size_t opening_token_index;
   bool after_argument;
+  std::size_t fanout_keyword_token_index;
+  std::size_t branch_opening_token_index;
 };
 
 constexpr std::size_t no_index = std::numeric_limits<std::size_t>::max();
@@ -1058,6 +1116,109 @@ std::size_t finish_delimited(
       RewriteSpan{context.name_span.begin, closing_span.end});
 }
 
+void inspect_branch_placeholder(const RewriteProgram &program,
+                                std::size_t node_index, bool owned_position,
+                                std::size_t &count,
+                                std::optional<RewriteSpan> &first_span,
+                                bool &has_owned_position) {
+  const RewriteNode &node = program.nodes[node_index];
+  if (node.kind == RewriteNodeKind::placeholder) {
+    ++count;
+    if (!first_span.has_value()) {
+      first_span = node.span;
+    }
+    has_owned_position = has_owned_position || owned_position;
+    return;
+  }
+  if (node.kind == RewriteNodeKind::primitive_call) {
+    const RewriteCall &call = program.calls[node.call_index];
+    for (std::size_t position = 0U; position < call.argument_count;
+         ++position) {
+      inspect_branch_placeholder(
+          program, program.arguments[call.first_argument + position],
+          owned_position, count, first_span, has_owned_position);
+    }
+    return;
+  }
+  if (node.kind == RewriteNodeKind::tuple_literal) {
+    for (std::size_t position = 0U; position < node.element_count;
+         ++position) {
+      inspect_branch_placeholder(
+          program, program.tuple_elements[node.first_element + position],
+          true, count, first_span, has_owned_position);
+    }
+  }
+}
+
+bool finish_fanout_branch(const RewriteTokens &tokens,
+                          RewriteParseResult &result,
+                          std::vector<RewritePendingArgument> &pending,
+                          std::vector<RewriteContext> &contexts,
+                          RewriteSpan closing_span) {
+  const RewriteContext branch = contexts.back();
+  contexts.pop_back();
+  if (branch.argument_count == 0U) {
+    set_diagnostic(
+        result, RewriteParseError::expected_branch_body,
+        insertion_span(closing_span.begin),
+        RewriteSpan{branch.opening_span.begin, closing_span.end},
+        branch.opening_span);
+    return false;
+  }
+  const std::size_t root = pending[branch.first_pending_argument].node;
+  std::size_t placeholder_count = 0U;
+  std::optional<RewriteSpan> placeholder_span;
+  bool owned_position = false;
+  inspect_branch_placeholder(result.program, root, false, placeholder_count,
+                             placeholder_span, owned_position);
+  const RewriteSpan complete{branch.opening_span.begin, closing_span.end};
+  if (result.program.nodes[root].kind != RewriteNodeKind::primitive_call) {
+    set_diagnostic(result, RewriteParseError::branch_root_not_primitive_call,
+                   result.program.nodes[root].span, complete,
+                   branch.opening_span);
+    return false;
+  }
+  if (placeholder_count != 1U) {
+    set_diagnostic(
+        result, RewriteParseError::placeholder_count,
+        placeholder_span.value_or(result.program.nodes[root].span), complete,
+        branch.opening_span);
+    return false;
+  }
+  if (owned_position) {
+    set_diagnostic(result, RewriteParseError::placeholder_owned_position,
+                   *placeholder_span, complete, branch.opening_span);
+    return false;
+  }
+  result.program.fanout_branches.push_back(RewriteFanoutBranch{
+      complete, branch.opening_span, closing_span,
+      result.program.nodes[root].span, *placeholder_span, root});
+  RewriteContext &fanout = contexts.back();
+  append_pending_argument(pending, fanout, root);
+  fanout.after_argument = true;
+  static_cast<void>(tokens);
+  return true;
+}
+
+std::size_t finish_fanout(RewriteProgram &program,
+                          const std::vector<RewritePendingArgument> &pending,
+                          const RewriteContext &context,
+                          RewriteSpan closing_span) {
+  const std::size_t operand = pending[context.first_pending_argument].node;
+  const std::size_t branch_count = context.argument_count - 1U;
+  const std::size_t first_branch =
+      program.fanout_branches.size() - branch_count;
+  const RewriteSpan complete{context.name_span.begin, closing_span.end};
+  const std::size_t fanout_index = program.fanouts.size();
+  program.fanouts.push_back(RewriteFanout{
+      context.name_span, context.opening_span, closing_span, complete,
+      program.nodes[operand].span, operand, first_branch, branch_count});
+  program.nodes.push_back(RewriteNode{
+      RewriteNodeKind::fanout, complete, ScalarType::boolean, false, 0, 0.0,
+      first_branch, branch_count, 0U, fanout_index});
+  return program.nodes.size() - 1U;
+}
+
 RewriteSpan rewrite_context_span(const RewriteTokens &tokens,
                                  const RewriteContext &context) {
   if (context.kind == RewriteContextKind::tuple_literal) {
@@ -1384,6 +1545,161 @@ RewriteParseResult parse_rewrite(std::string_view source) {
     }
 
     if (!contexts.empty() &&
+        contexts.back().kind == RewriteContextKind::fanout_branch) {
+      RewriteContext &branch = contexts.back();
+      if (branch.after_argument) {
+        while (token_index < tokens.tokens.size() &&
+               (tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::horizontal_space ||
+                tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::line_terminator)) {
+          ++token_index;
+        }
+        if (token_index == tokens.tokens.size()) {
+          const RewriteSpan insertion = insertion_span(tokens.end);
+          set_diagnostic(
+              result, RewriteParseError::expected_branch_close, insertion,
+              RewriteSpan{branch.opening_span.begin, tokens.end},
+              branch.opening_span);
+          return result;
+        }
+        if (tokens.tokens[token_index].kind !=
+            RewriteTokenKind::right_brace) {
+          set_diagnostic(
+              result, RewriteParseError::expected_branch_close,
+              tokens.tokens[token_index].span,
+              RewriteSpan{branch.opening_span.begin,
+                          tokens.tokens[token_index].span.end},
+              branch.opening_span);
+          return result;
+        }
+        const RewriteSpan closing = tokens.tokens[token_index].span;
+        ++token_index;
+        if (!finish_fanout_branch(tokens, result, pending_arguments,
+                                  contexts, closing)) {
+          return result;
+        }
+        continue;
+      }
+      while (token_index < tokens.tokens.size() &&
+             (tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::horizontal_space ||
+              tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::line_terminator)) {
+        ++token_index;
+      }
+      if (token_index == tokens.tokens.size()) {
+        const RewriteSpan insertion = insertion_span(tokens.end);
+        set_diagnostic(result, RewriteParseError::expected_branch_body,
+                       insertion,
+                       RewriteSpan{branch.opening_span.begin, tokens.end},
+                       branch.opening_span);
+        return result;
+      }
+      if (tokens.tokens[token_index].kind ==
+          RewriteTokenKind::right_brace) {
+        set_diagnostic(result, RewriteParseError::expected_branch_body,
+                       insertion_span(tokens.tokens[token_index].span.begin),
+                       RewriteSpan{branch.opening_span.begin,
+                                   tokens.tokens[token_index].span.end},
+                       branch.opening_span);
+        return result;
+      }
+    } else if (!contexts.empty() &&
+               contexts.back().kind == RewriteContextKind::fanout) {
+      RewriteContext &fanout = contexts.back();
+      if (fanout.after_argument) {
+        const bool had_separator =
+            token_index < tokens.tokens.size() &&
+            (tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::horizontal_space ||
+             tokens.tokens[token_index].kind ==
+                 RewriteTokenKind::line_terminator);
+        while (token_index < tokens.tokens.size() &&
+               (tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::horizontal_space ||
+                tokens.tokens[token_index].kind ==
+                    RewriteTokenKind::line_terminator)) {
+          ++token_index;
+        }
+        if (token_index == tokens.tokens.size()) {
+          const RewriteSpan insertion = insertion_span(tokens.end);
+          set_diagnostic(result, RewriteParseError::missing_fanout_close,
+                         insertion,
+                         RewriteSpan{fanout.name_span.begin, tokens.end},
+                         fanout.opening_span);
+          return result;
+        }
+        if (tokens.tokens[token_index].kind ==
+            RewriteTokenKind::right_bracket) {
+          if (fanout.argument_count == 1U) {
+            set_diagnostic(
+                result, RewriteParseError::expected_fanout_branch,
+                insertion_span(tokens.tokens[token_index].span.begin),
+                RewriteSpan{fanout.name_span.begin,
+                            tokens.tokens[token_index].span.end},
+                fanout.opening_span);
+            return result;
+          }
+          const RewriteSpan closing = tokens.tokens[token_index].span;
+          ++token_index;
+          const RewriteContext completed = fanout;
+          contexts.pop_back();
+          completed_node = finish_fanout(
+              result.program, pending_arguments, completed, closing);
+          have_expression = true;
+          continue;
+        }
+        if (tokens.tokens[token_index].kind !=
+            RewriteTokenKind::left_brace) {
+          set_diagnostic(
+              result, RewriteParseError::expected_branch_open,
+              tokens.tokens[token_index].span,
+              RewriteSpan{fanout.name_span.begin,
+                          tokens.tokens[token_index].span.end},
+              fanout.opening_span);
+          return result;
+        }
+        if (!had_separator) {
+          set_diagnostic(result, RewriteParseError::missing_separator,
+                         tokens.tokens[token_index].span,
+                         RewriteSpan{fanout.name_span.begin,
+                                     tokens.tokens[token_index].span.end},
+                         fanout.opening_span);
+          return result;
+        }
+        const RewriteSpan opening = tokens.tokens[token_index].span;
+        contexts.push_back(RewriteContext{
+            RewriteContextKind::fanout_branch, opening, opening,
+            insertion_span(opening.end), no_index, no_index, 0U,
+            no_index, false, no_index, token_index});
+        ++token_index;
+        continue;
+      }
+      while (token_index < tokens.tokens.size() &&
+             (tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::horizontal_space ||
+              tokens.tokens[token_index].kind ==
+                  RewriteTokenKind::line_terminator)) {
+        ++token_index;
+      }
+      if (token_index == tokens.tokens.size() ||
+          tokens.tokens[token_index].kind ==
+              RewriteTokenKind::right_bracket) {
+        const RewriteSpan primary =
+            token_index == tokens.tokens.size()
+                ? insertion_span(tokens.end)
+                : insertion_span(tokens.tokens[token_index].span.begin);
+        set_diagnostic(
+            result, RewriteParseError::expected_fanout_operand, primary,
+            RewriteSpan{fanout.name_span.begin,
+                        token_index == tokens.tokens.size()
+                            ? tokens.end
+                            : tokens.tokens[token_index].span.end},
+            fanout.opening_span);
+        return result;
+      }
+    } else if (!contexts.empty() &&
         (contexts.back().kind == RewriteContextKind::bracket_call ||
          contexts.back().kind == RewriteContextKind::tuple_literal)) {
       RewriteContext &context = contexts.back();
@@ -1522,7 +1838,9 @@ RewriteParseResult parse_rewrite(std::string_view source) {
           no_index,
           0U,
           token_index,
-          false});
+          false,
+          no_index,
+          no_index});
       ++token_index;
       while (token_index < tokens.tokens.size() &&
              (tokens.tokens[token_index].kind ==
@@ -1577,6 +1895,39 @@ RewriteParseResult parse_rewrite(std::string_view source) {
       return result;
     }
     if (token.kind == RewriteTokenKind::name) {
+      if (rewrite_token_spelling(tokens, token) == "fanout") {
+        bool nested = false;
+        for (const RewriteContext &context : contexts) {
+          if (context.kind == RewriteContextKind::fanout ||
+              context.kind == RewriteContextKind::fanout_branch) {
+            nested = true;
+            break;
+          }
+        }
+        if (nested) {
+          set_diagnostic(result, RewriteParseError::nested_fanout,
+                         token.span, token.span, token.span);
+          return result;
+        }
+        if (token_index + 1U >= tokens.tokens.size() ||
+            tokens.tokens[token_index + 1U].kind !=
+                RewriteTokenKind::left_bracket) {
+          const RewriteSpan primary =
+              token_index + 1U < tokens.tokens.size()
+                  ? tokens.tokens[token_index + 1U].span
+                  : insertion_span(tokens.end);
+          set_diagnostic(result, RewriteParseError::expected_fanout_open,
+                         primary, token.span, token.span);
+          return result;
+        }
+        const RewriteSpan opening = tokens.tokens[token_index + 1U].span;
+        contexts.push_back(RewriteContext{
+            RewriteContextKind::fanout, token.span, opening,
+            insertion_span(opening.end), no_index, no_index, 0U,
+            token_index + 1U, false, token_index, no_index});
+        token_index += 2U;
+        continue;
+      }
       const std::optional<std::size_t> declared_parameter =
           find_parameter(result.program, rewrite_token_spelling(tokens, token));
       const bool inside_bracket =
@@ -1614,7 +1965,9 @@ RewriteParseResult parse_rewrite(std::string_view source) {
             no_index,
             0U,
             token_index + 1U,
-            false});
+            false,
+            no_index,
+            no_index});
         token_index += 2U;
         while (token_index < tokens.tokens.size() &&
                (tokens.tokens[token_index].kind ==
@@ -1637,7 +1990,9 @@ RewriteParseResult parse_rewrite(std::string_view source) {
                                           no_index,
                                           0U,
                                           no_index,
-                                          false});
+                                          false,
+                                          no_index,
+                                          no_index});
         token_index += 2U;
         if (token_index == tokens.tokens.size() ||
             tokens.tokens[token_index].kind ==
@@ -1655,6 +2010,33 @@ RewriteParseResult parse_rewrite(std::string_view source) {
         continue;
       }
       result.program.nodes.push_back(unresolved_name_node(token.span));
+      completed_node = result.program.nodes.size() - 1U;
+      ++token_index;
+      have_expression = true;
+      continue;
+    }
+    if (token.kind == RewriteTokenKind::placeholder) {
+      std::optional<std::size_t> operand;
+      for (std::size_t end = contexts.size(); end != 0U; --end) {
+        const RewriteContext &context = contexts[end - 1U];
+        if (context.kind != RewriteContextKind::fanout) {
+          continue;
+        }
+        if (context.first_pending_argument != no_index) {
+          operand =
+              pending_arguments[context.first_pending_argument].node;
+        }
+        break;
+      }
+      if (!operand.has_value()) {
+        set_diagnostic(result, RewriteParseError::unexpected_fanout_token,
+                       token.span, token.span, token.span);
+        return result;
+      }
+      result.program.nodes.push_back(
+          RewriteNode{RewriteNodeKind::placeholder, token.span,
+                      ScalarType::boolean, false, 0, 0.0, *operand,
+                      0U, 0U, 0U});
       completed_node = result.program.nodes.size() - 1U;
       ++token_index;
       have_expression = true;
@@ -1865,6 +2247,9 @@ struct RewriteLoweringProgram {
   std::vector<double> double_elements;
   std::vector<std::size_t> tuple_elements;
   std::vector<RewriteSpan> tuple_element_spans;
+  std::vector<std::size_t> fanout_operands;
+  std::vector<std::size_t> fanout_branch_roots;
+  std::vector<RewriteSpan> fanout_branch_spans;
 };
 
 struct RewriteLoweringResult {
@@ -1900,6 +2285,9 @@ clone_rewrite_lowering_program(const RewriteLoweringProgram &source) {
   clone.double_elements = source.double_elements;
   clone.tuple_elements = source.tuple_elements;
   clone.tuple_element_spans = source.tuple_element_spans;
+  clone.fanout_operands = source.fanout_operands;
+  clone.fanout_branch_roots = source.fanout_branch_roots;
+  clone.fanout_branch_spans = source.fanout_branch_spans;
   clone.nodes.reserve(source.nodes.size());
   for (const RewriteLoweringNode &node : source.nodes) {
     TypeConstructionResult structural_type =
@@ -2274,7 +2662,8 @@ std::optional<RewriteSpan>
 first_tuple_span(const RewriteProgram &program) {
   std::optional<RewriteSpan> earliest;
   for (const RewriteNode &node : program.nodes) {
-    if (node.kind != RewriteNodeKind::tuple_literal) {
+    if (node.kind != RewriteNodeKind::tuple_literal &&
+        node.kind != RewriteNodeKind::fanout) {
       continue;
     }
     if (!earliest.has_value() ||
@@ -2498,7 +2887,8 @@ RewriteLoweringResult lowering_failure(const RewriteProgram &program,
 
 RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
   const bool vector = node.kind == RewriteNodeKind::vector_literal;
-  const bool tuple = node.kind == RewriteNodeKind::tuple_literal;
+  const bool tuple = node.kind == RewriteNodeKind::tuple_literal ||
+                     node.kind == RewriteNodeKind::fanout;
   TypeArena structural_type =
       vector ? make_vector_type(node.element_type)
              : make_scalar_type(node.element_type);
@@ -2520,8 +2910,9 @@ RewriteLoweringNode base_lowering_node(const RewriteNode &node) {
       0U,
       false,
       node.first_element,
-      node.kind == RewriteNodeKind::parameter_reference ? node.first_element
-                                                        : 0U,
+      node.kind == RewriteNodeKind::parameter_reference
+          ? node.first_element
+          : node.kind == RewriteNodeKind::fanout ? node.call_index : 0U,
       node.boolean,
       node.integer,
       node.double_precision,
@@ -2542,18 +2933,66 @@ prefix_tuple_operand(const RewriteProgram &program,
     return std::nullopt;
   }
   const std::size_t operand = program.arguments[call.first_argument];
-  if (operand >= program.nodes.size() ||
-      program.nodes[operand].kind != RewriteNodeKind::tuple_literal) {
+  if (operand >= program.nodes.size()) {
+    return std::nullopt;
+  }
+  const RewriteNode &node = program.nodes[operand];
+  if (node.kind != RewriteNodeKind::tuple_literal &&
+      node.kind != RewriteNodeKind::fanout &&
+      !(node.kind == RewriteNodeKind::placeholder &&
+        node.first_element < program.nodes.size() &&
+        (program.nodes[node.first_element].kind ==
+             RewriteNodeKind::tuple_literal ||
+         program.nodes[node.first_element].kind ==
+             RewriteNodeKind::fanout))) {
     return std::nullopt;
   }
   return operand;
+}
+
+std::size_t structural_tuple_count(const RewriteProgram &program,
+                                   std::size_t tuple_node) {
+  const RewriteNode &node = program.nodes[tuple_node];
+  if (node.kind == RewriteNodeKind::placeholder) {
+    return structural_tuple_count(program, node.first_element);
+  }
+  return node.element_count;
+}
+
+std::size_t structural_tuple_element(const RewriteProgram &program,
+                                     std::size_t tuple_node,
+                                     std::size_t position) {
+  const RewriteNode &node = program.nodes[tuple_node];
+  if (node.kind == RewriteNodeKind::placeholder) {
+    return structural_tuple_element(program, node.first_element, position);
+  }
+  if (node.kind == RewriteNodeKind::fanout) {
+    const RewriteFanout &fanout = program.fanouts[node.call_index];
+    return program.fanout_branches[fanout.first_branch + position].root;
+  }
+  return program.tuple_elements[node.first_element + position];
+}
+
+RewriteSpan structural_tuple_element_span(const RewriteProgram &program,
+                                          std::size_t tuple_node,
+                                          std::size_t position) {
+  const RewriteNode &node = program.nodes[tuple_node];
+  if (node.kind == RewriteNodeKind::placeholder) {
+    return structural_tuple_element_span(program, node.first_element,
+                                         position);
+  }
+  if (node.kind == RewriteNodeKind::fanout) {
+    const RewriteFanout &fanout = program.fanouts[node.call_index];
+    return program.fanout_branches[fanout.first_branch + position].span;
+  }
+  return program.tuple_element_spans[node.first_element_span + position];
 }
 
 std::size_t semantic_argument_count(const RewriteProgram &program,
                                     const RewriteCall &call) {
   const std::optional<std::size_t> operand =
       prefix_tuple_operand(program, call);
-  return operand.has_value() ? program.nodes[*operand].element_count
+  return operand.has_value() ? structural_tuple_count(program, *operand)
                              : call.argument_count;
 }
 
@@ -2565,8 +3004,7 @@ std::size_t semantic_argument_node(const RewriteProgram &program,
   if (!operand.has_value()) {
     return program.arguments[call.first_argument + position];
   }
-  const RewriteNode &tuple = program.nodes[*operand];
-  return program.tuple_elements[tuple.first_element + position];
+  return structural_tuple_element(program, *operand, position);
 }
 
 RewriteSpan semantic_argument_span(const RewriteProgram &program,
@@ -2577,9 +3015,7 @@ RewriteSpan semantic_argument_span(const RewriteProgram &program,
   if (!operand.has_value()) {
     return program.argument_spans[call.first_argument + position];
   }
-  const RewriteNode &tuple = program.nodes[*operand];
-  return program.tuple_element_spans[
-      tuple.first_element_span + position];
+  return structural_tuple_element_span(program, *operand, position);
 }
 
 RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
@@ -2612,15 +3048,40 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
   lowering.double_elements = program.double_elements;
   lowering.tuple_elements = program.tuple_elements;
   lowering.tuple_element_spans = program.tuple_element_spans;
+  lowering.fanout_operands.reserve(program.fanouts.size());
+  for (const RewriteFanout &fanout : program.fanouts) {
+    lowering.fanout_operands.push_back(fanout.operand);
+  }
+  lowering.fanout_branch_roots.reserve(program.fanout_branches.size());
+  lowering.fanout_branch_spans.reserve(program.fanout_branches.size());
+  for (const RewriteFanoutBranch &branch : program.fanout_branches) {
+    lowering.fanout_branch_roots.push_back(branch.root);
+    lowering.fanout_branch_spans.push_back(branch.span);
+  }
   lowering.nodes.reserve(program.nodes.size());
   for (const RewriteNode &node : program.nodes) {
     lowering.nodes.push_back(base_lowering_node(node));
+    if (node.kind == RewriteNodeKind::fanout) {
+      RewriteLoweringNode &fanout = lowering.nodes.back();
+      fanout.primary_span =
+          program.fanouts[node.call_index].keyword_span;
+      fanout.admission_point = "fanout";
+    }
   }
   for (const std::size_t argument : lowering.arguments) {
     ++lowering.nodes[argument].use_count;
   }
   for (const std::size_t element : lowering.tuple_elements) {
     ++lowering.nodes[element].use_count;
+  }
+  for (const RewriteFanout &fanout : program.fanouts) {
+    ++lowering.nodes[fanout.operand].use_count;
+    for (std::size_t position = 0U; position < fanout.branch_count;
+         ++position) {
+      ++lowering.nodes[
+          program.fanout_branches[fanout.first_branch + position].root]
+            .use_count;
+    }
   }
   for (const std::size_t root : lowering.roots) {
     ++lowering.nodes[root].use_count;
@@ -2684,12 +3145,46 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
       break;
     }
     const RewriteNode &node = program.nodes[node_index];
-    if (node.kind == RewriteNodeKind::tuple_literal) {
+    if (node.kind == RewriteNodeKind::placeholder) {
+      if (node.first_element >= node_index ||
+          type_available[node.first_element] == std::uint8_t{0U}) {
+        continue;
+      }
+      TypeConstructionResult cloned =
+          clone_type(lowering.nodes[node.first_element].structural_type);
+      if (!cloned.ok) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::resource_admission;
+        diagnostic.primary = node.span;
+        diagnostic.context = node.span;
+        diagnostic.error = make_error(
+            ErrorKind::resource_error,
+            rewrite_source_location(node.span.begin),
+            "fanout placeholder type clone failed");
+        return RewriteLoweringResult{false, {}, std::move(diagnostic)};
+      }
+      RewriteLoweringNode &placeholder = lowering.nodes[node_index];
+      const RewriteLoweringNode &operand = lowering.nodes[node.first_element];
+      placeholder.cardinality = operand.cardinality;
+      placeholder.element_type = operand.element_type;
+      placeholder.element_count = operand.element_count;
+      placeholder.structural_type = std::move(cloned.type);
+      type_available[node_index] = std::uint8_t{1U};
+      continue;
+    }
+    if (node.kind == RewriteNodeKind::tuple_literal ||
+        node.kind == RewriteNodeKind::fanout) {
       bool children_available = true;
       for (std::size_t element_index = 0U;
            element_index < node.element_count; ++element_index) {
         const std::size_t child =
-            program.tuple_elements[node.first_element + element_index];
+            node.kind == RewriteNodeKind::fanout
+                ? program.fanout_branches[
+                      program.fanouts[node.call_index].first_branch +
+                      element_index]
+                      .root
+                : program.tuple_elements[node.first_element + element_index];
         if (type_available[child] == std::uint8_t{0U}) {
           children_available = false;
           break;
@@ -2703,7 +3198,12 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
       for (std::size_t element_index = 0U;
            element_index < node.element_count; ++element_index) {
         const std::size_t child =
-            program.tuple_elements[node.first_element + element_index];
+            node.kind == RewriteNodeKind::fanout
+                ? program.fanout_branches[
+                      program.fanouts[node.call_index].first_branch +
+                      element_index]
+                      .root
+                : program.tuple_elements[node.first_element + element_index];
         TypeConstructionResult cloned =
             clone_type(lowering.nodes[child].structural_type);
         if (!cloned.ok) {
@@ -2914,9 +3414,8 @@ RewriteLoweringResult lower_rewrite_program(const RewriteProgram &program) {
          argument_index < lowered.argument_count; ++argument_index) {
       const RewriteLoweringNode &argument = lowering.nodes[
           lowered.spreads_tuple
-              ? program.tuple_elements[
-                    program.nodes[lowered.spread_operand].first_element +
-                    argument_index]
+              ? structural_tuple_element(
+                    program, lowered.spread_operand, argument_index)
               : program.arguments[call.first_argument + argument_index]];
       if (argument.cardinality == RewriteCardinality::scalar) {
         continue;
@@ -2989,6 +3488,11 @@ bool rewrite_lowering_invariants_hold(
       lowering.tuple_elements != program.tuple_elements ||
       lowering.tuple_element_spans.size() !=
           program.tuple_element_spans.size() ||
+      lowering.fanout_operands.size() != program.fanouts.size() ||
+      lowering.fanout_branch_roots.size() !=
+          program.fanout_branches.size() ||
+      lowering.fanout_branch_spans.size() !=
+          program.fanout_branches.size() ||
       program.arguments.size() != program.argument_spans.size()) {
     return false;
   }
@@ -2996,6 +3500,21 @@ bool rewrite_lowering_invariants_hold(
        index < lowering.tuple_element_spans.size(); ++index) {
     if (!spans_equal(lowering.tuple_element_spans[index],
                      program.tuple_element_spans[index])) {
+      return false;
+    }
+  }
+  for (std::size_t index = 0U; index < program.fanouts.size(); ++index) {
+    if (lowering.fanout_operands[index] !=
+        program.fanouts[index].operand) {
+      return false;
+    }
+  }
+  for (std::size_t index = 0U;
+       index < program.fanout_branches.size(); ++index) {
+    if (lowering.fanout_branch_roots[index] !=
+            program.fanout_branches[index].root ||
+        !spans_equal(lowering.fanout_branch_spans[index],
+                     program.fanout_branches[index].span)) {
       return false;
     }
   }
@@ -3039,6 +3558,75 @@ bool rewrite_lowering_invariants_hold(
     }
     if (source_node.kind == RewriteNodeKind::unresolved_name) {
       return false;
+    }
+    if (source_node.kind == RewriteNodeKind::placeholder) {
+      if (source_node.first_element >= node_index ||
+          node.cardinality !=
+              lowering.nodes[source_node.first_element].cardinality ||
+          node.element_type !=
+              lowering.nodes[source_node.first_element].element_type ||
+          node.element_count !=
+              lowering.nodes[source_node.first_element].element_count ||
+          node.first_argument != 0U || node.argument_count != 0U ||
+          node.primitive_id.has_value() ||
+          node.implementation != PrimitiveImplementation::none ||
+          node.runtime_shape_check ||
+          !spans_equal(node.primary_span, source_node.span) ||
+          node.admission_point != std::string_view{} ||
+          !structural_type_equal(
+              node.structural_type,
+              lowering.nodes[source_node.first_element].structural_type)) {
+        return false;
+      }
+      continue;
+    }
+    if (source_node.kind == RewriteNodeKind::fanout) {
+      if (source_node.call_index >= program.fanouts.size()) {
+        return false;
+      }
+      const RewriteFanout &fanout =
+          program.fanouts[source_node.call_index];
+      if (fanout.operand >= node_index ||
+          fanout.first_branch > program.fanout_branches.size() ||
+          fanout.branch_count >
+              program.fanout_branches.size() - fanout.first_branch ||
+          node.cardinality != RewriteCardinality::tuple ||
+          node.element_count != fanout.branch_count ||
+          node.first_argument != 0U || node.argument_count != 0U ||
+          node.primitive_id.has_value() ||
+          node.implementation != PrimitiveImplementation::none ||
+          node.runtime_shape_check ||
+          !spans_equal(node.primary_span, fanout.keyword_span) ||
+          node.admission_point != std::string_view{"fanout"} ||
+          node.parameter_index != source_node.call_index) {
+        return false;
+      }
+      std::vector<TypeArena> branch_types;
+      branch_types.reserve(fanout.branch_count);
+      ++expected_uses[fanout.operand];
+      for (std::size_t position = 0U; position < fanout.branch_count;
+           ++position) {
+        const std::size_t branch =
+            program.fanout_branches[fanout.first_branch + position].root;
+        if (branch >= node_index || branch >= lowering.nodes.size()) {
+          return false;
+        }
+        TypeConstructionResult branch_type =
+            clone_type(lowering.nodes[branch].structural_type);
+        if (!branch_type.ok) {
+          return false;
+        }
+        branch_types.push_back(std::move(branch_type.type));
+        ++expected_uses[branch];
+      }
+      TypeConstructionResult expected_type =
+          make_tuple_type(branch_types);
+      if (!expected_type.ok ||
+          !structural_type_equal(node.structural_type,
+                                 expected_type.type)) {
+        return false;
+      }
+      continue;
     }
     if (source_node.kind == RewriteNodeKind::tuple_literal) {
       if (node.cardinality != RewriteCardinality::tuple ||
@@ -3316,13 +3904,17 @@ bool rewrite_lowering_invariants_hold(
   std::vector<std::uint8_t> tuple_owned(lowering.nodes.size(),
                                         std::uint8_t{0U});
   for (const RewriteLoweringNode &node : lowering.nodes) {
-    if (node.kind != RewriteNodeKind::tuple_literal) {
+    if (node.kind != RewriteNodeKind::tuple_literal &&
+        node.kind != RewriteNodeKind::fanout) {
       continue;
     }
     for (std::size_t position = 0U; position < node.element_count;
          ++position) {
       const std::size_t element =
-          lowering.tuple_elements[node.first_element + position];
+          node.kind == RewriteNodeKind::fanout
+              ? lowering.fanout_branch_roots[
+                    node.first_element + position]
+              : lowering.tuple_elements[node.first_element + position];
       if (tuple_owned[element] != std::uint8_t{0U}) {
         return false;
       }
@@ -3655,6 +4247,30 @@ std::string parse_error_message(RewriteParseError error) {
     return "root expression has trailing input";
   case RewriteParseError::unknown_primitive:
     return "unknown primitive";
+  case RewriteParseError::expected_fanout_open:
+    return "expected adjacent '[' after fanout";
+  case RewriteParseError::expected_fanout_operand:
+    return "expected fanout operand";
+  case RewriteParseError::expected_fanout_branch:
+    return "expected at least one fanout branch";
+  case RewriteParseError::expected_branch_open:
+    return "expected fanout branch opening '{'";
+  case RewriteParseError::expected_branch_body:
+    return "expected fanout branch body";
+  case RewriteParseError::expected_branch_close:
+    return "expected fanout branch closing '}'";
+  case RewriteParseError::missing_fanout_close:
+    return "missing fanout closing ']'";
+  case RewriteParseError::unexpected_fanout_token:
+    return "fanout token is not valid in this position";
+  case RewriteParseError::nested_fanout:
+    return "nested fanout is not supported";
+  case RewriteParseError::branch_root_not_primitive_call:
+    return "fanout branch root must be a primitive call";
+  case RewriteParseError::placeholder_count:
+    return "fanout branch must contain exactly one placeholder";
+  case RewriteParseError::placeholder_owned_position:
+    return "fanout placeholder cannot appear in an owned aggregate";
   }
   return "invalid source";
 }
@@ -3925,9 +4541,6 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return rewrite_evaluation_failure(
         invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
-  EvaluationResources resources =
-      prepared_resources == nullptr ? make_rewrite_resources(creation)
-                                    : *prepared_resources;
   const bool prepared =
       prepared_program != nullptr && prepared_lowering != nullptr;
   RewriteParseResult parsed = [&]() {
@@ -3946,7 +4559,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.primary = parsed.diagnostic.primary;
     diagnostic.context = parsed.diagnostic.context;
     diagnostic.related = parsed.diagnostic.related;
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   if (require_single_root && parsed.program.parameter_header.present) {
@@ -3960,7 +4574,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         RewriteParseError::trailing_input, diagnostic.primary,
         diagnostic.context, diagnostic.related,
         ParameterErrorReason::program_only_parameter_header};
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   if (require_single_root && parsed.program.roots.size() != 1U) {
@@ -3983,7 +4598,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
           rewrite_source_location(diagnostic.primary.begin),
           "evaluate_expression accepts exactly one root expression");
     }
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   const RewriteResolutionResult resolved =
@@ -4004,7 +4620,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
           ErrorKind::unknown_name,
           rewrite_source_location(resolved.diagnostic.primary.begin));
     }
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   if (!production_primitive_table_validation().ok) {
@@ -4013,14 +4630,16 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.stage = RewriteEvaluationStage::primitive_table;
     diagnostic.error = make_error(
         ErrorKind::invalid_primitive_table, SourceLocation{1U, 1U, 1U});
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   std::optional<RewriteEvaluationDiagnostic> profile_diagnostic =
       tuple_profile_diagnostic(parsed.program, creation.profile);
   if (profile_diagnostic.has_value()) {
     return rewrite_evaluation_failure(
-        resources, std::move(*profile_diagnostic), 0U);
+        invalid_rewrite_resources(creation),
+        std::move(*profile_diagnostic), 0U);
   }
 
   RewriteLoweringResult lowered = [&]() {
@@ -4042,8 +4661,9 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     return lower_rewrite_program(parsed.program);
   }();
   if (!lowered.ok) {
-    return rewrite_evaluation_failure(resources, std::move(lowered.diagnostic),
-                                      0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation),
+        std::move(lowered.diagnostic), 0U);
   }
   if (prepared &&
       !rewrite_lowering_invariants_hold(parsed.program, lowered.program)) {
@@ -4053,7 +4673,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     diagnostic.error = make_error(
         ErrorKind::invalid_primitive_table, SourceLocation{1U, 1U, 1U},
         "prepared typed rewrite lowering violates flat-program invariants");
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
 
   std::vector<Value> decoded_parameter_values;
@@ -4077,13 +4698,17 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
                              ? parsed.program.parameter_header.span
                              : insertion_span(RewritePosition{1U, 1U, 1U});
     diagnostic.error = std::move(parameter_error);
-    return rewrite_evaluation_failure(resources, std::move(diagnostic), 0U);
+    return rewrite_evaluation_failure(
+        invalid_rewrite_resources(creation), std::move(diagnostic), 0U);
   }
   const std::span<const Value> bound_parameter_values =
       decode_text_parameters
           ? std::span<const Value>(decoded_parameter_values)
           : parameter_values;
 
+  EvaluationResources resources =
+      prepared_resources == nullptr ? make_rewrite_resources(creation)
+                                    : *prepared_resources;
   WorkChargeResult resource_admission = charge_work(
       resources, 0U, SourceLocation{1U, 1U, 1U}, "rewrite-evaluator");
   if (!resource_admission.ok) {
@@ -4103,7 +4728,8 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
     }
   }
   for (const RewriteNode &node : parsed.program.nodes) {
-    if (node.kind == RewriteNodeKind::tuple_literal &&
+    if ((node.kind == RewriteNodeKind::tuple_literal ||
+         node.kind == RewriteNodeKind::fanout) &&
         node.element_count > maximum_call_arity) {
       maximum_call_arity = node.element_count;
     }
@@ -4127,10 +4753,109 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   }
   std::vector<std::uint8_t> node_live(parsed.program.nodes.size(),
                                       std::uint8_t{0U});
+  std::vector<PreadmittedTupleAssembly> fanout_assemblies;
+  fanout_assemblies.reserve(parsed.program.fanouts.size());
+  for (std::size_t fanout_index = 0U;
+       fanout_index < parsed.program.fanouts.size(); ++fanout_index) {
+    fanout_assemblies.push_back(PreadmittedTupleAssembly{
+        make_int_value(0), HostArray<Value>{}, 0U, 0U, 0U, 0U, 0U,
+        0U});
+  }
+  std::vector<std::uint8_t> fanout_assembly_live(
+      parsed.program.fanouts.size(), std::uint8_t{0U});
+  const auto release_execution_state = [&]() {
+    for (std::size_t end = fanout_assemblies.size(); end != 0U; --end) {
+      const std::size_t index = end - 1U;
+      if (fanout_assembly_live[index] != std::uint8_t{0U}) {
+        static_cast<void>(release_preadmitted_tuple_assembly(
+            resources, fanout_assemblies[index]));
+        fanout_assembly_live[index] = std::uint8_t{0U};
+      }
+    }
+    release_rewrite_node_values(resources, node_values, node_live);
+  };
   std::size_t scalar_kernel_invocations = 0U;
 
   for (std::size_t node_index = 0U;
        node_index < parsed.program.nodes.size(); ++node_index) {
+    for (std::size_t fanout_index = 0U;
+         fanout_index < parsed.program.fanouts.size(); ++fanout_index) {
+      const RewriteFanout &fanout = parsed.program.fanouts[fanout_index];
+      if (fanout.operand + 1U != node_index) {
+        continue;
+      }
+      std::size_t fanout_node_index = parsed.program.nodes.size();
+      for (std::size_t candidate = node_index;
+           candidate < parsed.program.nodes.size(); ++candidate) {
+        if (parsed.program.nodes[candidate].kind == RewriteNodeKind::fanout &&
+            parsed.program.nodes[candidate].call_index == fanout_index) {
+          fanout_node_index = candidate;
+          break;
+        }
+      }
+      if (fanout_node_index == parsed.program.nodes.size()) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::primitive_table;
+        diagnostic.error = make_error(
+            ErrorKind::invalid_primitive_table,
+            rewrite_source_location(fanout.keyword_span.begin));
+        release_execution_state();
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      std::size_t node_count = 0U;
+      std::size_t edge_count = fanout.branch_count;
+      std::size_t vector_payload_count = 0U;
+      std::size_t nested_reservation_count = 0U;
+      for (std::size_t position = 0U; position < fanout.branch_count;
+           ++position) {
+        const std::size_t branch_root =
+            parsed.program.fanout_branches[
+                fanout.first_branch + position]
+                .root;
+        const RewriteLoweringNode &branch =
+            lowering.nodes[branch_root];
+        if (branch.cardinality != RewriteCardinality::tuple) {
+          ++node_count;
+          if (branch.cardinality == RewriteCardinality::static_vector ||
+              branch.cardinality == RewriteCardinality::dynamic_vector) {
+            ++vector_payload_count;
+          }
+          continue;
+        }
+        const std::span<const TypeNode> branch_nodes =
+            type_nodes(branch.structural_type);
+        node_count += branch_nodes.size();
+        edge_count += branch.structural_type.child_indexes.size;
+        for (const TypeNode &type_node : branch_nodes) {
+          if (type_node.kind == TypeKind::vector) {
+            ++vector_payload_count;
+          } else if (type_node.kind == TypeKind::tuple) {
+            ++nested_reservation_count;
+          }
+        }
+      }
+      TupleAssemblyAdmissionResult admitted = preadmit_tuple_assembly(
+          resources, fanout.branch_count, node_count, edge_count,
+          vector_payload_count, nested_reservation_count,
+          rewrite_source_location(fanout.keyword_span.begin), "fanout");
+      if (!admitted.ok) {
+        RewriteEvaluationDiagnostic diagnostic =
+            empty_rewrite_evaluation_diagnostic();
+        diagnostic.stage = RewriteEvaluationStage::resource_admission;
+        diagnostic.primary = fanout.keyword_span;
+        diagnostic.context = fanout.span;
+        diagnostic.related = fanout.operand_span;
+        diagnostic.error = std::move(admitted.error);
+        release_execution_state();
+        return rewrite_evaluation_failure(
+            resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      fanout_assemblies[fanout_index] =
+          std::move(admitted.assembly);
+      fanout_assembly_live[fanout_index] = std::uint8_t{1U};
+    }
     const RewriteNode &node = parsed.program.nodes[node_index];
     const RewriteLoweringNode &lowered_node = lowering.nodes[node_index];
     if (lowered_node.operation == RewriteLoweringOperation::prepared_value) {
@@ -4144,7 +4869,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         diagnostic.error = make_error(
             ErrorKind::invalid_primitive_table, lowered_node.source_location,
             "prepared lowering is missing a node value");
-        release_rewrite_node_values(resources, node_values, node_live);
+        release_execution_state();
         return rewrite_evaluation_failure(
             resources, std::move(diagnostic), scalar_kernel_invocations);
       }
@@ -4157,7 +4882,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         diagnostic.error = make_error(
             ErrorKind::invalid_primitive_table, lowered_node.source_location,
             "prepared lowering contains an invalid owned value");
-        release_rewrite_node_values(resources, node_values, node_live);
+        release_execution_state();
         return rewrite_evaluation_failure(
             resources, std::move(diagnostic), scalar_kernel_invocations);
       }
@@ -4197,6 +4922,11 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       }
       continue;
     }
+    if (node.kind == RewriteNodeKind::placeholder) {
+      node_values[node_index] = make_int_value(0);
+      node_live[node_index] = std::uint8_t{1U};
+      continue;
+    }
     if (node.kind == RewriteNodeKind::vector_literal) {
       VectorAllocationResult literal =
           vector_literal_value(resources, parsed.program, node);
@@ -4215,24 +4945,34 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       diagnostic.primary = node.span;
       diagnostic.context = node.span;
       diagnostic.error = std::move(literal.error);
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
-    if (node.kind == RewriteNodeKind::tuple_literal) {
+    if (node.kind == RewriteNodeKind::tuple_literal ||
+        node.kind == RewriteNodeKind::fanout) {
+      const bool fanout_node = node.kind == RewriteNodeKind::fanout;
+      const RewriteFanout *fanout =
+          fanout_node ? &parsed.program.fanouts[node.call_index] : nullptr;
       bool invalid_forward_use = false;
-      for (std::size_t element_index = 0U;
-           element_index < node.element_count; ++element_index) {
-        const std::size_t element_node =
-            parsed.program.tuple_elements[node.first_element + element_index];
-        if (node_live[element_node] == std::uint8_t{0U} ||
-            remaining_uses[element_node] != 1U) {
-          invalid_forward_use = true;
-          break;
+      if (fanout_node) {
+        invalid_forward_use =
+            fanout_assembly_live[node.call_index] == std::uint8_t{0U};
+      } else {
+        for (std::size_t element_index = 0U;
+             element_index < node.element_count; ++element_index) {
+          const std::size_t element_node =
+              parsed.program.tuple_elements[
+                  node.first_element + element_index];
+          if (node_live[element_node] == std::uint8_t{0U} ||
+              remaining_uses[element_node] != 1U) {
+            invalid_forward_use = true;
+            break;
+          }
+          tuple_arguments.push_back(move_value(node_values[element_node]));
+          node_live[element_node] = std::uint8_t{0U};
+          --remaining_uses[element_node];
         }
-        tuple_arguments.push_back(move_value(node_values[element_node]));
-        node_live[element_node] = std::uint8_t{0U};
-        --remaining_uses[element_node];
       }
       if (invalid_forward_use) {
         release_rewrite_values(resources, tuple_arguments);
@@ -4244,13 +4984,33 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         diagnostic.error = make_error(
             ErrorKind::invalid_primitive_table,
             rewrite_source_location(node.span.begin));
-        release_rewrite_node_values(resources, node_values, node_live);
+        release_execution_state();
         return rewrite_evaluation_failure(
             resources, std::move(diagnostic), scalar_kernel_invocations);
       }
-      TupleConstructionResult tuple = make_tuple_value(
-          resources, tuple_arguments, rewrite_source_location(node.span.begin),
-          "tuple-literal");
+      TupleConstructionResult tuple{
+          true, make_int_value(0), ValueInvariant::none,
+          make_error(ErrorKind::none,
+                     rewrite_source_location(node.span.begin))};
+      if (fanout_node) {
+        TupleAssemblyOperationResult published =
+            publish_preadmitted_tuple(
+                fanout_assemblies[node.call_index]);
+        if (!published.ok) {
+          tuple.ok = false;
+          tuple.invariant = published.invariant;
+          tuple.error = make_error(
+              ErrorKind::invalid_primitive_table,
+              rewrite_source_location(node.span.begin),
+              "fanout tuple assembly is incomplete or structurally invalid");
+        } else {
+          tuple.value = std::move(published.value);
+        }
+      } else {
+        tuple = make_tuple_value(
+            resources, tuple_arguments,
+            rewrite_source_location(node.span.begin), "tuple-literal");
+      }
       if (!tuple.ok) {
         release_rewrite_values(resources, tuple_arguments);
         RewriteEvaluationDiagnostic diagnostic =
@@ -4259,9 +5019,17 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         diagnostic.primary = node.span;
         diagnostic.context = node.span;
         diagnostic.error = std::move(tuple.error);
-        release_rewrite_node_values(resources, node_values, node_live);
+        release_execution_state();
         return rewrite_evaluation_failure(
             resources, std::move(diagnostic), scalar_kernel_invocations);
+      }
+      if (fanout_node) {
+        fanout_assembly_live[node.call_index] = std::uint8_t{0U};
+        release_rewrite_node_value(
+            resources, node_values, node_live, fanout->operand);
+        if (remaining_uses[fanout->operand] != 0U) {
+          --remaining_uses[fanout->operand];
+        }
       }
       tuple_arguments.clear();
       node_values[node_index] = move_value(tuple.value);
@@ -4282,7 +5050,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       RewriteEvaluationDiagnostic diagnostic =
           application_rewrite_diagnostic(parsed.program, call,
                                          std::move(error));
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
@@ -4292,14 +5060,24 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
          argument_index < call.argument_count; ++argument_index) {
       const std::size_t argument_node =
           parsed.program.arguments[call.first_argument + argument_index];
-      if (node_live[argument_node] == std::uint8_t{0U} ||
+      const std::size_t owner_node =
+          parsed.program.nodes[argument_node].kind ==
+                  RewriteNodeKind::placeholder
+              ? parsed.program.nodes[argument_node].first_element
+              : argument_node;
+      if (node_live[owner_node] == std::uint8_t{0U} ||
           remaining_uses[argument_node] == 0U) {
         invalid_forward_use = true;
         break;
       }
     }
     if (!invalid_forward_use && lowered_node.spreads_tuple) {
-      const Value &operand = node_values[lowered_node.spread_operand];
+      const std::size_t spread_owner =
+          parsed.program.nodes[lowered_node.spread_operand].kind ==
+                  RewriteNodeKind::placeholder
+              ? parsed.program.nodes[lowered_node.spread_operand].first_element
+              : lowered_node.spread_operand;
+      const Value &operand = node_values[spread_owner];
       const ValueTupleArityResult arity = value_tuple_arity(operand);
       if (!arity.ok || arity.arity != lowered_node.argument_count) {
         invalid_forward_use = true;
@@ -4319,8 +5097,13 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
         const std::size_t argument_node =
             parsed.program.arguments[
                 call.first_argument + argument_index];
+        const std::size_t owner_node =
+            parsed.program.nodes[argument_node].kind ==
+                    RewriteNodeKind::placeholder
+                ? parsed.program.nodes[argument_node].first_element
+                : argument_node;
         arguments.push_back(TypedPrimitiveArgument{
-            &node_values[argument_node], std::nullopt});
+            &node_values[owner_node], std::nullopt});
       }
     }
     if (invalid_forward_use) {
@@ -4330,7 +5113,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       RewriteEvaluationDiagnostic diagnostic =
           application_rewrite_diagnostic(parsed.program, call,
                                          std::move(error));
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
@@ -4350,7 +5133,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
           resources, argument_nodes, lowering.nodes, remaining_uses,
           node_values, node_live);
       arguments.clear();
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
@@ -4424,7 +5207,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       RewriteEvaluationDiagnostic diagnostic =
           application_rewrite_diagnostic(parsed.program, call,
                                          std::move(error));
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
@@ -4432,12 +5215,77 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
       RewriteEvaluationDiagnostic diagnostic =
           application_rewrite_diagnostic(parsed.program, call,
                                          std::move(applied.error));
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       return rewrite_evaluation_failure(
           resources, std::move(diagnostic), scalar_kernel_invocations);
     }
-    node_values[node_index] = std::move(applied.value);
-    node_live[node_index] = std::uint8_t{1U};
+    bool transferred_to_fanout = false;
+    for (std::size_t fanout_index = 0U;
+         fanout_index < parsed.program.fanouts.size(); ++fanout_index) {
+      const RewriteFanout &fanout = parsed.program.fanouts[fanout_index];
+      for (std::size_t position = 0U; position < fanout.branch_count;
+           ++position) {
+        if (parsed.program.fanout_branches[
+                fanout.first_branch + position]
+                .root != node_index) {
+          continue;
+        }
+        if (position !=
+                fanout_assemblies[fanout_index].transferred_count ||
+            remaining_uses[node_index] != 1U) {
+          std::vector<Value> invalid_result;
+          invalid_result.push_back(std::move(applied.value));
+          release_rewrite_values(resources, invalid_result);
+          RewriteEvaluationDiagnostic diagnostic =
+              empty_rewrite_evaluation_diagnostic();
+          diagnostic.stage = RewriteEvaluationStage::primitive_table;
+          diagnostic.primary = fanout.span;
+          diagnostic.context = fanout.span;
+          diagnostic.error = make_error(
+              ErrorKind::invalid_primitive_table,
+              rewrite_source_location(fanout.keyword_span.begin),
+              "fanout branch result order or ownership is invalid");
+          release_execution_state();
+          return rewrite_evaluation_failure(
+              resources, std::move(diagnostic),
+              scalar_kernel_invocations);
+        }
+        TupleAssemblyOperationResult transferred =
+            transfer_preadmitted_tuple_element(
+                fanout_assemblies[fanout_index], applied.value);
+        if (!transferred.ok) {
+          std::vector<Value> invalid_result;
+          invalid_result.push_back(std::move(applied.value));
+          release_rewrite_values(resources, invalid_result);
+          RewriteEvaluationDiagnostic diagnostic =
+              empty_rewrite_evaluation_diagnostic();
+          diagnostic.stage = RewriteEvaluationStage::primitive_table;
+          diagnostic.primary =
+              parsed.program.fanout_branches[
+                  fanout.first_branch + position]
+                  .span;
+          diagnostic.context = fanout.span;
+          diagnostic.error = make_error(
+              ErrorKind::invalid_primitive_table,
+              rewrite_source_location(fanout.keyword_span.begin),
+              "fanout branch result does not match its preadmitted slot");
+          release_execution_state();
+          return rewrite_evaluation_failure(
+              resources, std::move(diagnostic),
+              scalar_kernel_invocations);
+        }
+        --remaining_uses[node_index];
+        transferred_to_fanout = true;
+        break;
+      }
+      if (transferred_to_fanout) {
+        break;
+      }
+    }
+    if (!transferred_to_fanout) {
+      node_values[node_index] = std::move(applied.value);
+      node_live[node_index] = std::uint8_t{1U};
+    }
     if (remaining_uses[node_index] == 0U) {
       release_rewrite_node_value(resources, node_values, node_live,
                                  node_index);
@@ -4449,7 +5297,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   for (const std::size_t root : parsed.program.roots) {
     if (node_live[root] == std::uint8_t{0U} || remaining_uses[root] != 1U) {
       release_rewrite_values(resources, values);
-      release_rewrite_node_values(resources, node_values, node_live);
+      release_execution_state();
       RewriteEvaluationDiagnostic diagnostic =
           empty_rewrite_evaluation_diagnostic();
       diagnostic.stage = RewriteEvaluationStage::primitive_table;
@@ -4469,7 +5317,7 @@ RewriteEvaluationResult evaluate_rewrite_source_impl(
   if (!format_rewrite_root_values(parsed.program, values, formatted,
                                   formatting_diagnostic)) {
     release_rewrite_values(resources, values);
-    release_rewrite_node_values(resources, node_values, node_live);
+    release_execution_state();
     return rewrite_evaluation_failure(
         resources, std::move(formatting_diagnostic),
         scalar_kernel_invocations);
@@ -4707,6 +5555,43 @@ void append_source_span(std::string &source, RewriteSpan span) {
   source.push_back(')');
 }
 
+std::size_t lowered_tuple_element_node(
+    const RewriteLoweringProgram &program, std::size_t operand_index,
+    std::size_t position) {
+  const RewriteLoweringNode &operand = program.nodes[operand_index];
+  if (operand.kind == RewriteNodeKind::placeholder) {
+    return lowered_tuple_element_node(
+        program, operand.first_element, position);
+  }
+  if (operand.kind == RewriteNodeKind::fanout) {
+    return program.fanout_branch_roots[
+        operand.first_element + position];
+  }
+  return program.tuple_elements[operand.first_element + position];
+}
+
+RewriteSpan lowered_tuple_element_span(
+    const RewriteLoweringProgram &program, std::size_t operand_index,
+    std::size_t position) {
+  const RewriteLoweringNode &operand = program.nodes[operand_index];
+  if (operand.kind == RewriteNodeKind::placeholder) {
+    return lowered_tuple_element_span(
+        program, operand.first_element, position);
+  }
+  if (operand.kind == RewriteNodeKind::fanout) {
+    return program.fanout_branch_spans[
+        operand.first_element + position];
+  }
+  return program.tuple_element_spans[operand.first_element + position];
+}
+
+std::size_t lowered_value_owner(const RewriteLoweringProgram &program,
+                                std::size_t node_index) {
+  return program.nodes[node_index].kind == RewriteNodeKind::placeholder
+             ? program.nodes[node_index].first_element
+             : node_index;
+}
+
 void append_spread_provenance_arguments(
     std::string &source, const RewriteLoweringNode &call,
     const RewriteLoweringProgram &program) {
@@ -4721,12 +5606,14 @@ void append_spread_provenance_arguments(
   source += ", ";
   append_source_span(
       source, call.argument_count >= 1U
-                  ? program.tuple_element_spans[operand.first_element]
+                  ? lowered_tuple_element_span(
+                        program, call.spread_operand, 0U)
                   : operand.source_span);
   source += ", ";
   append_source_span(
       source, call.argument_count >= 2U
-                  ? program.tuple_element_spans[operand.first_element + 1U]
+                  ? lowered_tuple_element_span(
+                        program, call.spread_operand, 1U)
                   : operand.source_span);
 }
 
@@ -4827,17 +5714,16 @@ void append_shape_requirement(
     append_c_unsigned(source, *static_count);
   } else if (call.spreads_tuple) {
     std::size_t anchor_position = 0U;
-    const RewriteLoweringNode &operand =
-        program.nodes[call.spread_operand];
     for (; anchor_position < call.argument_count; ++anchor_position) {
-      if (program.tuple_elements[
-              operand.first_element + anchor_position] ==
+      if (lowered_tuple_element_node(
+              program, call.spread_operand, anchor_position) ==
           *dynamic_anchor) {
         break;
       }
     }
     source += "((BennuValue *)bennu_values[" +
-              std::to_string(call.spread_operand) +
+              std::to_string(
+                  lowered_value_owner(program, call.spread_operand)) +
               "].data)[" + std::to_string(anchor_position) + "].count";
   } else {
     source += "bennu_values[" + std::to_string(*dynamic_anchor) + "].count";
@@ -4845,7 +5731,8 @@ void append_shape_requirement(
   source += ", ";
   if (call.spreads_tuple) {
     source += "&((BennuValue *)bennu_values[" +
-              std::to_string(call.spread_operand) +
+              std::to_string(
+                  lowered_value_owner(program, call.spread_operand)) +
               "].data)[" + std::to_string(argument_position - 1U) + "]";
   } else {
     source += "&bennu_values[" + std::to_string(argument_node) + "]";
@@ -4873,9 +5760,8 @@ std::size_t lowered_semantic_argument_node(
   if (!call.spreads_tuple) {
     return program.arguments[call.first_argument + position];
   }
-  const RewriteLoweringNode &operand =
-      program.nodes[call.spread_operand];
-  return program.tuple_elements[operand.first_element + position];
+  return lowered_tuple_element_node(
+      program, call.spread_operand, position);
 }
 
 void append_call_shape_checks(std::string &source,
@@ -4984,13 +5870,16 @@ void append_call_node(std::string &source, std::size_t node_index,
   const auto append_argument = [&source, &node, &program](
                                    std::size_t position) {
     if (node.spreads_tuple) {
+      const std::size_t owner =
+          lowered_value_owner(program, node.spread_operand);
       source += "&((BennuValue *)bennu_values[" +
-                std::to_string(node.spread_operand) +
+                std::to_string(owner) +
                 "].data)[" + std::to_string(position) + "]";
     } else {
+      const std::size_t argument =
+          program.arguments[node.first_argument + position];
       source += "&bennu_values[" +
-                std::to_string(program.arguments[
-                    node.first_argument + position]) +
+                std::to_string(lowered_value_owner(program, argument)) +
                 "]";
     }
   };
@@ -5013,11 +5902,9 @@ void append_call_node(std::string &source, std::size_t node_index,
   source += c_primitive_id_name(*node.primitive_id);
   source += ", ";
   if (node.spreads_tuple && node.argument_count == 1U) {
-    const RewriteLoweringNode &operand =
-        program.nodes[node.spread_operand];
     append_source_span(
         source,
-        program.tuple_element_spans[operand.first_element]);
+        lowered_tuple_element_span(program, node.spread_operand, 0U));
   } else {
     append_source_span(source, node.primary_span);
   }
@@ -5088,6 +5975,86 @@ void append_immutable_borrow_node(
   }
 }
 
+void append_fanout_admission(
+    std::string &source, std::size_t fanout_node_index,
+    const RewriteLoweringNode &fanout) {
+  source += "  {\n"
+            "    BennuValue bennu_fanout_empty_" +
+            std::to_string(fanout_node_index) + "[" +
+            std::to_string(fanout.element_count) + "] = {{0}};\n"
+            "    BennuValue *bennu_fanout_slots_" +
+            std::to_string(fanout_node_index) + "[" +
+            std::to_string(fanout.element_count) + "];\n"
+            "    size_t bennu_fanout_index_" +
+            std::to_string(fanout_node_index) + " = 0U;\n"
+            "    for (; bennu_fanout_index_" +
+            std::to_string(fanout_node_index) + " < " +
+            std::to_string(fanout.element_count) +
+            "U; ++bennu_fanout_index_" +
+            std::to_string(fanout_node_index) + ") {\n"
+            "      bennu_fanout_slots_" +
+            std::to_string(fanout_node_index) +
+            "[bennu_fanout_index_" +
+            std::to_string(fanout_node_index) +
+            "] = &bennu_fanout_empty_" +
+            std::to_string(fanout_node_index) +
+            "[bennu_fanout_index_" +
+            std::to_string(fanout_node_index) + "];\n"
+            "    }\n"
+            "    if (!bennu_fanout(&bennu_resources, &bennu_values[" +
+            std::to_string(fanout_node_index) +
+            "], bennu_fanout_slots_" +
+            std::to_string(fanout_node_index) + ", " +
+            std::to_string(fanout.element_count) +
+            "U, \"fanout\", ";
+  append_source_span(source, fanout.primary_span);
+  source += ", ";
+  append_source_span(source, fanout.source_span);
+  source += ")) { goto bennu_failure; }\n"
+            "  }\n";
+}
+
+void append_fanout_completion(
+    std::string &source, const RewriteLoweringNode &fanout,
+    const RewriteLoweringProgram &program,
+    std::vector<std::size_t> &remaining_uses) {
+  const std::size_t operand =
+      program.fanout_operands[fanout.parameter_index];
+  --remaining_uses[operand];
+  if (remaining_uses[operand] == 0U &&
+      !program.nodes[operand].retained_root) {
+    source += "  bennu_release(&bennu_resources, &bennu_values[" +
+              std::to_string(operand) + "]);\n";
+  }
+}
+
+void append_fanout_branch_transfer(
+    std::string &source, std::size_t branch_node_index,
+    const RewriteLoweringProgram &program,
+    std::vector<std::size_t> &remaining_uses) {
+  for (std::size_t fanout_node_index = 0U;
+       fanout_node_index < program.nodes.size(); ++fanout_node_index) {
+    const RewriteLoweringNode &fanout =
+        program.nodes[fanout_node_index];
+    if (fanout.kind != RewriteNodeKind::fanout) {
+      continue;
+    }
+    for (std::size_t position = 0U; position < fanout.element_count;
+         ++position) {
+      if (program.fanout_branch_roots[
+              fanout.first_element + position] != branch_node_index) {
+        continue;
+      }
+      source += "  bennu_tuple_transfer(&bennu_values[" +
+                std::to_string(fanout_node_index) + "], " +
+                std::to_string(position) + "U, &bennu_values[" +
+                std::to_string(branch_node_index) + "]);\n";
+      --remaining_uses[branch_node_index];
+      return;
+    }
+  }
+}
+
 void append_lowered_rewrite_nodes(std::string &source,
                                   const RewriteLoweringProgram &lowering) {
   std::vector<std::size_t> remaining_uses;
@@ -5111,6 +6078,12 @@ void append_lowered_rewrite_nodes(std::string &source,
       append_vector_node(source, index, node);
     } else if (node.kind == RewriteNodeKind::tuple_literal) {
       append_tuple_node(source, index, node, lowering, remaining_uses);
+    } else if (node.kind == RewriteNodeKind::placeholder) {
+      source += "  bennu_values[" + std::to_string(index) +
+                "] = bennu_scalar_int(INT64_C(0));\n";
+    } else if (node.kind == RewriteNodeKind::fanout) {
+      append_fanout_completion(
+          source, node, lowering, remaining_uses);
     } else if (
         node.operation == RewriteLoweringOperation::immutable_borrow ||
         node.operation ==
@@ -5122,9 +6095,26 @@ void append_lowered_rewrite_nodes(std::string &source,
       append_call_node(source, index, node, lowering, remaining_uses,
                        final_use_releases);
     }
+    append_fanout_branch_transfer(
+        source, index, lowering, remaining_uses);
     if (node.use_count == 0U && !node.retained_root) {
       source += "  bennu_release(&bennu_resources, &bennu_values[" +
                 std::to_string(index) + "]);\n";
+    }
+    for (std::size_t fanout_index = 0U;
+         fanout_index < lowering.fanout_operands.size(); ++fanout_index) {
+      if (lowering.fanout_operands[fanout_index] != index) {
+        continue;
+      }
+      for (std::size_t candidate = 0U;
+           candidate < lowering.nodes.size(); ++candidate) {
+        const RewriteLoweringNode &fanout = lowering.nodes[candidate];
+        if (fanout.kind == RewriteNodeKind::fanout &&
+            fanout.parameter_index == fanout_index) {
+          append_fanout_admission(source, candidate, fanout);
+          break;
+        }
+      }
     }
   }
 }
@@ -5273,6 +6263,8 @@ CEmissionResult emit_rewrite_c_source_impl(
   append_resource_initialization(generated, configuration);
   generated += "  (void)bennu_literal;\n"
                "  (void)bennu_tuple;\n"
+               "  (void)bennu_fanout;\n"
+               "  (void)bennu_tuple_transfer;\n"
                "  (void)bennu_apply;\n"
                "  (void)bennu_apply_spread;\n"
                "  (void)bennu_require_shape;\n"
@@ -9929,6 +10921,871 @@ TEST_CASE("runner result teardown releases vector and nested tuple roots") {
   CHECK(destroy_runner_evaluation_result(result));
   CHECK(result.values.empty());
   CHECK(result.formatted.empty());
+}
+
+TEST_CASE("FAN-001-GRAMMAR") {
+  const std::string_view compact =
+      "fanout[1 {inc[_]} {add[_ 2]}]";
+  const RewriteParseResult parsed = parse_rewrite(compact);
+  REQUIRE(parsed.ok);
+  CHECK(rewrite_program_invariants_hold(parsed.program));
+  REQUIRE(parsed.program.fanouts.size() == 1U);
+  REQUIRE(parsed.program.fanout_branches.size() == 2U);
+  const RewriteFanout &fanout = parsed.program.fanouts[0];
+  CHECK(fanout.branch_count == 2U);
+  CHECK(parsed.program.nodes[fanout.operand].kind ==
+        RewriteNodeKind::scalar_literal);
+  CHECK(parsed.program.nodes[parsed.program.roots[0]].kind ==
+        RewriteNodeKind::fanout);
+  CHECK(parsed.program.fanout_branches[0].placeholder_span.begin.offset ==
+        15U);
+  CHECK(parsed.program.fanout_branches[1].placeholder_span.begin.offset ==
+        24U);
+  CHECK(parsed.program.fanout_branches[0].span.begin.line == 1U);
+  CHECK(parsed.program.fanout_branches[0].span.begin.column == 10U);
+  CHECK(parsed.program.fanout_branches[1].span.end.column == 29U);
+
+  for (const std::string_view source : {
+           std::string_view{
+               "fanout[\n  1\n  {inc[_]}\n  {add[_ 2]}\n]"},
+           std::string_view{
+               "fanout[\r\n  1\r\n  {inc[_]}\r\n  {add[_ 2]}\r\n]"},
+       }) {
+    CAPTURE(source);
+    const RewriteParseResult multiline = parse_rewrite(source);
+    REQUIRE(multiline.ok);
+    REQUIRE(multiline.program.fanouts.size() == 1U);
+    const RewriteFanout &multiline_fanout =
+        multiline.program.fanouts[0];
+    CHECK(multiline_fanout.keyword_span.begin.offset == 1U);
+    CHECK(multiline_fanout.keyword_span.begin.line == 1U);
+    CHECK(multiline_fanout.keyword_span.begin.column == 1U);
+    CHECK(multiline.program
+              .fanout_branches[multiline_fanout.first_branch]
+              .span.begin.line == 3U);
+    CHECK(multiline.program
+              .fanout_branches[multiline_fanout.first_branch + 1U]
+              .span.begin.line == 4U);
+    CHECK(multiline_fanout.closing_span.begin.line == 5U);
+  }
+
+  struct InvalidFanout {
+    std::string_view source;
+    RewriteParseError error;
+  };
+  const std::array<InvalidFanout, 10> invalid{{
+      {"fanout [1 {inc[_]}]", RewriteParseError::expected_fanout_open},
+      {"fanout[]", RewriteParseError::expected_fanout_operand},
+      {"fanout[1]", RewriteParseError::expected_fanout_branch},
+      {"fanout[1 inc[_]]", RewriteParseError::expected_branch_open},
+      {"fanout[1 {}]", RewriteParseError::expected_branch_body},
+      {"fanout[1 {_}]", RewriteParseError::branch_root_not_primitive_call},
+      {"fanout[1 {inc[1]}]", RewriteParseError::placeholder_count},
+      {"fanout[1 {add[_ _]}]", RewriteParseError::placeholder_count},
+      {"fanout[1 {inc[[_]]}]",
+       RewriteParseError::placeholder_owned_position},
+      {"fanout[fanout[1 {inc[_]}] {inc[_]}]",
+       RewriteParseError::nested_fanout},
+  }};
+  for (const InvalidFanout &fixture : invalid) {
+    CAPTURE(fixture.source);
+    const RewriteParseResult rejected = parse_rewrite(fixture.source);
+    REQUIRE_FALSE(rejected.ok);
+    CHECK(rejected.diagnostic.error == fixture.error);
+    CHECK(rejected.diagnostic.primary.begin.offset != 0U);
+    CHECK(rejected.diagnostic.context.begin.offset != 0U);
+    CHECK(rejected.diagnostic.primary.end.offset >=
+          rejected.diagnostic.primary.begin.offset);
+  }
+}
+
+TEST_CASE("FAN-003-STATIC-ALL-BRANCHES") {
+  std::vector<ResourceLifetimeEvent> events;
+  const auto record_event = [](void *context, ResourceLifetimeEvent event) {
+    static_cast<std::vector<ResourceLifetimeEvent> *>(context)
+        ->push_back(event);
+  };
+  RewriteEvaluationResult result = evaluate_rewrite_source(
+      "fanout[9223372036854775807 {inc[_]} {unknown[_]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::bounded_v2,
+          ResourceLimits{std::nullopt, std::nullopt, 0U, std::nullopt},
+          AllocationFailureInjection{0U},
+          ResourceLifetimeObserver{&events, record_event}});
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.diagnostic.error.kind == ErrorKind::unknown_name);
+  CHECK(result.diagnostic.stage == RewriteEvaluationStage::resolution);
+  CHECK(events.empty());
+  CHECK(result.resources.owner.token == 0U);
+  CHECK(result.resources.state_handle.token == 0U);
+  CHECK(result.resources.live_evaluation_bytes == 0U);
+  CHECK(result.resources.work_units == 0U);
+  CHECK(result.resources.reservation_ordinal == 0U);
+  release_rewrite_evaluation_result(result);
+
+  RewriteEvaluationResult later_branch = evaluate_rewrite_source(
+      "fanout[1 {inc[_]} {add[_ true]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{},
+          ResourceLifetimeObserver{&events, record_event}});
+  REQUIRE_FALSE(later_branch.ok);
+  CHECK(later_branch.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(events.empty());
+  CHECK(later_branch.resources.owner.token == 0U);
+  CHECK(later_branch.resources.state_handle.token == 0U);
+  release_rewrite_evaluation_result(later_branch);
+
+  const std::string_view static_winner =
+      "fanout[9223372036854775807 {inc[_]} {add[_ true]}]";
+  ValueResult expression = evaluate_expression(
+      static_winner,
+      EvaluationConfiguration{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{0U}});
+  REQUIRE_FALSE(expression.ok);
+  CHECK(expression.error.kind == ErrorKind::type_mismatch);
+  CHECK(expression.error.location.column == 44U);
+
+  ProgramResult program = evaluate_source(
+      static_winner,
+      EvaluationConfiguration{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{0U}});
+  REQUIRE_FALSE(program.ok);
+  CHECK(program.values.empty());
+  CHECK(program.error.kind == ErrorKind::type_mismatch);
+
+  RunnerEvaluationResult runner =
+      evaluate_runner_source(static_winner, {});
+  REQUIRE_FALSE(runner.ok);
+  CHECK(runner.values.empty());
+  CHECK(runner.formatted.empty());
+  CHECK(runner.error.kind == ErrorKind::type_mismatch);
+
+  CEmissionResult emitted = emit_c_source(
+      static_winner,
+      EvaluationConfiguration{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{0U}});
+  REQUIRE_FALSE(emitted.ok);
+  CHECK(emitted.source.empty());
+  CHECK(emitted.error.kind == ErrorKind::type_mismatch);
+}
+
+TEST_CASE("FAN-005-OPERAND-ONCE") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{}};
+  const std::array<std::pair<std::string_view, std::string_view>, 4> cases{{
+      {"fanout[1 {inc[_]} {equals[_ 1]}]", "[2 true]"},
+      {"fanout[iota[3] {inc[_]} {add[_ 10]}]",
+       "[(2 3 4) (11 12 13)]"},
+      {"fanout[Int() {inc[_]} {add[_ 2]}]", "[() ()]"},
+      {"fanout[[1 2] {add _} {equals _}]", "[3 false]"},
+  }};
+  for (const auto &[source, expected] : cases) {
+    CAPTURE(source);
+    ValueResult result = evaluate_expression(source, configuration);
+    REQUIRE(result.ok);
+    const ValueFormattingResult formatted = format_value(result.value);
+    REQUIRE(formatted.ok);
+    CHECK(formatted.formatted == expected);
+    CHECK(destroy_value(result.value).ok);
+  }
+
+  std::vector<ResourceLifetimeEvent> events;
+  const auto record_event = [](void *context, ResourceLifetimeEvent event) {
+    static_cast<std::vector<ResourceLifetimeEvent> *>(context)
+        ->push_back(event);
+  };
+  RewriteEvaluationResult observed = evaluate_rewrite_source(
+      "fanout[iota[3] {inc[_]} {add[_ 10]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{},
+          ResourceLifetimeObserver{&events, record_event}});
+  REQUIRE(observed.ok);
+  std::vector<std::size_t> admission_ordinals;
+  for (const ResourceLifetimeEvent &event : events) {
+    if (event.kind == ResourceLifetimeEventKind::admitted &&
+        event.allocation_ordinal.has_value()) {
+      admission_ordinals.push_back(*event.allocation_ordinal);
+    }
+  }
+  CHECK(admission_ordinals ==
+        std::vector<std::size_t>{0U, 1U, 2U, 3U});
+  CHECK(observed.scalar_kernel_invocations == 6U);
+  CHECK(observed.resources.reservation_ordinal == 4U);
+  CHECK(observed.resources.work_units == 9U);
+  CHECK(observed.resources.live_evaluation_bytes == 80U);
+  release_rewrite_evaluation_result(observed);
+}
+
+TEST_CASE("FAN-006-TABLE-BEFORE-BRANCH") {
+  const EvaluationConfiguration fail_table{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{0U}};
+  ValueResult table = evaluate_expression(
+      "fanout[9223372036854775807 {inc[_]}]", fail_table);
+  REQUIRE_FALSE(table.ok);
+  CHECK(table.error.kind == ErrorKind::resource_error);
+  REQUIRE(table.error.resource.has_value());
+  CHECK(table.error.resource->reason ==
+        ResourceErrorReason::allocation_unavailable);
+  CHECK(table.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{0U});
+
+  const EvaluationConfiguration vector_then_table{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{1U}};
+  ValueResult after_vector = evaluate_expression(
+      "fanout[iota[3] {inc[_]}]", vector_then_table);
+  REQUIRE_FALSE(after_vector.ok);
+  REQUIRE(after_vector.error.resource.has_value());
+  CHECK(after_vector.error.resource->allocation_ordinal ==
+        std::optional<std::size_t>{1U});
+}
+
+TEST_CASE("FAN-010-SPREAD-DIRECT") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{}};
+  ValueResult spread = evaluate_expression(
+      "add fanout[1 {inc[_]} {add[_ 2]}]", configuration);
+  REQUIRE(spread.ok);
+  REQUIRE(spread.value.container == ContainerKind::scalar);
+  CHECK(spread.value.scalar.integer == 5);
+  CHECK(destroy_value(spread.value).ok);
+
+  ValueResult direct = evaluate_expression(
+      "add[fanout[1 {inc[_]} {add[_ 2]}]]", configuration);
+  REQUIRE_FALSE(direct.ok);
+  CHECK(direct.error.kind == ErrorKind::arity_error);
+
+  ValueResult singleton_prefix = evaluate_expression(
+      "inc fanout[41 {inc[_]}]", configuration);
+  REQUIRE(singleton_prefix.ok);
+  CHECK(singleton_prefix.value.scalar.integer == 43);
+  CHECK(destroy_value(singleton_prefix.value).ok);
+
+  ValueResult singleton_direct = evaluate_expression(
+      "inc[fanout[41 {inc[_]}]]", configuration);
+  REQUIRE_FALSE(singleton_direct.ok);
+  CHECK(singleton_direct.error.kind == ErrorKind::type_mismatch);
+}
+
+TEST_CASE("FAN-016-STRICT-C-NATIVE") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{}};
+  const CEmissionResult first = emit_c_source(
+      "fanout[1 {inc[_]} {add[_ 2]}]", configuration);
+  const CEmissionResult second = emit_c_source(
+      "fanout[1 {inc[_]} {add[_ 2]}]", configuration);
+  REQUIRE(first.ok);
+  REQUIRE(second.ok);
+  CHECK(first.source == second.source);
+  const std::size_t table = first.source.find("\"fanout\"");
+  const std::size_t branch_zero =
+      first.source.find("BENNU_IMPL_INC_INT", table);
+  const std::size_t transfer_zero =
+      first.source.find("bennu_tuple_transfer", branch_zero);
+  const std::size_t branch_one =
+      first.source.find("BENNU_IMPL_ADD_INT", transfer_zero);
+  CHECK(table < branch_zero);
+  CHECK(branch_zero < transfer_zero);
+  CHECK(transfer_zero < branch_one);
+  CHECK(first.source.find("refcount") == std::string::npos);
+  CHECK(first.source.find("pthread") == std::string::npos);
+  const std::size_t preadmission =
+      first.source.find("bennu_fanout(&bennu_resources");
+  const std::size_t zero_prefix =
+      first.source.find("result->cleanup_index = 0U;");
+  const std::size_t transfer_clear =
+      first.source.find("(void)memset(child, 0, sizeof(*child));");
+  const std::size_t prefix_increment =
+      first.source.find("result->cleanup_index += 1U;", transfer_clear);
+  CHECK(preadmission != std::string::npos);
+  CHECK(zero_prefix != std::string::npos);
+  CHECK(transfer_clear < prefix_increment);
+}
+
+TEST_CASE("FAN-002-PLACEHOLDER") {
+  for (const std::string_view source : {
+           "fanout[1 {inc[_]}]",
+           "fanout[1 {inc[add[_ 1]]}]",
+           "fanout[1 {inc inc _}]",
+       }) {
+    CAPTURE(source);
+    CHECK(parse_rewrite(source).ok);
+  }
+}
+
+TEST_CASE("FAN-004-STATIC-TYPE-ORDER") {
+  RewriteParseResult parsed =
+      parse_rewrite("fanout[1 {inc[_]} {equals[_ 1]}]");
+  REQUIRE(parsed.ok);
+  REQUIRE(resolve_rewrite_primitives(parsed.program).ok);
+  RewriteLoweringResult lowered = lower_rewrite_program(parsed.program);
+  REQUIRE(lowered.ok);
+  CHECK(rewrite_lowering_invariants_hold(parsed.program, lowered.program));
+  const RewriteLoweringNode &fanout =
+      lowered.program.nodes[parsed.program.roots[0]];
+  const TypeFormattingResult formatted =
+      format_type(fanout.structural_type);
+  REQUIRE(formatted.ok);
+  CHECK(formatted.formatted == "Tuple<Int, Bool>");
+}
+
+TEST_CASE("FAN-007-SEQUENTIAL-FIRST-FAILURE") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{}};
+  ValueResult result = evaluate_expression(
+      "fanout[9223372036854775807 {inc[_]} {add[_ 1]}]",
+      configuration);
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.error.kind == ErrorKind::domain_error);
+  CHECK(result.error.location.column == 29U);
+
+  RewriteEvaluationResult later = evaluate_rewrite_source(
+      "fanout[9223372036854775807 "
+      "{equals[_ 9223372036854775807]} {inc[_]} {add[_ 1]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE_FALSE(later.ok);
+  CHECK(later.diagnostic.error.kind == ErrorKind::domain_error);
+  CHECK(later.diagnostic.error.location.column == 61U);
+  CHECK(later.scalar_kernel_invocations == 2U);
+  CHECK(later.resources.live_evaluation_bytes == 0U);
+  release_rewrite_evaluation_result(later);
+}
+
+TEST_CASE("FAN-008-TRANSFER-CLEANUP") {
+  std::vector<std::size_t> release_order;
+  const auto record_release = [](void *context,
+                                 ResourceLifetimeEvent event) {
+    if (event.kind == ResourceLifetimeEventKind::logical_release &&
+        event.allocation_ordinal.has_value()) {
+      static_cast<std::vector<std::size_t> *>(context)
+          ->push_back(*event.allocation_ordinal);
+    }
+  };
+  RewriteEvaluationResult result = evaluate_rewrite_source(
+      "fanout[9223372036854775807 "
+      "{iota[add[_ -9223372036854775806]]} {inc[_]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{},
+          ResourceLifetimeObserver{
+              &release_order, record_release}});
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.resources.live_evaluation_bytes == 0U);
+  CHECK(release_order == std::vector<std::size_t>{1U, 0U});
+  release_rewrite_evaluation_result(result);
+
+  release_order.clear();
+  RewriteEvaluationResult two_value_prefix = evaluate_rewrite_source(
+      "fanout[9223372036854775807 "
+      "{iota[add[_ -9223372036854775806]]} "
+      "{iota[add[_ -9223372036854775805]]} {inc[_]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{},
+          ResourceLifetimeObserver{
+              &release_order, record_release}});
+  REQUIRE_FALSE(two_value_prefix.ok);
+  CHECK(two_value_prefix.diagnostic.error.kind ==
+        ErrorKind::domain_error);
+  CHECK(two_value_prefix.resources.live_evaluation_bytes == 0U);
+  CHECK(release_order ==
+        std::vector<std::size_t>{2U, 1U, 0U});
+  release_rewrite_evaluation_result(two_value_prefix);
+}
+
+TEST_CASE("FAN-008-PREADMITTED-ASSEMBLY-INVARIANTS") {
+  EvaluationResources resources =
+      make_trusted_local_v2_resources(AllocationFailureInjection{});
+  std::vector<std::size_t> release_order;
+  const auto record_release = [](void *context,
+                                 ResourceLifetimeEvent event) {
+    if (event.kind == ResourceLifetimeEventKind::logical_release &&
+        event.allocation_ordinal.has_value()) {
+      static_cast<std::vector<std::size_t> *>(context)
+          ->push_back(*event.allocation_ordinal);
+    }
+  };
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      resources, ResourceLifetimeObserver{&release_order, record_release}));
+
+  TupleAssemblyAdmissionResult incomplete = preadmit_tuple_assembly(
+      resources, 2U, 2U, 2U, 0U, 0U,
+      SourceLocation{1U, 1U, 1U}, "fanout");
+  REQUIRE(incomplete.ok);
+  Value first = make_int_value(1);
+  REQUIRE(transfer_preadmitted_tuple_element(
+              incomplete.assembly, first)
+              .ok);
+  CHECK_FALSE(first.claimed);
+  TupleAssemblyOperationResult early =
+      publish_preadmitted_tuple(incomplete.assembly);
+  CHECK_FALSE(early.ok);
+  CHECK(incomplete.assembly.transferred_count == 1U);
+  REQUIRE(release_preadmitted_tuple_assembly(
+              resources, incomplete.assembly)
+              .ok);
+  CHECK(release_order == std::vector<std::size_t>{0U});
+  CHECK(resources.live_evaluation_bytes == 0U);
+
+  TupleAssemblyAdmissionResult undersized = preadmit_tuple_assembly(
+      resources, 1U, 1U, 1U, 0U, 0U,
+      SourceLocation{1U, 1U, 1U}, "fanout");
+  REQUIRE(undersized.ok);
+  std::array<Value, 2> children{
+      make_int_value(3), make_int_value(4)};
+  TupleConstructionResult nested = make_tuple_value(
+      resources, children, SourceLocation{1U, 1U, 1U},
+      "fanout-nested-result");
+  REQUIRE(nested.ok);
+  const void *const nested_table =
+      nested.value.tuple.root_reservation.storage.get();
+  TupleAssemblyOperationResult refused =
+      transfer_preadmitted_tuple_element(
+          undersized.assembly, nested.value);
+  CHECK_FALSE(refused.ok);
+  REQUIRE(validate_value(nested.value).ok);
+  CHECK(nested.value.tuple.root_reservation.storage.get() ==
+        nested_table);
+  REQUIRE(release_value_reservations(resources, nested.value).ok);
+  REQUIRE(release_preadmitted_tuple_assembly(
+              resources, undersized.assembly)
+              .ok);
+  CHECK(resources.live_evaluation_bytes == 0U);
+  release_evaluation_resources(resources);
+}
+
+TEST_CASE("FAN-008-PREADMITTED-ASSEMBLY-HOST-ALLOCATION-FREE") {
+  struct LifetimeLog {
+    std::array<std::size_t, 8U> ordinals{};
+    std::size_t count{0U};
+    bool overflow{false};
+  };
+  const auto record_release = [](void *context,
+                                 ResourceLifetimeEvent event) {
+    if (event.kind != ResourceLifetimeEventKind::logical_release ||
+        !event.allocation_ordinal.has_value()) {
+      return;
+    }
+    auto &log = *static_cast<LifetimeLog *>(context);
+    if (log.count == log.ordinals.size()) {
+      log.overflow = true;
+      return;
+    }
+    log.ordinals[log.count] = *event.allocation_ordinal;
+    ++log.count;
+  };
+
+  EvaluationResources resources =
+      make_trusted_local_v2_resources(AllocationFailureInjection{});
+  LifetimeLog log;
+  REQUIRE(set_evaluation_resource_lifetime_observer(
+      resources, ResourceLifetimeObserver{&log, record_release}));
+
+  std::array<Value, 2> inner_elements{
+      make_int_value(1), make_int_value(2)};
+  TupleConstructionResult inner = make_tuple_value(
+      resources, inner_elements, SourceLocation{1U, 1U, 1U},
+      "fanout-zero-host-allocation-inner");
+  REQUIRE(inner.ok);
+  const std::array<std::int64_t, 2> vector_elements{3, 4};
+  VectorAllocationResult vector = copy_int_vector(
+      resources, vector_elements, SourceLocation{1U, 1U, 1U},
+      "fanout-zero-host-allocation-vector");
+  REQUIRE(vector.ok);
+  TupleAssemblyAdmissionResult complete = preadmit_tuple_assembly(
+      resources, 2U, 4U, 4U, 1U, 1U,
+      SourceLocation{1U, 1U, 1U}, "fanout");
+  REQUIRE(complete.ok);
+
+  std::size_t allocation_count =
+      detail::registered_host_allocation_count();
+  REQUIRE(transfer_preadmitted_tuple_element(
+              complete.assembly, inner.value)
+              .ok);
+  CHECK(detail::registered_host_allocation_count() ==
+        allocation_count);
+  REQUIRE(transfer_preadmitted_tuple_element(
+              complete.assembly, vector.value)
+              .ok);
+  CHECK(detail::registered_host_allocation_count() ==
+        allocation_count);
+  TupleAssemblyOperationResult published =
+      publish_preadmitted_tuple(complete.assembly);
+  REQUIRE(published.ok);
+  CHECK(detail::registered_host_allocation_count() ==
+        allocation_count);
+  REQUIRE(release_value_reservations(resources, published.value).ok);
+  CHECK_FALSE(log.overflow);
+  REQUIRE(log.count == 3U);
+  CHECK(log.ordinals[0U] == 1U);
+  CHECK(log.ordinals[1U] == 0U);
+  CHECK(log.ordinals[2U] == 2U);
+  CHECK(resources.live_evaluation_bytes == 0U);
+
+  log = LifetimeLog{};
+  std::array<Value, 2> prefix_elements{
+      make_int_value(5), make_int_value(6)};
+  TupleConstructionResult prefix = make_tuple_value(
+      resources, prefix_elements, SourceLocation{1U, 1U, 1U},
+      "fanout-zero-host-allocation-prefix");
+  REQUIRE(prefix.ok);
+  TupleAssemblyAdmissionResult partial = preadmit_tuple_assembly(
+      resources, 2U, 4U, 4U, 0U, 1U,
+      SourceLocation{1U, 1U, 1U}, "fanout");
+  REQUIRE(partial.ok);
+
+  allocation_count = detail::registered_host_allocation_count();
+  REQUIRE(transfer_preadmitted_tuple_element(
+              partial.assembly, prefix.value)
+              .ok);
+  CHECK(detail::registered_host_allocation_count() ==
+        allocation_count);
+  REQUIRE(release_preadmitted_tuple_assembly(
+              resources, partial.assembly)
+              .ok);
+  CHECK(detail::registered_host_allocation_count() ==
+        allocation_count);
+  CHECK_FALSE(log.overflow);
+  REQUIRE(log.count == 2U);
+  CHECK(log.ordinals[0U] == 3U);
+  CHECK(log.ordinals[1U] == 4U);
+  CHECK(resources.live_evaluation_bytes == 0U);
+  release_evaluation_resources(resources);
+}
+
+TEST_CASE("FAN-009-OPERAND-KINDS") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v2, ResourceLimits{},
+      AllocationFailureInjection{}};
+  ValueResult singleton =
+      evaluate_expression("fanout[[1 2] {equals _}]",
+                          configuration);
+  REQUIRE(singleton.ok);
+  const ValueFormattingResult formatted = format_value(singleton.value);
+  REQUIRE(formatted.ok);
+  CHECK(formatted.formatted == "[false]");
+  CHECK(destroy_value(singleton.value).ok);
+
+  EvaluationResources resources =
+      make_trusted_local_v2_resources(AllocationFailureInjection{});
+  std::array<Value, 2> inner_elements{
+      make_int_value(1), make_int_value(2)};
+  TupleConstructionResult inner = make_tuple_value(
+      resources, inner_elements, SourceLocation{1U, 1U, 1U},
+      "fanout-internal-tuple-branch");
+  REQUIRE(inner.ok);
+  const std::array<std::int64_t, 2> vector_elements{3, 4};
+  VectorAllocationResult vector = copy_int_vector(
+      resources, vector_elements,
+      SourceLocation{1U, 1U, 1U}, "fanout-internal-vector-branch");
+  REQUIRE(vector.ok);
+  TupleAssemblyAdmissionResult admitted = preadmit_tuple_assembly(
+      resources, 2U, 4U, 4U, 1U, 1U,
+      SourceLocation{1U, 1U, 1U}, "fanout");
+  REQUIRE(admitted.ok);
+  REQUIRE(transfer_preadmitted_tuple_element(
+              admitted.assembly, inner.value)
+              .ok);
+  REQUIRE(transfer_preadmitted_tuple_element(
+              admitted.assembly, vector.value)
+              .ok);
+  TupleAssemblyOperationResult published =
+      publish_preadmitted_tuple(admitted.assembly);
+  REQUIRE(published.ok);
+  Value nested = std::move(published.value);
+  const ValueFormattingResult nested_formatted = format_value(nested);
+  REQUIRE(nested_formatted.ok);
+  CHECK(nested_formatted.formatted == "[[1 2] (3 4)]");
+  CHECK(release_value_reservations(resources, nested).ok);
+  CHECK(resources.live_evaluation_bytes == 0U);
+  release_evaluation_resources(resources);
+}
+
+TEST_CASE("FAN-011-PROFILE-EVENTS") {
+  const EvaluationConfiguration configuration{
+      ExecutionProfile::trusted_local_v1, ResourceLimits{},
+      AllocationFailureInjection{}};
+  ValueResult result =
+      evaluate_expression("fanout[iota[3] {inc[_]}]", configuration);
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.error.kind == ErrorKind::profile_error);
+
+  for (const std::size_t table_limit : {31U, 32U}) {
+    RewriteEvaluationResult bounded = evaluate_rewrite_source(
+        "fanout[1 {inc[_]} {add[_ 2]}]",
+        RewriteEvaluationCreationData{
+            ExecutionProfile::bounded_v2,
+            ResourceLimits{
+                std::nullopt, std::nullopt, std::nullopt, table_limit},
+            AllocationFailureInjection{}});
+    CAPTURE(table_limit);
+    CHECK(bounded.ok == (table_limit == 32U));
+    if (!bounded.ok) {
+      REQUIRE(bounded.diagnostic.error.resource.has_value());
+      CHECK(bounded.diagnostic.error.resource->limit_kind ==
+            std::optional<ResourceLimitKind>{
+                ResourceLimitKind::max_tuple_table_bytes});
+      CHECK(bounded.diagnostic.error.resource->requested_bytes ==
+            std::optional<std::size_t>{32U});
+      CHECK(bounded.scalar_kernel_invocations == 0U);
+    }
+    release_rewrite_evaluation_result(bounded);
+  }
+  for (const std::size_t live_limit : {55U, 56U, 104U}) {
+    RewriteEvaluationResult bounded = evaluate_rewrite_source(
+        "fanout[iota[3] {inc[_]} {add[_ 1]}]",
+        RewriteEvaluationCreationData{
+            ExecutionProfile::bounded_v2,
+            ResourceLimits{
+                std::nullopt, live_limit, std::nullopt, std::nullopt},
+            AllocationFailureInjection{}});
+    CAPTURE(live_limit);
+    CHECK(bounded.ok == (live_limit == 104U));
+    if (!bounded.ok) {
+      REQUIRE(bounded.diagnostic.error.resource.has_value());
+      CHECK(bounded.diagnostic.error.resource->limit_kind ==
+            std::optional<ResourceLimitKind>{
+                ResourceLimitKind::max_live_evaluation_bytes});
+      if (live_limit == 55U) {
+        CHECK(bounded.diagnostic.error.resource->usage_before ==
+              std::optional<std::size_t>{24U});
+        CHECK(bounded.diagnostic.error.resource->requested_bytes ==
+              std::optional<std::size_t>{32U});
+      } else {
+        CHECK(bounded.diagnostic.error.resource->usage_before ==
+              std::optional<std::size_t>{56U});
+        CHECK(bounded.diagnostic.error.resource->requested_bytes ==
+              std::optional<std::size_t>{24U});
+      }
+      CHECK(bounded.scalar_kernel_invocations == 0U);
+    }
+    release_rewrite_evaluation_result(bounded);
+  }
+}
+
+TEST_CASE("FAN-012-ALLOCATION-ORDINALS") {
+  const std::array<std::size_t, 4> expected_work{
+      0U, 3U, 3U, 6U};
+  for (std::size_t ordinal = 0U; ordinal < 4U; ++ordinal) {
+    RewriteEvaluationResult result = evaluate_rewrite_source(
+        "fanout[iota[3] {inc[_]} {add[_ 10]}]",
+        RewriteEvaluationCreationData{
+            ExecutionProfile::trusted_local_v2, ResourceLimits{},
+            AllocationFailureInjection{ordinal}});
+    CAPTURE(ordinal);
+    REQUIRE_FALSE(result.ok);
+    REQUIRE(result.diagnostic.error.resource.has_value());
+    CHECK(result.diagnostic.error.resource->allocation_ordinal ==
+          std::optional<std::size_t>{ordinal});
+    CHECK(result.resources.reservation_ordinal == ordinal + 1U);
+    CHECK(result.resources.work_units == expected_work[ordinal]);
+    CHECK(result.resources.live_evaluation_bytes == 0U);
+    release_rewrite_evaluation_result(result);
+
+    CEmissionResult emitted = emit_c_source(
+        "fanout[iota[3] {inc[_]} {add[_ 10]}]",
+        EvaluationConfiguration{
+            ExecutionProfile::trusted_local_v2, ResourceLimits{},
+            AllocationFailureInjection{ordinal}});
+    REQUIRE(emitted.ok);
+    const std::string injected =
+        "0U, 0U, 0U, 1, " + std::to_string(ordinal) +
+        "U, BENNU_FAILURE_NONE";
+    CHECK(emitted.source.find(injected) != std::string::npos);
+  }
+
+  RewriteEvaluationResult no_later_ordinal = evaluate_rewrite_source(
+      "fanout[1 {iota[add[_ 1]]} {iota[add[_ 2]]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{1U}});
+  REQUIRE_FALSE(no_later_ordinal.ok);
+  CHECK(no_later_ordinal.resources.reservation_ordinal == 2U);
+  CHECK(no_later_ordinal.scalar_kernel_invocations == 1U);
+  release_rewrite_evaluation_result(no_later_ordinal);
+}
+
+TEST_CASE("FAN-013-PROVENANCE") {
+  const RewriteParseResult parsed =
+      parse_rewrite("fanout[1 {inc[_]}]");
+  REQUIRE(parsed.ok);
+  const RewriteFanout &fanout = parsed.program.fanouts[0];
+  const RewriteFanoutBranch &branch =
+      parsed.program.fanout_branches[fanout.first_branch];
+  CHECK(branch.span.begin.offset == 10U);
+  CHECK(branch.span.end.offset == 18U);
+  CHECK(branch.placeholder_span.begin.offset == 15U);
+  CHECK(branch.placeholder_span.end.offset == 16U);
+  CHECK(fanout.keyword_span.begin.offset == 1U);
+  CHECK(fanout.keyword_span.end.offset == 7U);
+  CHECK(fanout.operand_span.begin.offset == 8U);
+  CHECK(fanout.operand_span.end.offset == 9U);
+
+  RewriteEvaluationResult type = evaluate_rewrite_source(
+      "fanout[1 {inc[_]} {add[_ true]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE_FALSE(type.ok);
+  CHECK(type.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(type.diagnostic.error.location.column == 26U);
+  CHECK(span_is(type.diagnostic.primary, 26U, 1U, 26U, 30U, 1U,
+                30U));
+  CHECK(type.resources.owner.token == 0U);
+  release_rewrite_evaluation_result(type);
+
+  RewriteEvaluationResult placeholder = evaluate_rewrite_source(
+      "fanout[true {add[_ 1]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE_FALSE(placeholder.ok);
+  CHECK(placeholder.diagnostic.error.kind ==
+        ErrorKind::type_mismatch);
+  CHECK(span_is(placeholder.diagnostic.primary,
+                18U, 1U, 18U, 19U, 1U, 19U));
+  CHECK(placeholder.resources.owner.token == 0U);
+  release_rewrite_evaluation_result(placeholder);
+
+  const std::string_view spread_source =
+      "add fanout[1 {inc[_]} {add[_ 2]}]";
+  RewriteParseResult spread_parsed = parse_rewrite(spread_source);
+  REQUIRE(spread_parsed.ok);
+  REQUIRE(resolve_rewrite_primitives(spread_parsed.program).ok);
+  RewriteLoweringResult spread_lowered =
+      lower_rewrite_program(spread_parsed.program);
+  REQUIRE(spread_lowered.ok);
+  REQUIRE(spread_lowered.program.fanout_branch_spans.size() == 2U);
+  const RewriteFanout &spread_fanout =
+      spread_parsed.program.fanouts[0U];
+  for (std::size_t position = 0U; position < 2U; ++position) {
+    const RewriteSpan expected =
+        spread_parsed.program.fanout_branches[
+            spread_fanout.first_branch + position]
+            .span;
+    const RewriteSpan actual =
+        spread_lowered.program.fanout_branch_spans[position];
+    CHECK(actual.begin.offset == expected.begin.offset);
+    CHECK(actual.begin.line == expected.begin.line);
+    CHECK(actual.begin.column == expected.begin.column);
+    CHECK(actual.end.offset == expected.end.offset);
+    CHECK(actual.end.line == expected.end.line);
+    CHECK(actual.end.column == expected.end.column);
+  }
+
+  CEmissionResult spread_c = emit_c_source(spread_source);
+  REQUIRE(spread_c.ok);
+  const std::size_t spread_call =
+      spread_c.source.find("bennu_apply_spread(");
+  REQUIRE(spread_call != std::string::npos);
+  for (const RewriteSpan branch_span :
+       spread_lowered.program.fanout_branch_spans) {
+    std::string encoded_span;
+    append_source_span(encoded_span, branch_span);
+    CHECK(spread_c.source.find(encoded_span, spread_call) !=
+          std::string::npos);
+  }
+
+  RewriteEvaluationResult direct = evaluate_rewrite_source(
+      "inc[fanout[41 {inc[_]}]]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE_FALSE(direct.ok);
+  CHECK(direct.diagnostic.error.kind == ErrorKind::type_mismatch);
+  CHECK(span_is(direct.diagnostic.primary,
+                5U, 1U, 5U, 24U, 1U, 24U));
+  CHECK(span_is(direct.diagnostic.context,
+                1U, 1U, 1U, 25U, 1U, 25U));
+  release_rewrite_evaluation_result(direct);
+}
+
+TEST_CASE("FAN-014-NESTING-BOUNDARY") {
+  const RewriteParseResult parsed =
+      parse_rewrite("fanout[fanout[1 {inc[_]}] {inc[_]}]");
+  REQUIRE_FALSE(parsed.ok);
+  CHECK(parsed.diagnostic.error == RewriteParseError::nested_fanout);
+  CHECK(parsed.diagnostic.primary.begin.offset == 8U);
+
+  RewriteEvaluationResult siblings = evaluate_rewrite_source(
+      "fanout[1 {inc[_]}]\nfanout[2 {inc[_]}]",
+      RewriteEvaluationCreationData{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE(siblings.ok);
+  REQUIRE(siblings.formatted.size() == 2U);
+  CHECK(siblings.formatted[0] == "[2]");
+  CHECK(siblings.formatted[1] == "[3]");
+  release_rewrite_evaluation_result(siblings);
+}
+
+TEST_CASE("FAN-015-ATOMIC-OUTPUT") {
+  RunnerEvaluationResult result = evaluate_runner_source(
+      "fanout[iota[3] {inc[_]}]\n"
+      "fanout[9223372036854775807 {inc[_]}]",
+      {});
+  REQUIRE_FALSE(result.ok);
+  CHECK(result.values.empty());
+  CHECK(result.formatted.empty());
+  CHECK(result.error.kind == ErrorKind::domain_error);
+  CHECK(result.error.location.line == 2U);
+
+  ProgramResult public_program = evaluate_source(
+      "fanout[iota[3] {inc[_]}]\n"
+      "fanout[9223372036854775807 {inc[_]}]",
+      EvaluationConfiguration{
+          ExecutionProfile::trusted_local_v2, ResourceLimits{},
+          AllocationFailureInjection{}});
+  REQUIRE_FALSE(public_program.ok);
+  CHECK(public_program.values.empty());
+  CHECK(public_program.error.kind == ErrorKind::domain_error);
+
+  RunnerEvaluationResult formatted = evaluate_runner_source(
+      "fanout[1 {inc[_]}]\n"
+      "add fanout[2 {inc[_]} {add[_ 3]}]",
+      {});
+  REQUIRE(formatted.ok);
+  CHECK(formatted.formatted ==
+        std::vector<std::string>{"[2]", "8"});
+  CHECK(destroy_runner_evaluation_result(formatted));
+}
+
+TEST_CASE("FAN-017-REGRESSION-PLATFORMS") {
+  const std::array<std::pair<std::string_view, std::string_view>, 4>
+      ordinary{{
+          {"add[inc[1] 2]", "4"},
+          {"inc[(1 2 3)]", "(2 3 4)"},
+          {"[1 true (2 3)]", "[1 true (2 3)]"},
+          {"add [1 2]", "3"},
+      }};
+  for (const auto &[source, expected] : ordinary) {
+    CAPTURE(source);
+    ValueResult result = evaluate_expression(source);
+    REQUIRE(result.ok);
+    ValueFormattingResult formatted = format_value(result.value);
+    REQUIRE(formatted.ok);
+    CHECK(formatted.formatted == expected);
+    CHECK(destroy_value(result.value).ok);
+  }
+
+  CEmissionResult ordinary_c = emit_c_source("add[inc[1] 2]");
+  REQUIRE(ordinary_c.ok);
+  CHECK(ordinary_c.source.find("bennu_fanout(") !=
+        std::string::npos);
+  CHECK(ordinary_c.source.find("\"fanout\"") ==
+        std::string::npos);
 }
 
 } // namespace

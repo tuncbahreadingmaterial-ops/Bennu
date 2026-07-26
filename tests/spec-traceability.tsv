@@ -91,3 +91,27 @@ BENNU-SPEC-0006 sections 8.1 8.2 and 8.4 static one-level prefix expansion and o
 BENNU-SPEC-0006 sections 8.2 and 7.3 borrowed spread execution and transactional release|src/rewrite.cpp|TUP-011-SPREAD-RUNTIME
 BENNU-SPEC-0006 section 9 semantic argument provenance for literal and computed tuple elements|src/rewrite.cpp|TUP-013-PROVENANCE
 BENNU-SPEC-0006 sections 8 through 10 evaluator strict C11 and native prefix-spread agreement|tests/tuple_literal_contract.cmake|TUP-051-STRICT-C-NATIVE
+BENNU-SPEC-0007 sections 3 and 14 explicit fanout grammar and structural diagnostics|src/rewrite.cpp|FAN-001-GRAMMAR
+BENNU-SPEC-0007 section 4 placeholder scope count and owned-position rejection|src/rewrite.cpp|FAN-002-PLACEHOLDER
+BENNU-SPEC-0007 section 6 complete static validation before execution|src/rewrite.cpp|FAN-003-STATIC-ALL-BRANCHES
+BENNU-SPEC-0007 sections 5 and 6 operand-dependent type and branch order|src/rewrite.cpp|FAN-004-STATIC-TYPE-ORDER
+BENNU-SPEC-0007 sections 7 and 9 one operand owner and immutable borrows|src/rewrite.cpp|FAN-005-OPERAND-ONCE
+BENNU-SPEC-0007 sections 7.1 and 10 result table before branch work|src/rewrite.cpp|FAN-006-TABLE-BEFORE-BRANCH
+BENNU-SPEC-0007 section 7.2 sequential first dynamic failure|src/rewrite.cpp|FAN-007-SEQUENTIAL-FIRST-FAILURE
+BENNU-SPEC-0007 section 8 transactional transfer and cleanup|src/rewrite.cpp|FAN-008-TRANSFER-CLEANUP
+BENNU-SPEC-0007 sections 7.3 and 9 operand kinds and nested shape|src/rewrite.cpp|FAN-009-OPERAND-KINDS
+BENNU-SPEC-0007 section 9 one-level prefix spread and direct preservation|src/rewrite.cpp|FAN-010-SPREAD-DIRECT
+BENNU-SPEC-0007 section 10 deterministic profile-v2 events|src/rewrite.cpp|FAN-011-PROFILE-EVENTS
+BENNU-SPEC-0007 section 10.4 deterministic allocation ordinals|src/rewrite.cpp|FAN-012-ALLOCATION-ORDINALS
+BENNU-SPEC-0007 section 5 fanout branch and placeholder provenance|src/rewrite.cpp|FAN-013-PROVENANCE
+BENNU-SPEC-0007 section 12 lexical nesting boundary|src/rewrite.cpp|FAN-014-NESTING-BOUNDARY
+BENNU-SPEC-0007 section 11 atomic program publication|src/rewrite.cpp|FAN-015-ATOMIC-OUTPUT
+BENNU-SPEC-0007 section 15 strict C11 and native backend agreement|tests/fanout_contract.cmake|FAN-016-STRICT-C-NATIVE
+BENNU-SPEC-0007 section 13 unchanged ordinary scalar vector tuple calls|src/rewrite.cpp|FAN-017-REGRESSION-PLATFORMS
+BENNU-SPEC-0007 section 17 public CLI strict C11 and native journeys|tests/fanout_contract.cmake|FAN-016-STRICT-C-NATIVE
+BENNU-SPEC-0007 section 6 run emit-c and build static winner atomicity|tests/fanout_contract.cmake|FAN-003-STATIC-ALL-BRANCHES-CLI
+BENNU-SPEC-0007 sections 7 and 9 generated C same-address operand borrows|tests/fanout_contract.cmake|FAN-005-OPERAND-IDENTITY-C
+BENNU-SPEC-0007 section 8 emitted C and native reverse prefix cleanup|tests/fanout_contract.cmake|FAN-008-TRANSFER-CLEANUP-NATIVE
+BENNU-SPEC-0007 section 10 generated C exact work live and reservation snapshots|tests/fanout_contract.cmake|FAN-011-PROFILE-EVENTS-C
+BENNU-SPEC-0007 section 10.4 generated C operand table and each branch allocation fault|tests/fanout_contract.cmake|FAN-012-ALLOCATION-ORDINALS-C
+BENNU-SPEC-0007 section 11 evaluator emitted C and native later-root zero stdout|tests/fanout_contract.cmake|FAN-015-ATOMIC-OUTPUT-NATIVE
