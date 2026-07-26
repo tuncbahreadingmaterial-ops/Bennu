@@ -192,12 +192,13 @@ rounding, trap, flush-to-zero, excess-precision, or NaN-payload behavior.
 ## Version and release provenance
 
 The tracked root `VERSION` file is the sole product-version input. The current
-source is the stable v0.2.0 release candidate and identifies itself as `0.2.0`;
-`bennu --version` prints exactly `bennu 0.2.0` followed by one newline. CMake
+source is the stable v0.3.0 release candidate and identifies itself as `0.3.0`;
+`bennu --version` prints exactly `bennu 0.3.0` followed by one newline. CMake
 rejects non-canonical or non-SemVer VERSION bytes and generates the private C++
 version header, build identity, and Windows PE version resource from that value.
-VERSION does not authorize a release or publication. At this stage, no v0.2.0
-tag or release has been created.
+VERSION does not authorize a release or publication. The published `v0.1.0` and
+`v0.2.0` tags and releases remain immutable historical artifacts. At this
+release-candidate stage, no `v0.3.0` tag or release has been created.
 
 The future-release workflow supports an unprivileged three-target dry run at an
 explicit source ref. Production additionally requires all of the following:
@@ -296,7 +297,7 @@ $info=(Get-Item $exe).VersionInfo
 if ($info.ProductName -cne "Bennu" -or $info.ProductVersion -cne $version -or $info.FileVersion -cne $version -or $info.OriginalFilename -cne "bennu.exe") { throw "PE identity mismatch" }
 ```
 
-## Platforms and historical release
+## Platforms and historical releases
 
 The supported CI targets are Ubuntu 24.04 LTS x64, Windows 11 x64 or newer, and
 macOS arm64. The Linux package compatibility floor is glibc 2.39 or newer on a
@@ -315,3 +316,7 @@ v0.1.0 predates this contract, does not support the new version/provenance
 contract, and is explicitly rejected by the generic future-release flow. It
 remains available exactly as published; this document describes the current
 source tree rather than retroactively changing or republishing that release.
+
+The published `v0.2.0` tag, release metadata, and assets are likewise immutable
+historical artifacts and remain available exactly as published. Preparing the
+`v0.3.0` candidate does not modify or republish either historical release.
